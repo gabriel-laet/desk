@@ -1,0 +1,11 @@
+{
+  "target_channel": 2,
+  "hhkb_vendor_id": 1278,
+  "hhkb_product_id": 22,
+  "poll_interval_s": 0.5,
+  "absent_polls_required": 4,
+  "sleep_gap_s": 3.0,
+  "switch_retries": 8,
+  "switch_retry_delay_s": 0.6,
+  "mxswitch": "~/.local/bin/mxswitch"
+}
