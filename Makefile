@@ -23,7 +23,7 @@ install: mxswitch
 ifeq ($(UNAME),Darwin)
 	install -m 755 mxswitch $(BINDIR)/mxswitch
 else
-	install -m 755 linux/mxswitch.sh $(BINDIR)/mxswitch
+	install -m 755 linux/mxswitch.py $(BINDIR)/mxswitch
 endif
 	@if [ ! -f $(CONFDIR)/config.json ]; then \
 		sed 's#"mxswitch": .*#"mxswitch": "$(BINDIR)/mxswitch"#' \
