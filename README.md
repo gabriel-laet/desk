@@ -71,10 +71,11 @@ Set `target_channel` to the Easy-Switch slot of the *other* machine (2 if this M
 
 ```bash
 make install
-# installs the bash mxswitch + the watcher
+# installs the Python mxswitch + the watcher
 
 sudo cp linux/42-logitech-hidpp.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG input "$USER"   # then log out/in once
 
 # edit ~/.config/hhkb-mx-follow/config.json
 #   target_channel: 1          # the Mac
@@ -86,7 +87,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now hhkb-mx-follow.service
 ```
 
-`linux/hhkb-mx-follow.service` expects the clone at `~/.local/share/hhkb-mx-follow`. Either put it there or change `ExecStart`.
+The user unit is `WantedBy=graphical-session.target`, so it starts at login with Hyprland/Omarchy. Binaries live in `~/.local/bin`; keep the clone at `~/.local/share/hhkb-mx-follow` if you want `git pull && make install` updates.
 
 ## Commands
 
