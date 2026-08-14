@@ -14,7 +14,7 @@ mxswitch: macos/mxswitch.c
 	codesign -s - mxswitch
 else
 mxswitch:
-	@echo "Linux uses linux/mxswitch.sh; nothing to compile."
+	@echo "Linux uses linux/mxswitch.py; nothing to compile."
 endif
 
 install: mxswitch
