@@ -1,0 +1,36 @@
+{
+  // Copy or merge these keys into ~/.config/omarchy/extensions/omarchy-menu.jsonc
+  // (JSONC: whole-line // comments only). Dotted ids place rows under Trigger.
+  //
+  // IDs are object keys. Reuse an existing id to override that row.
+  // `when` is a bash condition; DualUp rows hide when lgdualup is missing.
+
+  "trigger.desk-switch": {"icon": "󰍺", "label": "Desk switch"},
+  "trigger.desk-switch.status": {
+    "icon": "󰋼",
+    "label": "Status",
+    "action": "omarchy-launch-or-focus-tui \"zsh -c 'desk-switch status; read -k 1'\""
+  },
+  "trigger.desk-switch.mac": {
+    "icon": "󰀵",
+    "label": "Switch to Mac",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch to mac'"
+  },
+  "trigger.desk-switch.linux": {
+    "icon": "󰣇",
+    "label": "Switch to Linux",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch to linux'"
+  },
+  "trigger.desk-switch.full": {
+    "icon": "󰍹",
+    "label": "DualUp Full",
+    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\"",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch full'"
+  },
+  "trigger.desk-switch.pbp": {
+    "icon": "󰍺",
+    "label": "DualUp PBP",
+    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\"",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch pbp'"
+  }
+}

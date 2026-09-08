@@ -1,5 +1,5 @@
 [Unit]
-Description=HHKB Studio follow — push MX Master when the keyboard leaves
+Description=desk-switch / HHKB Studio follow — push MX Master when the keyboard leaves
 After=graphical-session.target
 PartOf=graphical-session.target
 
