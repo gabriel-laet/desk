@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+
+
 import os
 import subprocess
 import sys
@@ -123,13 +125,18 @@ class CliTests(unittest.TestCase):
     def test_full_without_lgdualup_is_noop(self) -> None:
         env = os.environ.copy()
         env["PATH"] = "/usr/bin:/bin"
-        env["HOME"] = tempfile.mkdtemp()
-        proc = subprocess.run(
-            [sys.executable, str(ROOT / "desk-switch.py"), "full"],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env["HOME"] = str(home)
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(json.dumps({"lgdualup": "lgdualup-missing"}))
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "full"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("lgdualup not on PATH", proc.stdout)
 
@@ -142,7 +149,12 @@ class CliTests(unittest.TestCase):
             cfg_dir = home / ".config" / "desk-switch"
             cfg_dir.mkdir(parents=True)
             (cfg_dir / "config.json").write_text(
-                json.dumps({"this_host": "linux", "target_channel": 1, "mxswitch": "/no/such/mxswitch"})
+                json.dumps({
+                    "this_host": "linux",
+                    "target_channel": 1,
+                    "mxswitch": "/no/such/mxswitch",
+                    "lgdualup": "lgdualup-missing",
+                })
             )
             hint = subprocess.run(
                 [sys.executable, str(ROOT / "desk-switch.py"), "status", "--hint"],
