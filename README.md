@@ -59,6 +59,22 @@ to Bluetooth on the other machine, the Mac may still enumerate a USB keyboard
 collection. The watcher then never fires. Use Bluetooth on both hosts and treat
 USB as charging only, or unplug when you hop.
 
+## DualUp monitor control
+
+`lgdualup` ships **in this repo** (same `make install` as the mouse tools):
+
+- macOS: builds `macos/lgdualup.c` → `~/.local/bin/lgdualup`
+- Linux: installs `linux/lgdualup.sh` → `~/.local/bin/lgdualup` (needs `linux/43-lg-dualup.rules` for hidraw)
+
+```bash
+lgdualup --info
+lgdualup --list
+lgdualup input usbc   # or dp / hdmi1 / …
+lgdualup pbp on|off|1|2|3|5
+```
+
+`desk-switch to mac|linux` calls `lgdualup` automatically when configured.
+
 ## Install
 
 ```bash

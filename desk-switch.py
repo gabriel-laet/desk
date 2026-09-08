@@ -2,7 +2,7 @@
 """Desk switch: send the MX Master (and optionally an LG DualUp) to another host.
 
 Mouse hop still follows the HHKB Studio leaving this machine. DualUp input/PBP
-is an optional extra that shells out to `lgdualup` on PATH — this repo does not
+shells out to `lgdualup` (built and installed by `make install` from macos/lgdualup.c / linux/lgdualup.sh). Older installs may still
 ship that binary or invent DDC codes.
 
     desk-switch status
@@ -356,7 +356,7 @@ def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
         return 0
     path = lgdualup_path(cfg)
     if path is None:
-        print("lgdualup not on PATH — leaving DualUp input alone (optional dependency)")
+        print("lgdualup not on PATH — run `make install` (DualUp helper ships in this repo)")
         return 0
     spec = (cfg.get("hosts") or {}).get(normalize_host(host), {})
     name = str(spec.get("dualup_input") or "").strip()
@@ -366,7 +366,7 @@ def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
         rc = call_lgdualup(
             cfg,
             ["input", name],
-            missing="lgdualup not on PATH — leaving DualUp input alone",
+            missing="lgdualup not on PATH — run `make install`",
         )
     else:
         print(f"no dualup_input configured for {host} — leaving DualUp input alone")
@@ -378,7 +378,7 @@ def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
             pbp_rc = call_lgdualup(
                 cfg,
                 ["pbp", mode],
-                missing="lgdualup not on PATH — leaving DualUp PBP alone",
+                missing="lgdualup not on PATH — run `make install`",
             )
             rc = rc or pbp_rc
     return rc
@@ -412,7 +412,7 @@ def cmd_pbp(cfg: dict, mode: str | None) -> int:
     return call_lgdualup(
         cfg,
         ["pbp", chosen],
-        missing="lgdualup not on PATH — DualUp PBP is a no-op (optional dependency)",
+        missing="lgdualup not on PATH — DualUp PBP needs `make install`",
     )
 
 
@@ -420,7 +420,7 @@ def cmd_full(cfg: dict) -> int:
     return call_lgdualup(
         cfg,
         ["pbp", "full"],
-        missing="lgdualup not on PATH — DualUp full is a no-op (optional dependency)",
+        missing="lgdualup not on PATH — DualUp full needs `make install`",
     )
 
 
@@ -479,7 +479,7 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False) -> 
         for line in (state["dualup_info"] or "(no output)").splitlines():
             print(f"  {line}")
     else:
-        print("lgdualup      : not on PATH (optional DualUp helper)")
+        print("lgdualup      : not on PATH (run make install)")
     return 0
 
 
