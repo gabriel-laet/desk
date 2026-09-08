@@ -1,5 +1,6 @@
 {
   "target_channel": 2,
+  "this_host": "mac",
   "hhkb_vendor_id": 1278,
   "hhkb_product_id": 22,
   "poll_interval_s": 0.5,
@@ -7,5 +8,19 @@
   "sleep_gap_s": 3.0,
   "switch_retries": 8,
   "switch_retry_delay_s": 0.6,
-  "mxswitch": "~/.local/bin/mxswitch"
+  "mxswitch": "~/.local/bin/mxswitch",
+  "lgdualup": "lgdualup",
+  "switch_monitor": true,
+  "switch_pbp": false,
+  "pbp_mode": "50-50",
+  "hosts": {
+    "mac": {
+      "channel": 1,
+      "dualup_input": ""
+    },
+    "linux": {
+      "channel": 2,
+      "dualup_input": ""
+    }
+  }
 }
