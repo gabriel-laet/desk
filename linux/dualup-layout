@@ -29,6 +29,7 @@ from pathlib import Path
 
 FULL_RES = "2880x2560"
 PBP_RES_CANDIDATES = ("2560x1440", "1920x1080", "1080x1920")
+PBP_EXCLUDE = {"2880x2560", "2560x2880"}
 TILT_DEGREE = 270
 DUALUP_MARKERS = (
     "2880x2560",
@@ -98,18 +99,55 @@ def mode_offered(mon: dict, res: str) -> bool | None:
     return any(res in str(item) for item in modes)
 
 
-def pick_res(mode: str, mon: dict, requested: str) -> str | None:
-    candidates = (requested,) if requested else ((FULL_RES,) if mode == "full" else PBP_RES_CANDIDATES)
-    saw_list = False
-    for res in candidates:
-        offered = mode_offered(mon, res)
-        if offered is None:
+def listed_mode_keys(mon: dict) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for item in available_modes(mon):
+        match = re.search(r"(\d{3,5})x(\d{3,5})", str(item))
+        if not match:
             continue
-        saw_list = True
-        if offered:
-            return res
-    if not saw_list:
-        return requested or (FULL_RES if mode == "full" else PBP_RES_CANDIDATES[0])
+        key = f"{match.group(1)}x{match.group(2)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def best_landscape(mon: dict) -> str | None:
+    """Prefer known PBP sizes, else the largest landscape mode EDID lists."""
+    landscapes: list[tuple[int, int, str]] = []
+    for key in listed_mode_keys(mon):
+        width_s, height_s = key.split("x", 1)
+        width, height = int(width_s), int(height_s)
+        if width > height and key not in PBP_EXCLUDE:
+            landscapes.append((width, height, key))
+    if not landscapes:
+        return None
+    keys = {key for _w, _h, key in landscapes}
+    for pref in PBP_RES_CANDIDATES:
+        if pref in keys:
+            return pref
+    _w, _h, key = max(landscapes, key=lambda item: item[0] * item[1])
+    return key
+
+
+def pick_res(mode: str, mon: dict, requested: str) -> str | None:
+    if requested:
+        offered = mode_offered(mon, requested)
+        if offered is False:
+            return None
+        return requested
+    if mode == "full":
+        offered = mode_offered(mon, FULL_RES)
+        if offered is False:
+            return None
+        return FULL_RES
+    picked = best_landscape(mon)
+    if picked:
+        return picked
+    if not available_modes(mon):
+        return PBP_RES_CANDIDATES[0]
     return None
 
 

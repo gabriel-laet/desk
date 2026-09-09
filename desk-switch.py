@@ -42,8 +42,11 @@ SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
 VERSION = "1.3.0"
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
-PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}
+PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
 PBP_INPUT_ORDER = ("linux", "mac")  # secondary first, primary last
+LAYOUT_DEFAULT_RETRIES = 16  # EDID after PBP+inputs can lag several seconds
+LAYOUT_DEFAULT_DELAY_S = 0.5
+LAYOUT_DEFAULT_SETTLE_S = 0.5
 HHKB_VID_DEFAULT = 0x04FE
 HHKB_PID_DEFAULT = 0x0016
 HOST_ALIASES = {
@@ -187,8 +190,15 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         cfg["_dualup_display_id"] = str(dual["display_id"])
     if dual.get("peer"):
         cfg["_dualup_peer"] = str(dual["peer"])
-    cfg["_dualup_layout_retries"] = as_int(dual.get("layout_retries"), 8)
-    cfg["_dualup_layout_retry_delay_s"] = float(dual.get("layout_retry_delay_s") or 0.5)
+    cfg["_dualup_layout_retries"] = as_int(dual.get("layout_retries"), LAYOUT_DEFAULT_RETRIES)
+    raw_delay = dual.get("layout_retry_delay_s")
+    cfg["_dualup_layout_retry_delay_s"] = float(
+        LAYOUT_DEFAULT_DELAY_S if raw_delay is None else raw_delay
+    )
+    raw_settle = dual.get("layout_settle_s")
+    cfg["_dualup_layout_settle_s"] = float(
+        LAYOUT_DEFAULT_SETTLE_S if raw_settle is None else raw_settle
+    )
     return cfg
 
 
@@ -503,10 +513,13 @@ def apply_dualup_layout(cfg: dict, mode: str) -> int:
     display_id = str(
         cfg.get("_dualup_display_id") or adapters.get("display_id") or ""
     ).strip()
-    retries = as_int(cfg.get("_dualup_layout_retries", adapters.get("layout_retries")), 8)
+    retries = as_int(
+        cfg.get("_dualup_layout_retries", adapters.get("layout_retries")),
+        LAYOUT_DEFAULT_RETRIES,
+    )
     raw_delay = cfg.get("_dualup_layout_retry_delay_s")
     if raw_delay is None:
-        raw_delay = adapters.get("layout_retry_delay_s", 0.5)
+        raw_delay = adapters.get("layout_retry_delay_s", LAYOUT_DEFAULT_DELAY_S)
     delay = float(raw_delay)
     verb = layout_verb(mode)
     cmd = [str(path), verb]
@@ -594,6 +607,13 @@ def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
         return rc
     if verb == "pbp":
         rc = rc or dualup_assign_pbp_inputs(cfg)
+        adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+        raw_settle = cfg.get("_dualup_layout_settle_s")
+        if raw_settle is None:
+            raw_settle = adapters.get("layout_settle_s", LAYOUT_DEFAULT_SETTLE_S)
+        settle = float(raw_settle)
+        if settle > 0:
+            time.sleep(settle)
     layout_rc = apply_dualup_layout(cfg, chosen)
     apply_peer_layout(cfg, chosen)
     return rc or layout_rc

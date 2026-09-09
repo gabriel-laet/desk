@@ -208,7 +208,7 @@ class AdapterConfigTests(unittest.TestCase):
                             },
                             "dualup": {
                                 "enabled": True,
-                                "inputs": {"mac": "usbc", "linux": "dp"},
+                                "inputs": {"mac": "hdmi1", "linux": "dp"},
                             },
                         }
                     }
@@ -221,7 +221,7 @@ class AdapterConfigTests(unittest.TestCase):
         self.assertEqual(cfg["this_host"], "linux")
         self.assertEqual(cfg["target_channel"], 3)
         self.assertEqual(cfg["hosts"]["linux"]["channel"], 3)
-        self.assertEqual(cfg["hosts"]["mac"]["dualup_input"], "usbc")
+        self.assertEqual(cfg["hosts"]["mac"]["dualup_input"], "hdmi1")
         self.assertEqual(cfg["hosts"]["linux"]["dualup_input"], "dp")
         self.assertEqual(cfg["mxswitch"], "/opt/mxswitch")
         self.assertTrue(cfg["_mouse_enabled"])
@@ -474,6 +474,13 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         layout.assert_not_called()
 
+    def test_example_config_is_hdmi1_and_dp(self) -> None:
+        example = json.loads((ROOT / "config.example.json").read_text())
+        inputs = example["adapters"]["dualup"]["inputs"]
+        self.assertEqual(inputs["mac"], "hdmi1")
+        self.assertEqual(inputs["linux"], "dp")
+        self.assertNotEqual(inputs["mac"], "usbc")
+
     def test_display_id_from_adapter_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "cfg.json"
@@ -565,6 +572,28 @@ class DualupLayoutScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("res:2560x1440 degree:270", proc.stdout)
         self.assertNotIn("degree:0", proc.stdout)
+
+    def test_macos_pbp_falls_back_to_best_landscape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            placer = bin_dir / "displayplacer"
+            placer.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = list ]; then\n"
+                "cat <<'EOF'\n"
+                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
+                "Type: 28 inch external screen\n"
+                "  mode 0: res:1600x900 hz:60\n"
+                "  mode 1: res:1280x720 hz:60\n"
+                "EOF\n"
+                "exit 0\n"
+                "fi\n"
+                "echo \"applied:$*\"\n"
+            )
+            placer.chmod(0o755)
+            proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("res:1600x900 degree:270", proc.stdout)
 
     def test_macos_pbp_falls_back_to_1920x1080_at_270(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

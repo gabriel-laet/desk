@@ -280,10 +280,12 @@ desk-switch --version
 mouse + monitor together.
 
 `pbp` / `full` no-op with a message if the dualup adapter is missing. After
-a successful USB toggle, `pbp` assigns the input pair (Linux `dp` first,
-then Mac `hdmi1`) and both commands apply OS layout. Layout retries for a
-few seconds while EDID catches up. Set `adapters.dualup.peer` to SSH
-layout-only to the other machine.
+a successful USB toggle, `pbp` assigns the cabling pair (Linux DisplayPort
+`dp` first, then Mac Studio `hdmi1`) and both commands apply OS layout.
+After inputs settle, layout retries ~8s while EDID catches up. PBP does
+not require `2560x1440`: it uses that size at 270° when offered, otherwise
+the best landscape mode (often `1920x1080 @ 270°`). Set
+`adapters.dualup.peer` to SSH layout-only to the other machine.
 
 Compat: `hhkb-mx-follow` is the same CLI. `mxswitch` / `lgdualup` on PATH
 exec the private helpers.
@@ -334,9 +336,13 @@ PBP on `to mac|linux` stays off unless `switch_pbp` is true or a host entry
 has `"pbp": "…"`. `desk-switch full` / `pbp` always run the dualup adapter
 when the USB helper exists.
 
+Desk cabling: Mac Studio = **HDMI1**, Omarchy/Linux = **DisplayPort (`dp`)**.
+Do not set Mac to `usbc`.
+
 The panel is physically tilted. **full** is `2880x2560 @ 270°`. **PBP** is
-the same tilt (not landscape): prefer `2560x1440 @ 270°`, else
-`1920x1080 @ 270°` (on-screen `1080x1920`). macOS needs
+the same tilt (not `degree:0`): prefer `2560x1440 @ 270°`, else the best
+landscape EDID mode — commonly `1920x1080 @ 270°` (on-screen `1080x1920`).
+macOS needs
 [displayplacer](https://github.com/jakehilborn/displayplacer)
 (`brew install jakehilborn/jakehilborn/displayplacer`). Linux uses `hyprctl`.
 

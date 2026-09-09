@@ -27,6 +27,8 @@ import sys
 
 FULL_RES = "2880x2560"
 PBP_RES_CANDIDATES = ("2560x1440", "1920x1080", "1080x1920")
+PBP_EXCLUDE = {"2880x2560", "2560x2880"}
+RES_RE = re.compile(r"(?:res:)?(\d{3,5})x(\d{3,5})")
 TILT_DEGREE = 270
 DUALUP_MARKERS = (
     "2880x2560",
@@ -86,15 +88,42 @@ def mode_offered(text: str, res: str) -> bool:
     return bool(re.search(rf"\b{re.escape(res)}\b", text))
 
 
+def listed_modes(text: str) -> list[tuple[int, int, str]]:
+    found: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for match in RES_RE.finditer(text):
+        width, height = int(match.group(1)), int(match.group(2))
+        key = f"{width}x{height}"
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append((width, height, key))
+    return found
+
+
+def best_landscape(text: str) -> str | None:
+    """Prefer known PBP sizes, else the largest landscape mode EDID lists."""
+    landscapes = [
+        (w, h, key)
+        for w, h, key in listed_modes(text)
+        if w > h and key not in PBP_EXCLUDE
+    ]
+    if not landscapes:
+        return None
+    keys = {key for _w, _h, key in landscapes}
+    for pref in PBP_RES_CANDIDATES:
+        if pref in keys:
+            return pref
+    _w, _h, key = max(landscapes, key=lambda item: item[0] * item[1])
+    return key
+
+
 def pick_res(mode: str, text: str, requested: str) -> str | None:
     if requested:
         return requested if mode_offered(text, requested) else None
     if mode == "full":
         return FULL_RES if mode_offered(text, FULL_RES) else None
-    for res in PBP_RES_CANDIDATES:
-        if mode_offered(text, res):
-            return res
-    return None
+    return best_landscape(text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
 
     res = pick_res(args.mode, text, args.res.strip())
     if not res:
-        want = args.res.strip() or (FULL_RES if args.mode == "full" else " / ".join(PBP_RES_CANDIDATES))
+        want = args.res.strip() or (FULL_RES if args.mode == "full" else "a landscape PBP mode")
         print(f"dualup-layout: {want} not in EDID yet", file=sys.stderr)
         return 2
 
