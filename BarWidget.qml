@@ -7,8 +7,8 @@ BarWidget {
   id: root
   moduleName: "glaet.desk-switch"
 
-  property string hint: "?"
-  property string barLabel: "?"
+  property string hint: ""
+  property string barLabel: "desk"
   property string barTooltip: "Desk switch"
   property bool dualUpAvailable: false
   property string lastStatus: ""
@@ -66,8 +66,8 @@ BarWidget {
   function applyStatus(text) {
     const raw = String(text || "").trim()
     root.lastStatus = raw
-    let hint = "?"
-    let label = "?"
+    let hint = ""
+    let label = "desk"
     let tooltip = "Desk switch"
     let dual = false
     let transport = "absent"
@@ -99,17 +99,17 @@ BarWidget {
         host = String(data.mouse_host || "")
         mode = String(data.dualup_mode || "unknown")
       } catch (err) {
-        hint = "?"
-        label = "?"
+        hint = ""
+        label = "desk"
       }
     } else if (raw.length > 0) {
       hint = raw.split(/\s+/)[0]
       label = raw
     }
-    if (["MAC", "LNX", "?"].indexOf(hint) === -1)
-      hint = "?"
+    if (["MAC", "LNX"].indexOf(hint) === -1)
+      hint = ""
     if (!label || label === "?")
-      label = (hint === "?" ? "" : hint)
+      label = hint
     if (!label)
       label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")
     root.hint = hint
@@ -154,7 +154,7 @@ BarWidget {
 
   Process {
     id: statusProc
-    command: ["bash", "-lc", "export PATH=\"$HOME/.local/bin:$PATH\"; if command -v desk-switch >/dev/null; then desk-switch status --json; elif command -v hhkb-mx-follow >/dev/null; then hhkb-mx-follow status --json; else echo '{\"target_hint\":\"?\",\"bar_label\":\"?\",\"lgdualup\":false}'; fi"]
+    command: ["bash", "-lc", "export PATH=\"$HOME/.local/bin:$PATH\"; if command -v desk-switch >/dev/null; then desk-switch status --json; elif command -v hhkb-mx-follow >/dev/null; then hhkb-mx-follow status --json; else echo '{\"target_hint\":\"\",\"bar_label\":\"desk\",\"lgdualup\":false}'; fi"]
     stdout: StdioCollector {
       onStreamFinished: root.applyStatus(this.text)
     }

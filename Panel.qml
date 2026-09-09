@@ -10,8 +10,8 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
-  property string hint: "?"
-  property string barLabel: "?"
+  property string hint: ""
+  property string barLabel: "desk"
   property bool dualUpAvailable: false
   property string lastStatus: ""
   property string hhkbTransport: "absent"
@@ -136,7 +136,7 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Desk → " + root.hint
+          text: "Desk → " + (root.hint || (root.dualupMode === "pbp" ? "PBP" : (root.dualupMode === "full" ? "FULL" : "desk")))
           color: root.barForeground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.subtitle

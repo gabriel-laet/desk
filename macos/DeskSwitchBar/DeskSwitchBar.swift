@@ -22,12 +22,12 @@ struct DeskSwitchBarApp: App {
 }
 
 final class DeskSwitchModel: ObservableObject {
-    @Published var hint = "?"
-    @Published var barLabel = "?"
+    @Published var hint = ""
+    @Published var barLabel = "desk"
     @Published var summary = "Refresh to probe HHKB / MX / DualUp"
-    @Published var hhkbLine = "HHKB  ?"
-    @Published var mouseLine = "MX  ?"
-    @Published var dualLine = "DU  ?"
+    @Published var hhkbLine = "HHKB  …"
+    @Published var mouseLine = "MX  …"
+    @Published var dualLine = "DU  …"
     @Published var peerLine = ""
     @Published var dualUpAvailable = false
     @Published var lastLine = ""
@@ -63,12 +63,12 @@ final class DeskSwitchModel: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.hint = "?"
-                    self.barLabel = "?"
+                    self.hint = ""
+                    self.barLabel = "desk"
                     self.summary = error.localizedDescription
-                    self.hhkbLine = "HHKB  ?"
-                    self.mouseLine = "MX  ?"
-                    self.dualLine = "DU  ?"
+                    self.hhkbLine = "HHKB  …"
+                    self.mouseLine = "MX  …"
+                    self.dualLine = "DU  …"
                     self.peerLine = ""
                     self.dualUpAvailable = false
                 }
@@ -100,7 +100,7 @@ struct DeskPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Desk → \(model.hint)")
+            Text("Desk → \(model.hint.isEmpty ? model.barLabel : model.hint)")
                 .font(.system(size: 13, weight: .semibold))
             Text(model.barLabel)
                 .font(.system(size: 11, design: .monospaced))
@@ -268,12 +268,12 @@ enum DeskSwitchCLI {
 }
 
 struct StatusSnapshot {
-    var hint = "?"
-    var barLabel = "?"
+    var hint = ""
+    var barLabel = "desk"
     var summary = "Refresh to probe HHKB / MX / DualUp"
-    var hhkbLine = "HHKB  ?"
-    var mouseLine = "MX  ?"
-    var dualLine = "DU  ?"
+    var hhkbLine = "HHKB  …"
+    var mouseLine = "MX  …"
+    var dualLine = "DU  …"
     var peerLine = ""
     var dualUpAvailable = false
 
@@ -290,20 +290,22 @@ struct StatusSnapshot {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             let first = text.split(whereSeparator: { $0.isWhitespace }).first
-            let hint = ["MAC", "LNX", "?"].contains(first.map(String.init) ?? "") ? String(first!) : "?"
-            return StatusSnapshot(hint: hint, barLabel: hint, summary: text.isEmpty ? "Refresh to probe HHKB / MX / DualUp" : text)
+            let hint = ["MAC", "LNX"].contains(first.map(String.init) ?? "") ? String(first!) : ""
+            return StatusSnapshot(hint: hint, barLabel: hint.isEmpty ? "desk" : hint, summary: text.isEmpty ? "Refresh to probe HHKB / MX / DualUp" : text)
         }
 
-        var hint = String(describing: obj["target_hint"] ?? "?")
-        if !["MAC", "LNX", "?"].contains(hint) {
-            hint = "?"
+        var hint = String(describing: obj["target_hint"] ?? "")
+        if !["MAC", "LNX"].contains(hint) {
+            hint = ""
         }
 
         let barLabel: String
-        if let label = obj["bar_label"] as? String, !label.isEmpty {
+        if let label = obj["bar_label"] as? String, !label.isEmpty, label != "?" {
             barLabel = label
-        } else {
+        } else if !hint.isEmpty {
             barLabel = hint
+        } else {
+            barLabel = "desk"
         }
 
         let usb = obj["hhkb_usb"] as? Bool ?? false

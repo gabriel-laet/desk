@@ -34,7 +34,8 @@ import sys
 
 FULL_RES = "2880x2560"
 FULL_EDID = ("2880x2560", "2560x2880")
-PBP_RES = "2880x1280"
+PBP_APPLY_RES = "2880x1280"
+PBP_RES = PBP_APPLY_RES
 PBP_EDID = ("2880x1280", "1280x2880")
 RES_RE = re.compile(r"(?:res:)?(\d{3,5})x(\d{3,5})")
 TILT_DEGREE = 270
