@@ -14,7 +14,7 @@
  * Usage:
  *     ./lgdualup --info
  *     ./lgdualup input usbc|dp|dp1|dp2|hdmi1|hdmi2
- *     ./lgdualup pbp on|off|1|2|3|5
+ *     ./lgdualup pbp on|off|full|50-50|1|2|3|5
  */
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -198,12 +198,12 @@ static int parse_input(const char *s, uint16_t *out) {
 
 static int parse_pbp(const char *s, uint16_t *out) {
     if (!strcasecmp(s, "off") || !strcasecmp(s, "none") ||
-        !strcasecmp(s, "solo")) {
+        !strcasecmp(s, "solo") || !strcasecmp(s, "full")) {
         *out = 0x01;
         return 1;
     }
     if (!strcasecmp(s, "on") || !strcasecmp(s, "50") ||
-        !strcasecmp(s, "50/50")) {
+        !strcasecmp(s, "50/50") || !strcasecmp(s, "50-50")) {
         *out = 0x05;
         return 1;
     }
