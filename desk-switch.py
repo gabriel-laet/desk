@@ -19,7 +19,7 @@ Helpers live under `~/.local/lib/desk-switch/` after `make install`.
     desk-switch switch mac        # same as: to mac
     desk-switch pbp <mode>
     desk-switch full
-    desk-switch watch
+    desk-switch watch              # HHKB leave → mouse away; USB appear → desk here
     desk-switch watch --dry-run
 
 `hhkb-mx-follow` is the legacy command name for the same program.
@@ -40,7 +40,7 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
 PBP_INPUT_ORDER = ("linux", "mac")  # secondary first, primary last
@@ -49,6 +49,13 @@ LAYOUT_DEFAULT_DELAY_S = 0.5
 LAYOUT_DEFAULT_SETTLE_S = 0.5
 HHKB_VID_DEFAULT = 0x04FE
 HHKB_PID_DEFAULT = 0x0016
+HHKB_NAME_RE = re.compile(r"HHKB", re.I)
+HID_BUS_USB = 0x0003
+HID_BUS_BLUETOOTH = 0x0005
+MOUSE_CACHE_TTL_S = 24 * 3600  # last-known channel until contradicted (wake lag / other host)
+PEER_CACHE_TTL_S = 20.0
+HID_DEVICES_DIR = Path("/sys/bus/hid/devices")
+USB_DEVICES_DIR = Path("/sys/bus/usb/devices")
 HOST_ALIASES = {
     "mac": "mac",
     "macos": "mac",
@@ -110,6 +117,7 @@ def load_config() -> dict:
         "switch_monitor": True,
         "switch_pbp": False,
         "pbp_mode": "50-50",
+        "follow_hhkb_usb": True,
         "hosts": {
             "mac": {"channel": 1},
             "linux": {"channel": 2},
@@ -173,6 +181,12 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         cfg["this_host"] = hosts_ad["this_host"]
     if hosts_ad.get("follow_channel") is not None:
         cfg["target_channel"] = hosts_ad["follow_channel"]
+    if hosts_ad.get("peer"):
+        cfg["_peer"] = str(hosts_ad["peer"])
+    follow_usb = user.get("follow_hhkb_usb")
+    if follow_usb is None:
+        follow_usb = hosts_ad.get("follow_hhkb_usb")
+    cfg["follow_hhkb_usb"] = True if follow_usb is None else bool(follow_usb)
 
     cfg["_dualup_enabled"] = bool(dual.get("enabled", True))
     cfg["_dualup_layout"] = bool(dual.get("layout", True))
@@ -282,13 +296,78 @@ def host_for_channel(cfg: dict, channel: int | None) -> str | None:
     return None
 
 
+def cache_dir() -> Path:
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    root = Path(xdg) if xdg else Path.home() / ".cache"
+    return root / "desk-switch"
+
+
+def mouse_cache_path() -> Path:
+    return cache_dir() / "mouse-channel.json"
+
+
+def load_mouse_cache(now: float | None = None) -> tuple[int | None, float | None]:
+    """Last live/switched Easy-Switch channel. None if missing or expired."""
+    path = mouse_cache_path()
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(raw, dict):
+        return None, None
+    channel = raw.get("channel")
+    ts = raw.get("ts")
+    try:
+        channel_i = int(channel)
+        ts_f = float(ts)
+    except (TypeError, ValueError):
+        return None, None
+    if channel_i not in (1, 2, 3):
+        return None, None
+    age = (time.time() if now is None else now) - ts_f
+    if age < 0 or age > MOUSE_CACHE_TTL_S:
+        return None, None
+    return channel_i, ts_f
+
+
+def save_mouse_cache(channel: int, now: float | None = None) -> None:
+    if channel not in (1, 2, 3):
+        return
+    path = mouse_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"channel": int(channel), "ts": time.time() if now is None else now})
+            + "\n"
+        )
+    except OSError:
+        return
+
+
 def target_hint(cfg: dict, mouse_channel: int | None = None, hhkb: bool | None = None) -> str:
-    host = host_for_channel(cfg, mouse_channel)
-    if host:
-        return HINT_FOR_HOST.get(host, "?")
-    if hhkb:
-        return HINT_FOR_HOST.get(cfg.get("this_host"), "?")
-    return "?"
+    """Desk focus: mouse Easy-Switch channel wins; local HHKB is a weak fallback."""
+    return resolve_target_hint(cfg, mouse_channel=mouse_channel, hhkb_present=hhkb)[0]
+
+
+def resolve_target_hint(
+    cfg: dict,
+    *,
+    mouse_channel: int | None = None,
+    hhkb_present: bool | None = None,
+    peer_channel: int | None = None,
+    mouse_source: str | None = None,
+) -> tuple[str, str]:
+    """Return (MAC|LNX|?, source). Mouse channel is desk focus, not local HHKB."""
+    for channel, source in (
+        (mouse_channel, mouse_source or "mouse"),
+        (peer_channel, "peer_mouse"),
+    ):
+        host = host_for_channel(cfg, channel)
+        if host:
+            return HINT_FOR_HOST.get(host, "?"), source
+    if hhkb_present:
+        return HINT_FOR_HOST.get(cfg.get("this_host"), "?"), "hhkb"
+    return "?", "unknown"
 
 
 def run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
@@ -300,24 +379,201 @@ def run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
     )
 
 
-def hhkb_present_macos(vid: int, pid: int) -> bool:
-    """True when this Mac has an HHKB keyboard collection (usage 0x06)."""
+def empty_hhkb_probe(*, unknown: bool = False) -> dict:
+    return {
+        "present": unknown,  # watch-safe: a failed probe is not "gone"
+        "usb": False,
+        "bluetooth": False,
+        "transport": "unknown" if unknown else "absent",
+        "unknown": unknown,
+        "names": [],
+    }
+
+
+def hhkb_transport_of(usb: bool, bluetooth: bool, present: bool, unknown: bool = False) -> str:
+    if usb and bluetooth:
+        return "both"
+    if usb:
+        return "usb"
+    if bluetooth:
+        return "bluetooth"
+    if unknown or (present and not usb and not bluetooth):
+        return "unknown"
+    return "absent"
+
+
+def _finish_hhkb_probe(usb: bool, bluetooth: bool, present: bool, unknown: bool, names: list) -> dict:
+    if present:
+        unknown = False
+    return {
+        "present": present or unknown,
+        "usb": usb,
+        "bluetooth": bluetooth,
+        "transport": hhkb_transport_of(usb, bluetooth, present, unknown),
+        "unknown": unknown and not present,
+        "names": names,
+    }
+
+
+def merge_hhkb_probes(*probes: dict) -> dict:
+    usb = any(p.get("usb") for p in probes)
+    bluetooth = any(p.get("bluetooth") for p in probes)
+    present = any(p.get("present") and not p.get("unknown") for p in probes)
+    unknown = bool(probes) and all(p.get("unknown") for p in probes) and not present
+    names: list[str] = []
+    for probe in probes:
+        names.extend(probe.get("names") or [])
+    return _finish_hhkb_probe(usb, bluetooth, present, unknown, names)
+
+
+def _hid_id_parts(name: str) -> tuple[int | None, int | None, int | None]:
+    """Parse 0003:000004FE:00000016.XXXX → (bus, vid, pid)."""
+    head = str(name).split(".", 1)[0]
+    parts = head.split(":")
+    if len(parts) < 3:
+        return None, None, None
     try:
-        proc = run(
-            [
-                "hidutil",
-                "list",
-                "--matching",
-                json.dumps({"VendorID": vid, "ProductID": pid}),
-            ],
-            timeout=4.0,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return True  # unknown: do not treat as gone
-    if proc.returncode != 0:
-        return True
-    in_services = False
-    for raw in proc.stdout.splitlines():
+        return int(parts[0], 16), int(parts[1], 16), int(parts[2], 16)
+    except ValueError:
+        return None, None, None
+
+
+def parse_linux_hhkb_sysfs(hid_dir: Path, usb_dir: Path | None, vid: int, pid: int) -> dict:
+    """USB vs Bluetooth from hid bus type (0003=USB, 0005=BT) plus /sys USB tree."""
+    if not hid_dir.is_dir():
+        return empty_hhkb_probe(unknown=True)
+    usb = False
+    bluetooth = False
+    present = False
+    names: list[str] = []
+    needle = f"{vid:04X}:{pid:04X}"
+    try:
+        entries = list(hid_dir.iterdir())
+    except OSError:
+        return empty_hhkb_probe(unknown=True)
+    for entry in entries:
+        bus, hid_vid, hid_pid = _hid_id_parts(entry.name)
+        hid_name = ""
+        uevent = entry / "uevent"
+        try:
+            text = uevent.read_text() if uevent.is_file() else ""
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            if line.startswith("HID_NAME="):
+                hid_name = line.split("=", 1)[1]
+        id_hit = needle in entry.name.upper() or (hid_vid == vid and hid_pid == pid)
+        name_hit = bool(hid_name and HHKB_NAME_RE.search(hid_name))
+        if not (id_hit or name_hit):
+            continue
+        present = True
+        if hid_name:
+            names.append(hid_name)
+        if bus == HID_BUS_USB:
+            usb = True
+        elif bus == HID_BUS_BLUETOOTH:
+            bluetooth = True
+    if usb_dir is not None and usb_dir.is_dir():
+        try:
+            for entry in usb_dir.iterdir():
+                try:
+                    got_vid = (entry / "idVendor").read_text().strip()
+                    got_pid = (entry / "idProduct").read_text().strip()
+                except OSError:
+                    continue
+                try:
+                    if int(got_vid, 16) == vid and int(got_pid, 16) == pid:
+                        usb = True
+                        present = True
+                except ValueError:
+                    continue
+        except OSError:
+            pass
+    return _finish_hhkb_probe(usb, bluetooth, present, False, names)
+
+
+def hhkb_probe_linux(vid: int, pid: int) -> dict:
+    return parse_linux_hhkb_sysfs(HID_DEVICES_DIR, USB_DEVICES_DIR, vid, pid)
+
+
+def _ioreg_int(block: str, key: str) -> int | None:
+    match = re.search(rf'"{re.escape(key)}"\s*=\s*(0x[0-9a-fA-F]+|\d+)', block)
+    return int(match.group(1), 0) if match else None
+
+
+def _ioreg_str(block: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*=\s*"([^"]*)"', block)
+    return match.group(1) if match else ""
+
+
+def _ioreg_bool(block: str, key: str) -> bool | None:
+    match = re.search(rf'"{re.escape(key)}"\s*=\s*(Yes|No|true|false)', block, re.I)
+    if not match:
+        return None
+    return match.group(1).lower() in ("yes", "true")
+
+
+def split_ioreg_nodes(text: str) -> list[str]:
+    return [part for part in re.split(r"\n\s*\+-o\s+", "\n" + (text or "")) if part.strip()]
+
+
+def parse_ioreg_hhkb(hid_text: str, usb_text: str, bt_text: str, vid: int, pid: int) -> dict:
+    """Mac USB cable vs Bluetooth from ioreg (IOUSB + IOHIDDevice + IOBluetoothDevice)."""
+    usb = False
+    bluetooth = False
+    present = False
+    names: list[str] = []
+    for block in split_ioreg_nodes(usb_text):
+        product = _ioreg_str(block, "USB Product Name") or _ioreg_str(block, "kUSBProductString")
+        id_hit = _ioreg_int(block, "idVendor") == vid and _ioreg_int(block, "idProduct") == pid
+        name_hit = bool(product and HHKB_NAME_RE.search(product))
+        if not (id_hit or name_hit):
+            continue
+        usb = True
+        present = True
+        if product:
+            names.append(product)
+    for block in split_ioreg_nodes(hid_text):
+        product = _ioreg_str(block, "Product") or _ioreg_str(block, "ProductName")
+        hid_vid = _ioreg_int(block, "VendorID")
+        hid_pid = _ioreg_int(block, "ProductID")
+        id_hit = hid_vid == vid and hid_pid in (None, pid)
+        name_hit = bool(product and HHKB_NAME_RE.search(product))
+        if not (id_hit or name_hit):
+            continue
+        present = True
+        if product:
+            names.append(product)
+        transport = (_ioreg_str(block, "Transport") or "").lower()
+        if "usb" in transport:
+            usb = True
+        elif "bluetooth" in transport or "ble" in transport:
+            bluetooth = True
+    for block in split_ioreg_nodes(bt_text):
+        name = _ioreg_str(block, "Name") or _ioreg_str(block, "DeviceName")
+        if not (name and HHKB_NAME_RE.search(name)):
+            continue
+        connected = _ioreg_bool(block, "DeviceConnected")
+        if connected is None:
+            connected = _ioreg_bool(block, "Connected")
+        if connected is False:
+            continue
+        bluetooth = True
+        present = True
+        names.append(name)
+    return _finish_hhkb_probe(usb, bluetooth, present, False, names)
+
+
+def parse_hidutil_hhkb(text: str, vid: int, pid: int) -> dict:
+    """Any HHKB HID row — Product name or VID/PID, not only usage page 1 / usage 6."""
+    usb = False
+    bluetooth = False
+    present = False
+    names: list[str] = []
+    in_services = True
+    vid_tok = f"0x{vid:x}"
+    pid_tok = f"0x{pid:x}"
+    for raw in (text or "").splitlines():
         line = raw.strip()
         if line.startswith("Services:"):
             in_services = True
@@ -325,43 +581,86 @@ def hhkb_present_macos(vid: int, pid: int) -> bool:
         if line.startswith("Devices:"):
             in_services = False
             continue
-        if not in_services or not line.startswith("0x"):
+        if not in_services:
             continue
+        low = line.lower()
+        name_hit = bool(HHKB_NAME_RE.search(line))
+        col_hit = False
         cols = line.split()
-        if len(cols) < 5:
+        if cols and cols[0].startswith("0x"):
+            try:
+                col_hit = int(cols[0], 0) == vid and len(cols) > 1 and int(cols[1], 0) == pid
+            except ValueError:
+                col_hit = False
+        id_hit = col_hit or (vid_tok in low and pid_tok in low)
+        if not (name_hit or id_hit):
             continue
-        try:
-            usage_page = int(cols[3], 0)
-            usage = int(cols[4], 0)
-        except ValueError:
-            continue
-        if usage_page == 1 and usage == 6:
-            return True
-    return False
+        present = True
+        if name_hit:
+            names.append(line)
+        if "bluetooth" in low:
+            bluetooth = True
+        elif "usb" in low:
+            usb = True
+    return _finish_hhkb_probe(usb, bluetooth, present, False, names)
+
+
+def _ioreg(args: list[str]) -> str:
+    try:
+        proc = run(["ioreg", *args], timeout=4.0)
+        return proc.stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def hhkb_probe_macos(vid: int, pid: int) -> dict:
+    """Prefer ioreg (USB tree + HID Transport + BT name). hidutil VID/PID misses BT HHKB-Studio1."""
+    parsed = parse_ioreg_hhkb(
+        _ioreg(["-r", "-c", "IOHIDDevice", "-l", "-w", "0"]),
+        _ioreg(["-p", "IOUSB", "-l", "-w", "0"]),
+        _ioreg(["-r", "-c", "IOBluetoothDevice", "-l", "-w", "0"]),
+        vid,
+        pid,
+    )
+    hidutil_unknown = False
+    hidutil_text = ""
+    try:
+        proc = run(
+            ["hidutil", "list", "--matching", json.dumps({"VendorID": vid, "ProductID": pid})],
+            timeout=4.0,
+        )
+        if proc.returncode != 0:
+            hidutil_unknown = True
+        hidutil_text = proc.stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        hidutil_unknown = True
+    hidutil = parse_hidutil_hhkb(hidutil_text, vid, pid)
+    merged = merge_hhkb_probes(parsed, hidutil)
+    if hidutil_unknown and not merged["present"]:
+        return empty_hhkb_probe(unknown=True)
+    return merged
+
+
+def hhkb_present_macos(vid: int, pid: int) -> bool:
+    return bool(hhkb_probe_macos(vid, pid).get("present"))
 
 
 def hhkb_present_linux(vid: int, pid: int) -> bool:
-    hid = Path("/sys/bus/hid/devices")
-    needle = f"{vid:04X}:{pid:04X}"
-    if not hid.is_dir():
-        return True  # unknown
-    try:
-        for entry in hid.iterdir():
-            if needle in entry.name.upper():
-                return True
-    except OSError:
-        return True
-    return False
+    return bool(hhkb_probe_linux(vid, pid).get("present"))
 
 
-def hhkb_present(cfg: dict) -> bool:
+def hhkb_probe(cfg: dict) -> dict:
     vid = cfg["hhkb_vendor_id"]
     pid = cfg["hhkb_product_id"]
     if SYSTEM == "Darwin":
-        return hhkb_present_macos(vid, pid)
+        return hhkb_probe_macos(vid, pid)
     if SYSTEM == "Linux":
-        return hhkb_present_linux(vid, pid)
+        return hhkb_probe_linux(vid, pid)
     raise SystemExit(f"unsupported OS: {SYSTEM}")
+
+
+def hhkb_present(cfg: dict) -> bool:
+    return bool(hhkb_probe(cfg).get("present"))
 
 
 def libexec_dir() -> Path:
@@ -429,6 +728,8 @@ def switch_mouse(cfg: dict, channel: int | None = None) -> int:
         log(out)
     if err:
         log(err)
+    if proc.returncode == 0:
+        save_mouse_cache(dest)
     return proc.returncode
 
 
@@ -448,6 +749,29 @@ def mouse_info(cfg: dict) -> tuple[str, int | None]:
         return str(exc), None
     except (OSError, subprocess.TimeoutExpired) as exc:
         return str(exc), None
+
+
+def mouse_snapshot(cfg: dict) -> dict:
+    """Live Easy-Switch channel, or last-known if the mouse is asleep / on the other host."""
+    info, live = mouse_info(cfg)
+    cached, cached_ts = load_mouse_cache()
+    if live is not None:
+        save_mouse_cache(live)
+        channel, source, online, stale = live, "mouse", True, False
+    elif cached is not None:
+        channel, source, online, stale = cached, "mouse_cached", False, True
+    else:
+        channel, source, online, stale = None, None, False, False
+    return {
+        "info": info,
+        "channel": channel,
+        "channel_live": live,
+        "online": online,
+        "stale": stale,
+        "source": source,
+        "host": host_for_channel(cfg, channel),
+        "cached_ts": cached_ts,
+    }
 
 
 def call_lgdualup(cfg: dict, args: list[str], *, missing: str) -> int:
@@ -600,6 +924,8 @@ def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
     chosen = mode.strip()
     verb = layout_verb(chosen)
     print(f"DualUp {verb} → {chosen}")
+    if verb in ("full", "pbp"):
+        save_dualup_mode_cache(verb)
     rc = call_lgdualup(cfg, ["pbp", chosen], missing=missing)
     if lgdualup_path(cfg) is None:
         return rc
@@ -688,6 +1014,292 @@ def cmd_full(cfg: dict) -> int:
     )
 
 
+def cmd_layout(cfg: dict) -> int:
+    """Re-apply full or PBP from the live OS geometry (USB + layout)."""
+    mode = detect_dualup_mode(cfg)
+    if mode == "full":
+        return cmd_full(cfg)
+    return cmd_pbp(cfg, None)
+
+
+DUALUP_FULL_RES = {(2880, 2560), (2560, 2880)}
+DUALUP_PBP_RES = {(2880, 1280), (1280, 2880)}
+
+
+def dualup_mode_cache_path() -> Path:
+    return cache_dir() / "dualup-mode.json"
+
+
+def load_dualup_mode_cache() -> str | None:
+    try:
+        raw = json.loads(dualup_mode_cache_path().read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    mode = str(raw.get("mode") or "").strip().lower()
+    return mode if mode in ("full", "pbp") else None
+
+
+def save_dualup_mode_cache(mode: str) -> None:
+    key = layout_verb(mode)
+    if key not in ("full", "pbp"):
+        return
+    path = dualup_mode_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mode": key, "ts": time.time()}) + "\n")
+    except OSError:
+        return
+
+
+def parse_dualup_mode_from_res(width: int, height: int) -> str | None:
+    pair = (int(width), int(height))
+    if pair in DUALUP_FULL_RES:
+        return "full"
+    if pair in DUALUP_PBP_RES:
+        return "pbp"
+    return None
+
+
+def detect_dualup_mode_linux(monitors: list | None = None) -> str:
+    data = monitors
+    if data is None:
+        hypr = shutil.which("hyprctl")
+        if not hypr:
+            return "unknown"
+        try:
+            proc = run([hypr, "-j", "monitors"], timeout=5.0)
+            data = json.loads(proc.stdout or "[]")
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError, ValueError):
+            return "unknown"
+    if not isinstance(data, list):
+        return "unknown"
+    markers = ("sdqhd", "dualup", "28mq780", "lg electronics")
+    for mon in data:
+        if not isinstance(mon, dict):
+            continue
+        desc = f"{mon.get('description', '')} {mon.get('name', '')}".lower()
+        try:
+            width = int(mon.get("width") or 0)
+            height = int(mon.get("height") or 0)
+        except (TypeError, ValueError):
+            continue
+        mode = parse_dualup_mode_from_res(width, height)
+        looks = any(marker in desc for marker in markers) or mode is not None
+        if looks and mode:
+            return mode
+    return "unknown"
+
+
+def detect_dualup_mode_macos(placer_list: str | None = None) -> str:
+    text = placer_list
+    if text is None:
+        placer = shutil.which("displayplacer")
+        if not placer:
+            return "unknown"
+        try:
+            proc = run([placer, "list"], timeout=8.0)
+            text = proc.stdout or ""
+        except (OSError, subprocess.TimeoutExpired):
+            return "unknown"
+    skip = False
+    for line in (text or "").splitlines():
+        if line.startswith("Persistent screen id:"):
+            skip = False
+            continue
+        if re.search(r"built[ -]?in", line, re.I):
+            skip = True
+            continue
+        if skip:
+            continue
+        match = re.search(r"(?:Resolution:|res:)\s*(\d{3,5})x(\d{3,5})", line)
+        if not match:
+            continue
+        mode = parse_dualup_mode_from_res(int(match.group(1)), int(match.group(2)))
+        if mode:
+            return mode
+    return "unknown"
+
+
+def detect_dualup_mode(cfg: dict | None = None) -> str:
+    if SYSTEM == "Linux":
+        mode = detect_dualup_mode_linux()
+    elif SYSTEM == "Darwin":
+        mode = detect_dualup_mode_macos()
+    else:
+        mode = "unknown"
+    if mode in ("full", "pbp"):
+        save_dualup_mode_cache(mode)
+        return mode
+    return load_dualup_mode_cache() or "unknown"
+
+
+def dualup_inputs_map(cfg: dict) -> dict:
+    hosts = cfg.get("hosts") or {}
+    out = {}
+    for host, default in PBP_INPUT_DEFAULTS.items():
+        spec = _as_dict(hosts.get(host))
+        out[host] = str(spec.get("dualup_input") or "").strip() or default
+    return out
+
+
+def peer_ssh_target(cfg: dict) -> str:
+    adapters = _as_dict(cfg.get("adapters"))
+    hosts_ad = _as_dict(adapters.get("hosts"))
+    dual = _as_dict(adapters.get("dualup"))
+    return str(
+        cfg.get("_peer")
+        or hosts_ad.get("peer")
+        or cfg.get("_dualup_peer")
+        or dual.get("peer")
+        or ""
+    ).strip()
+
+
+def peer_cache_path() -> Path:
+    return cache_dir() / "peer-status.json"
+
+
+def load_peer_cache(peer: str) -> dict | None:
+    try:
+        raw = json.loads(peer_cache_path().read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(raw, dict) or raw.get("peer") != peer:
+        return None
+    try:
+        ts = float(raw.get("ts") or 0)
+    except (TypeError, ValueError):
+        return None
+    if time.time() - ts > PEER_CACHE_TTL_S:
+        return None
+    state = raw.get("state")
+    return state if isinstance(state, dict) else None
+
+
+def save_peer_cache(peer: str, state: dict) -> None:
+    path = peer_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"peer": peer, "ts": time.time(), "state": state}) + "\n")
+    except OSError:
+        return
+
+
+def slim_peer_status(data: dict, peer: str) -> dict:
+    return {
+        "reachable": True,
+        "peer": peer,
+        "this_host": data.get("this_host"),
+        "hhkb_present": data.get("hhkb_present"),
+        "hhkb_usb": data.get("hhkb_usb"),
+        "hhkb_bluetooth": data.get("hhkb_bluetooth"),
+        "hhkb_transport": data.get("hhkb_transport"),
+        "mouse_channel": data.get("mouse_channel"),
+        "mouse_online": data.get("mouse_online"),
+        "target_hint": data.get("target_hint"),
+        "dualup_mode": data.get("dualup_mode"),
+    }
+
+
+def peek_peer_status(cfg: dict) -> dict | None:
+    """Best-effort SSH status --json --local. Never blocks the local probe for long."""
+    peer = peer_ssh_target(cfg)
+    if not peer:
+        return None
+    cached = load_peer_cache(peer)
+    if cached is not None:
+        return cached
+    remote = (
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        "if command -v desk-switch >/dev/null; then desk-switch status --json --local; "
+        "elif command -v hhkb-mx-follow >/dev/null; then hhkb-mx-follow status --json --local; "
+        "else echo '{}'; fi"
+    )
+    try:
+        proc = run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", peer, f"bash -lc {remote!r}"],
+            timeout=6.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        missed = {"reachable": False, "peer": peer}
+        save_peer_cache(peer, missed)
+        return missed
+    if proc.returncode != 0:
+        missed = {"reachable": False, "peer": peer}
+        save_peer_cache(peer, missed)
+        return missed
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        missed = {"reachable": False, "peer": peer}
+        save_peer_cache(peer, missed)
+        return missed
+    if not isinstance(data, dict) or not data:
+        missed = {"reachable": False, "peer": peer}
+        save_peer_cache(peer, missed)
+        return missed
+    slim = slim_peer_status(data, peer)
+    save_peer_cache(peer, slim)
+    return slim
+
+
+def format_bar_label(state: dict) -> str:
+    """Compact shared glyph for Omarchy + DeskSwitchBar: LNX  kbU  mx2  PBP."""
+    hint = str(state.get("target_hint") or "?")
+    if hint not in HINT_FOR_HOST.values() and hint != "?":
+        hint = "?"
+    if state.get("hhkb_usb"):
+        kb = "kbU"
+    elif state.get("hhkb_bluetooth"):
+        kb = "kbB"
+    elif state.get("hhkb_present"):
+        kb = "kb"
+    else:
+        kb = "kb-"
+    channel = state.get("mouse_channel")
+    if channel is None:
+        mx = "mx-"
+    elif state.get("mouse_online"):
+        mx = f"mx{channel}"
+    else:
+        mx = f"mx{channel}~"
+    mode = str(state.get("dualup_mode") or "unknown").lower()
+    parts: list[str] = []
+    if hint in HINT_FOR_HOST.values():
+        parts.append(hint)
+    parts.extend([kb, mx])
+    if mode == "pbp":
+        parts.append("PBP")
+    elif mode == "full":
+        parts.append("FULL")
+    return "  ".join(parts) if parts else "desk"
+
+
+def format_bar_tooltip(state: dict) -> str:
+    hhkb = "USB on this host" if state.get("hhkb_usb") else (
+        "BT only" if state.get("hhkb_bluetooth") else (
+            "present" if state.get("hhkb_present") else "absent"
+        )
+    )
+    host = state.get("mouse_host") or "?"
+    channel = state.get("mouse_channel")
+    mouse = f"ch {channel} → {host}" if channel is not None else "ch ?"
+    if state.get("mouse_online"):
+        mouse += " online"
+    elif channel is not None:
+        mouse += " cached"
+    else:
+        mouse += " missing"
+    dual = str(state.get("dualup_mode") or "unknown")
+    inputs = state.get("dualup_inputs") or {}
+    return (
+        f"focus {state.get('target_hint', '?')} · HHKB {hhkb} · "
+        f"mouse {mouse} · DualUp {dual} mac={inputs.get('mac', 'hdmi1')} linux={inputs.get('linux', 'dp')}"
+    )
+
+
 def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path | None, dual_path: Path | None) -> dict:
     """User-facing adapter snapshot. Keep this shape stable; add keys, don't rename."""
     hosts = cfg.get("hosts") or {}
@@ -714,45 +1326,121 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
             "layout": bool(cfg.get("_dualup_layout", True)),
             "layout_helper": str(layout_path) if layout_path else None,
             "display_id": str(cfg.get("_dualup_display_id") or "") or None,
+            "mode": None,
+            "inputs": dualup_inputs_map(cfg),
         },
     }
 
 
-def collect_status(cfg: dict) -> dict:
-    present = hhkb_present(cfg)
-    info, channel = mouse_info(cfg)
+def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
+    probe = hhkb_probe(cfg)
+    mouse = mouse_snapshot(cfg)
     mouse_path = which_adapter("mxswitch", str(cfg.get("mxswitch") or "mxswitch"))
     dual_path = lgdualup_path(cfg)
     dual_info = ""
+    dual_usb = False
     if dual_path is not None:
         try:
             proc = run([str(dual_path), "--info"], timeout=8.0)
             dual_info = (proc.stdout or proc.stderr or "").rstrip()
+            dual_usb = proc.returncode == 0 and "043e:9a39" in dual_info.lower()
         except (OSError, subprocess.TimeoutExpired) as exc:
             dual_info = str(exc)
+    dual_mode = detect_dualup_mode(cfg)
+    inputs = dualup_inputs_map(cfg)
+    peer = None if local_only else peek_peer_status(cfg)
+    peer_channel = None
+    peer_online = False
+    if isinstance(peer, dict) and peer.get("reachable"):
+        try:
+            if peer.get("mouse_channel") is not None:
+                peer_channel = int(peer["mouse_channel"])
+            peer_online = bool(peer.get("mouse_online"))
+        except (TypeError, ValueError):
+            peer_channel = None
+
+    if mouse.get("channel_live") is not None:
+        channel = mouse["channel_live"]
+        mouse_source = "mouse"
+    elif peer_channel is not None and peer_online:
+        channel = peer_channel
+        mouse_source = "peer_mouse"
+        save_mouse_cache(channel)
+    elif mouse.get("channel") is not None:
+        channel = mouse["channel"]
+        mouse_source = mouse.get("source") or "mouse_cached"
+    elif peer_channel is not None:
+        channel = peer_channel
+        mouse_source = "peer_mouse"
+        save_mouse_cache(channel)
+    else:
+        channel = None
+        mouse_source = None
+
+    hhkb_for_hint = bool(probe.get("present")) and not probe.get("unknown")
+    hint, hint_source = resolve_target_hint(
+        cfg,
+        mouse_channel=channel,
+        hhkb_present=hhkb_for_hint,
+        peer_channel=None if mouse_source == "peer_mouse" else peer_channel,
+        mouse_source=mouse_source,
+    )
     adapters = collect_adapters(cfg, mouse_channel=channel, mouse_path=mouse_path, dual_path=dual_path)
-    return {
+    adapters["mouse"].update(
+        {
+            "online": bool(mouse.get("online")) if mouse_source == "mouse" else False,
+            "stale": mouse_source == "mouse_cached",
+            "host": host_for_channel(cfg, channel),
+            "source": mouse_source,
+        }
+    )
+    adapters["hhkb"] = {
+        "present": bool(probe.get("present")) and not probe.get("unknown"),
+        "usb": bool(probe.get("usb")),
+        "bluetooth": bool(probe.get("bluetooth")),
+        "transport": probe.get("transport") or "absent",
+    }
+    adapters["dualup"]["mode"] = dual_mode
+    adapters["dualup"]["usb"] = dual_usb
+    adapters["dualup"]["inputs"] = inputs
+    present = bool(adapters["hhkb"]["present"])
+    state = {
         "os": SYSTEM,
         "version": VERSION,
         "config": cfg["_config_path"],
         "this_host": cfg["this_host"],
         "hhkb": "present" if present else "absent",
         "hhkb_present": present,
+        "hhkb_usb": bool(probe.get("usb")),
+        "hhkb_bluetooth": bool(probe.get("bluetooth")),
+        "hhkb_transport": probe.get("transport") or "absent",
+        "follow_hhkb_usb": bool(cfg.get("follow_hhkb_usb", True)),
         "target_channel": cfg["target_channel"],
         "hosts": cfg["hosts"],
-        "target_hint": target_hint(cfg, channel, present),
+        "target_hint": hint,
+        "target_hint_source": hint_source,
         "mxswitch": str(mouse_path or cfg.get("mxswitch") or "mxswitch"),
         "mouse_channel": channel,
-        "mouse_info": info,
+        "mouse_channel_live": mouse.get("channel_live"),
+        "mouse_online": mouse_source == "mouse",
+        "mouse_host": host_for_channel(cfg, channel),
+        "mouse_info": mouse.get("info") or "",
         "lgdualup": bool(adapters["dualup"]["available"]),
         "lgdualup_path": str(dual_path) if dual_path else None,
         "dualup_info": dual_info,
+        "dualup_mode": dual_mode,
+        "dualup_usb": dual_usb,
+        "dualup_inputs": inputs,
+        "peer": peer,
         "adapters": adapters,
     }
+    state["bar_label"] = format_bar_label(state)
+    state["bar_tooltip"] = format_bar_tooltip(state)
+    return state
 
 
-def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False) -> int:
-    state = collect_status(cfg)
+def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, local_only: bool = False) -> int:
+    state = collect_status(cfg, local_only=local_only or hint_only)
     if hint_only:
         print(state["target_hint"])
         return 0
@@ -767,9 +1455,14 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False) -> 
     print(f"version       : {state['version']}")
     print(f"config        : {state['config']}")
     print(f"this_host     : {state['this_host']}")
-    print(f"hhkb          : {state['hhkb']}")
+    transport = state.get("hhkb_transport") or "absent"
+    usb_note = "USB on this host" if state.get("hhkb_usb") else (
+        "BT only" if state.get("hhkb_bluetooth") else transport
+    )
+    print(f"hhkb          : {state['hhkb']}  transport={transport}  ({usb_note})")
     print(f"target        : channel {state['target_channel']}")
-    print(f"target_hint   : {state['target_hint']}")
+    print(f"target_hint   : {state['target_hint']}  source={state.get('target_hint_source', '?')}")
+    print(f"bar           : {state.get('bar_label', state['target_hint'])}")
     print("adapters")
     mouse_state = "available" if mouse.get("available") else "missing"
     if not mouse.get("enabled", True):
@@ -784,15 +1477,46 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False) -> 
     dual_state = "available" if dual.get("available") else "missing"
     if not dual.get("enabled", True):
         dual_state = "disabled"
-    print(f"  dualup      : {dual_state}  backend={dual.get('backend', 'lgdualup')}  {dual.get('path') or '-'}")
-    print("mouse         :")
+    print(
+        f"  dualup      : {dual_state}  backend={dual.get('backend', 'lgdualup')}  "
+        f"mode={state.get('dualup_mode', 'unknown')}  "
+        f"mac={state.get('dualup_inputs', {}).get('mac', 'hdmi1')}  "
+        f"linux={state.get('dualup_inputs', {}).get('linux', 'dp')}  "
+        f"{dual.get('path') or '-'}"
+    )
+    mouse_line = "missing"
+    if state.get("mouse_channel") is not None:
+        mouse_line = (
+            f"channel {state['mouse_channel']} → {state.get('mouse_host') or '?'}  "
+            f"{'online' if state.get('mouse_online') else 'cached'}"
+        )
+    print(f"mouse         : {mouse_line}")
     for line in (state["mouse_info"] or "(no output)").splitlines():
         print(f"  {line}")
-    if state["lgdualup"]:
+    if state["lgdualup"] or state.get("dualup_info"):
         print("dualup        :")
         for line in (state["dualup_info"] or "(no output)").splitlines():
             print(f"  {line}")
+    peer = state.get("peer")
+    if isinstance(peer, dict):
+        if peer.get("reachable"):
+            print(
+                f"peer          : {peer.get('this_host') or peer.get('peer')}  "
+                f"hhkb={peer.get('hhkb_transport', '?')}  "
+                f"mouse={peer.get('mouse_channel', '?')}  "
+                f"hint={peer.get('target_hint', '?')}"
+            )
+        else:
+            print(f"peer          : {peer.get('peer')} unreachable")
     return 0
+
+
+def watch_usb_rising_edge(last_usb: bool | None, usb_now: bool, follow_usb: bool) -> tuple[bool, bool]:
+    """Detect Fn+Ctrl+0: USB appearance. Startup snapshot does not fire."""
+    if last_usb is None:
+        return bool(usb_now), False
+    fire = bool(follow_usb) and bool(usb_now) and not bool(last_usb)
+    return bool(usb_now), fire
 
 
 def cmd_watch(cfg: dict, dry_run: bool) -> int:
@@ -802,14 +1526,17 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
     retries = int(cfg["switch_retries"])
     retry_delay = float(cfg["switch_retry_delay_s"])
     dest = int(cfg["target_channel"])
+    follow_usb = bool(cfg.get("follow_hhkb_usb", True))
 
     log(
         f"watching HHKB → MX channel {dest} "
-        f"(dry_run={dry_run}, every {interval}s, absent×{need})"
+        f"(dry_run={dry_run}, every {interval}s, absent×{need}, "
+        f"follow_hhkb_usb={follow_usb})"
     )
     armed = False
     absent = 0
     last = time.time()
+    last_usb: bool | None = None
 
     while True:
         now = time.time()
@@ -817,15 +1544,39 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
             log("clock gap (sleep/wake) — disarm until HHKB is seen again")
             armed = False
             absent = 0
+            last_usb = None
         last = now
 
         try:
-            present = hhkb_present(cfg)
+            probe = hhkb_probe(cfg)
         except Exception as exc:  # noqa: BLE001 — never treat a probe crash as gone
             log(f"presence probe error ({exc}); treating as present")
-            present = True
+            probe = empty_hhkb_probe(unknown=True)
 
-        if present:
+        present = bool(probe.get("present"))
+        usb_now = bool(probe.get("usb"))
+
+        # Fn+Ctrl+0: USB rising edge pulls the whole desk to the machine with the cable.
+        last_usb, follow_here = watch_usb_rising_edge(last_usb, usb_now, follow_usb)
+        if follow_here:
+            here = cfg["this_host"]
+            if dry_run:
+                log(f"dry-run: HHKB USB appeared — would desk-switch to {here}")
+            else:
+                log(f"HHKB USB appeared — desk → {here}")
+                rc = cmd_to(cfg, here)
+                if rc != 0:
+                    log(f"USB follow to {here} failed (rc={rc})")
+            armed = True
+            absent = 0
+
+        # USB cable is never an "absent" hop-away. BT leave still is.
+        if usb_now:
+            if not armed:
+                log("HHKB USB present — armed")
+            armed = True
+            absent = 0
+        elif present:
             if not armed:
                 log("HHKB present — armed")
             armed = True
@@ -864,8 +1615,9 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="show HHKB / mouse / DualUp state")
     status.add_argument("--json", action="store_true", help="machine-readable status")
     status.add_argument("--hint", action="store_true", help="print MAC / LNX / ? only")
+    status.add_argument("--local", action="store_true", help="skip SSH peer peek")
     sub.add_parser("hint", help="print MAC / LNX / ? (bar widget)")
-    watch = sub.add_parser("watch", help="follow HHKB departures (mouse only)")
+    watch = sub.add_parser("watch", help="follow HHKB leave (mouse away) and USB appear (desk here)")
     watch.add_argument("--dry-run", action="store_true")
     sw = sub.add_parser("switch", help="push the mouse, or switch a whole desk")
     sw.add_argument("target", nargs="?", help="Easy-Switch 1|2|3, or host mac|linux")
@@ -875,6 +1627,7 @@ def build_parser() -> argparse.ArgumentParser:
     pbp = sub.add_parser("pbp", help="DualUp PBP: USB toggle, input pair, tilted OS layout")
     pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
     sub.add_parser("full", help="DualUp full: USB toggle + 2880x2560 @ 270°")
+    sub.add_parser("layout", help="re-apply DualUp full or PBP from the live display")
     return parser
 
 
@@ -883,7 +1636,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cfg = load_config()
     if args.cmd == "status":
-        return cmd_status(cfg, as_json=args.json, hint_only=args.hint)
+        return cmd_status(cfg, as_json=args.json, hint_only=args.hint, local_only=args.local)
     if args.cmd == "hint":
         return cmd_status(cfg, hint_only=True)
     if args.cmd == "watch":
@@ -896,6 +1649,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_pbp(cfg, args.mode)
     if args.cmd == "full":
         return cmd_full(cfg)
+    if args.cmd == "layout":
+        return cmd_layout(cfg)
     return 2
 
 

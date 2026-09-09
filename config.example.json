@@ -11,7 +11,8 @@
       },
       "linux": {
         "channel": 2
-      }
+      },
+      "follow_hhkb_usb": true
     },
     "dualup": {
       "enabled": true,

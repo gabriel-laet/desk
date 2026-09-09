@@ -26,19 +26,18 @@ Logitech Enhanced Easy-Switch only links an MX keyboard to an MX mouse. An
 HHKB is invisible to Logi Options+. Two paths:
 
 ```
-Fn+Ctrl+2 on the HHKB
-        │
-        ▼
- HHKB disconnects from this host
-        │
-        ▼
- desk-switch watch   (~2s debounce)
-        │
-        ▼
- mouse adapter (mxswitch) → other Easy-Switch channel
-        │
-        ▼
- DualUp is left alone
+Fn+Ctrl+2 on the HHKB          Fn+Ctrl+0 (HHKB → USB)
+        │                              │
+        ▼                              ▼
+ HHKB disconnects (BT hop)      USB appears on the host
+        │                       that has the cable
+        ▼                              │
+ desk-switch watch (~2s)               ▼
+        │                       watch: rising hhkb_usb
+        ▼                              │
+ mouse → other Easy-Switch             ▼
+ DualUp is left alone           desk-switch to <this_host>
+                                (mouse + DualUp input)
 
 desk-switch to linux          (or the Omarchy / macOS panel)
         │
@@ -66,8 +65,14 @@ Adapters (more can be added later without renaming the model):
 | **dualup** | DualUp USB input + PBP/full + OS layout | `lgdualup` + `dualup-layout` |
 
 `status --json` exposes `adapters.mouse` / `adapters.hosts` / `adapters.dualup`
-and still has the Omarchy fields (`target_hint`, `lgdualup`, `hhkb`,
-`mouse_channel`).
+and the shared bar fields (`target_hint`, `bar_label`, `hhkb_transport`,
+`hhkb_usb`, `hhkb_bluetooth`, `mouse_channel`, `mouse_online`, `dualup_mode`).
+Omarchy QML and macOS DeskSwitchBar parse the same keys.
+
+**Lock screen / greeter:** keep the HHKB **USB cable in the machine you are
+unlocking**. Omarchy’s password screen often fails to use Bluetooth; USB is
+the reliable unlock path. `Fn+Ctrl+0` on the HHKB selects USB — `watch` then
+pulls mouse + DualUp input to whichever host has the cable.
 
 ## Requirements
 
@@ -201,16 +206,18 @@ omarchy plugin add https://github.com/gabriel-laet/desk-switch.git --enable
 ```
 
 That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places a
-widget on the **right** section. Title is `MAC` / `LNX` / `?` (from
-`desk-switch status --json` → `target_hint`). Click for:
+widget on the **right** section. Title is the shared `bar_label` (e.g. `LNX  kbU  mx2  PBP`) from
+`desk-switch status --json`. `target_hint` is desk focus from the mouse
+Easy-Switch channel (cached / peer if the local probe misses). Click for:
 
 | Button | Command |
 |---|---|
 | Refresh status | `desk-switch status --json` |
 | Switch to Mac | `desk-switch to mac` |
 | Switch to Linux | `desk-switch to linux` |
-| DualUp Full | `desk-switch full` — hidden unless the dualup adapter is present |
-| DualUp PBP | `desk-switch pbp` — uses `pbp_mode` from config; same visibility |
+| DualUp Full  ⌘⌥⇧F | `desk-switch full` — hidden unless DualUp is present or mode is known |
+| DualUp PBP  ⌘⌥⇧P | `desk-switch pbp` — uses `pbp_mode` from config; same visibility |
+| Auto layout  ⌘⌥U | `desk-switch layout` — re-applies full or PBP from the live display |
 
 Polls about every 15s. Looks up `desk-switch` via `bash -lc` with
 `~/.local/bin` on `PATH` (falls back to `hhkb-mx-follow`).
@@ -233,8 +240,9 @@ Linux, DualUp Full / PBP (DualUp rows hide when the helper is missing).
 
 ## macOS menu bar
 
-Native `MenuBarExtra`. Same job as the Omarchy panel: title `MAC` / `LNX` /
-`?`, click for refresh / to mac / to linux / DualUp full+PBP. Calls
+Native `MenuBarExtra`. Same job as the Omarchy panel: title is `bar_label`
+(`MAC`/`LNX` plus kb/mouse/DualUp chips), click for refresh / to mac / to
+linux / DualUp full+PBP. Calls
 `desk-switch` only (PATH, then `~/.local/bin`). macOS 13+. Ad-hoc signed,
 not App Store.
 
@@ -246,7 +254,10 @@ open -a DeskSwitchBar
 ```
 
 `xcode-select --install` if `swiftc` is missing. Refresh every ~15s and
-again when the panel opens.
+again when the panel opens. DualUp rows show Karabiner shortcuts already
+bound on this desk: **⌘⌥⇧F** full, **⌘⌥⇧P** PBP, **⌘⌥U** auto layout.
+Those keys should run `desk-switch full` / `pbp` / `layout` (USB + OS
+layout), not bare `dualup-layout`.
 
 Login item:
 
@@ -261,6 +272,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.desk-switch-bar.pl
 ```bash
 desk-switch status              # HHKB / mouse / adapters (text)
 desk-switch status --json
+desk-switch status --json --local  # skip SSH peer peek
 desk-switch status --hint       # MAC / LNX / ?  (same as: desk-switch hint)
 desk-switch to mac              # mouse + DualUp input if configured
 desk-switch to linux
@@ -270,7 +282,8 @@ desk-switch switch 2            # mouse only, Easy-Switch 1|2|3
 desk-switch pbp                 # USB PBP + hdmi1/dp inputs + OS layout
 desk-switch pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
 desk-switch full                # USB full + OS layout (Mac 2880x2560@270 / Linux 2560x2880 t3)
-desk-switch watch               # HHKB leave → mouse only
+desk-switch layout              # re-apply full or PBP from the live DualUp geometry
+desk-switch watch               # HHKB leave → mouse away; USB appear → to this host
 desk-switch watch --dry-run
 desk-switch --version
 ```
@@ -288,7 +301,7 @@ PBP layout is OS-specific (same on-screen half, different EDID naming):
 
 | Host | PBP | Full |
 |---|---|---|
-| macOS (displayplacer) | `2880x1280 @ 270°` → on-screen 1280×2880 | `2880x2560 @ 270°` |
+| macOS (displayplacer) | `2880x1280 @ 270°` (EDID may list `1280x2880` at 0°) | `2880x2560 @ 270°` (EDID may list `2560x2880` at 0°) |
 | Linux / Omarchy (`hyprctl`, typically `DP-2`) | `1280x2880@59.96` transform **3** | `2560x2880` transform **3** |
 
 Not `2880x1280` t3 (stretched) and not `1280x2880` t0 (wrong orientation).
@@ -312,7 +325,8 @@ Edit [`config.example.json`](config.example.json) →
       "this_host": "mac",
       "follow_channel": 2,
       "mac": { "channel": 1 },
-      "linux": { "channel": 2 }
+      "linux": { "channel": 2 },
+      "follow_hhkb_usb": true
     },
     "dualup": {
       "enabled": true,
@@ -336,6 +350,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.dualup.display_id` | macOS displayplacer UUID or Hyprland connector. Empty = detect DualUp |
 | `adapters.dualup.layout` | Apply OS resolution/rotation after USB (default true) |
 | `adapters.dualup.peer` | Optional SSH host; runs `dualup-layout` there (no USB) |
+| `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance (`Fn+Ctrl+0`) as `to <this_host>` |
 | `poll_interval_s` / `absent_polls_required` | Watcher debounce (defaults 0.5s × 4 ≈ 2s) |
 
 Inputs the helper accepts: `usbc` / `usb-c` / `dp3`, `dp` / `dp1`, `dp2`,
@@ -352,7 +367,7 @@ Confirmed desk layouts (same on-screen DualUp geometry, different EDID names):
 
 | Host | PBP | Full |
 |---|---|---|
-| macOS (displayplacer) | **`2880x1280 @ 270°`** | `2880x2560 @ 270°` |
+| macOS (displayplacer) | **`2880x1280 @ 270°`** (EDID may list `1280x2880` at 0°) | `2880x2560 @ 270°` (EDID may list `2560x2880` at 0°) |
 | Linux / Omarchy (`DP-2`) | **`1280x2880@59.96` transform 3** | `2560x2880` transform 3 |
 
 `2880x1280` t3 stretches; `1280x2880` t0 is the wrong orientation. If EDID
@@ -367,15 +382,26 @@ still load. New installs write the adapters shape.
 
 ## Troubleshooting
 
-**`desk-switch status` first.** Check `target_hint`, `adapters.mouse.available`,
+**`desk-switch status` first.** Check `target_hint` / `bar_label`,
+`hhkb_transport` (`usb` / `bluetooth` / `both` / `absent`), `hhkb_usb`,
+`mouse_channel` (live or cached), `adapters.mouse.available`,
 `adapters.dualup.available`, and whether DualUp USB was seen (`dualup_info`).
 
-**Watcher never fires (HHKB USB ghost).** Mac still sees the HHKB keyboard
-collection (usage page 1 / usage 6) over USB. Unplug the cable or charge-only;
-use Bluetooth on both hosts. Probe: macOS `hidutil list`; Linux
-`/sys/bus/hid/devices` for `04FE:0016`. A probe error is treated as *present*
-so a flaky `hidutil` cannot steal the mouse. Sleep/wake clock jumps disarm
-until the HHKB is seen again.
+**Watcher never fires (HHKB USB ghost).** Mac still sees the HHKB over USB.
+That is now a *feature* when `follow_hhkb_usb` is on: USB appearance pulls
+the desk here instead of hopping the mouse away. To hop with BT only, unplug
+or use charge-only USB. Probe: macOS `ioreg` (IOUSB + IOHIDDevice Transport +
+`HHKB-Studio1`) and `hidutil list`; Linux `/sys/bus/hid/devices` bus
+`0003`=USB / `0005`=Bluetooth for `04FE:0016`. A probe error is treated as
+*present* so a flaky `hidutil` cannot steal the mouse. Sleep/wake clock jumps
+disarm until the HHKB is seen again.
+
+**Bar shows `?` on Mac while Linux is focused.** The MX Master is on the
+Linux Easy-Switch channel, so Mac `mxswitch --info` fails (mouse asleep /
+other host). Status remembers the last live channel and, if
+`adapters.dualup.peer` (or `adapters.hosts.peer`) is set, peeks the peer
+over SSH (`status --json --local`). Bluetooth HHKB is detected by product
+name (`HHKB-Studio1`), not only hidutil VID/PID + usage 6.
 
 **Mouse does not hop (macOS Input Monitoring).** Grant it to
 `~/.local/lib/desk-switch/mxswitch`, not the shim. Click the mouse once if
