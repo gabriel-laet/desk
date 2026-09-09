@@ -3,7 +3,7 @@
 #
 #   ./lgdualup.sh --info
 #   ./lgdualup.sh input usbc|dp|dp1|dp2|hdmi1|hdmi2
-#   ./lgdualup.sh pbp on|off|1|2|3|5
+#   ./lgdualup.sh pbp on|off|full|50-50|1|2|3|5
 #
 # hidraw is root-only by default. One-time:
 #   sudo cp linux/43-lg-dualup.rules /etc/udev/rules.d/
@@ -79,8 +79,8 @@ parse_input() {
 
 parse_pbp() {
     case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-        off|none|solo) echo 1 ;;
-        on|50|50/50) echo 5 ;;
+        off|none|solo|full) echo 1 ;;
+        on|50|50/50|50-50) echo 5 ;;
         66|66/33) echo 3 ;;
         *)
             if [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" =~ ^0[xX] ]]; then

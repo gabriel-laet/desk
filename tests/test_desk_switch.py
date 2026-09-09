@@ -175,6 +175,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("target_hint", data)
         self.assertIn("lgdualup", data)
         self.assertFalse(data["lgdualup"])
+        self.assertIn("adapters", data)
+        self.assertFalse(data["adapters"]["mouse"]["available"])
+        self.assertFalse(data["adapters"]["dualup"]["available"])
+        self.assertEqual(data["adapters"]["hosts"]["this_host"], "linux")
+        self.assertEqual(data["adapters"]["mouse"]["backend"], "mxswitch")
+        self.assertEqual(data["adapters"]["dualup"]["backend"], "lgdualup")
 
     def test_switch_rejects_bad_channel(self) -> None:
         proc = self._run("switch", "9")
@@ -183,6 +189,101 @@ class CliTests(unittest.TestCase):
     def test_to_unknown_host(self) -> None:
         proc = self._run("to", "sparc")
         self.assertNotEqual(proc.returncode, 0)
+
+
+class AdapterConfigTests(unittest.TestCase):
+    def test_adapters_overlay_hosts_and_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "mouse": {"enabled": True, "path": "/opt/mxswitch"},
+                            "hosts": {
+                                "this_host": "linux",
+                                "follow_channel": 3,
+                                "mac": {"channel": 1},
+                                "linux": {"channel": 3},
+                            },
+                            "dualup": {
+                                "enabled": True,
+                                "inputs": {"mac": "usbc", "linux": "dp"},
+                            },
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "SYSTEM", "Linux"), mock.patch.object(
+                ds, "CONFIG_CANDIDATES", (cfg_path,)
+            ), mock.patch.object(ds, "default_this_host", return_value="linux"):
+                cfg = ds.load_config()
+        self.assertEqual(cfg["this_host"], "linux")
+        self.assertEqual(cfg["target_channel"], 3)
+        self.assertEqual(cfg["hosts"]["linux"]["channel"], 3)
+        self.assertEqual(cfg["hosts"]["mac"]["dualup_input"], "usbc")
+        self.assertEqual(cfg["hosts"]["linux"]["dualup_input"], "dp")
+        self.assertEqual(cfg["mxswitch"], "/opt/mxswitch")
+        self.assertTrue(cfg["_mouse_enabled"])
+        self.assertTrue(cfg["_dualup_enabled"])
+
+    def test_legacy_keys_still_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "this_host": "mac",
+                        "target_channel": 2,
+                        "mxswitch": "/old/mxswitch",
+                        "lgdualup": "/old/lgdualup",
+                        "hosts": {
+                            "mac": {"channel": 1, "dualup_input": "hdmi1"},
+                            "linux": {"channel": 2},
+                        },
+                    }
+                )
+            )
+            with mock.patch.object(ds, "SYSTEM", "Darwin"), mock.patch.object(
+                ds, "CONFIG_CANDIDATES", (cfg_path,)
+            ), mock.patch.object(ds, "default_this_host", return_value="mac"):
+                cfg = ds.load_config()
+        self.assertEqual(cfg["this_host"], "mac")
+        self.assertEqual(cfg["target_channel"], 2)
+        self.assertEqual(cfg["mxswitch"], "/old/mxswitch")
+        self.assertEqual(cfg["lgdualup"], "/old/lgdualup")
+        self.assertEqual(cfg["hosts"]["mac"]["dualup_input"], "hdmi1")
+
+    def test_dualup_adapter_can_be_disabled(self) -> None:
+        self.assertIsNone(ds.lgdualup_path({"_dualup_enabled": False, "lgdualup": "/tmp/lgdualup"}))
+
+    def test_which_adapter_prefers_libexec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Path(tmp) / "lib"
+            lib.mkdir()
+            helper = lib / "lgdualup"
+            helper.write_text("#!/bin/sh\n")
+            helper.chmod(0o755)
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                path = ds.which_adapter("lgdualup", "lgdualup")
+        self.assertEqual(path, helper)
+
+    def test_which_adapter_honors_explicit_missing_name(self) -> None:
+        with mock.patch.object(ds, "libexec_dir", return_value=Path("/no/libexec")):
+            self.assertIsNone(ds.which_adapter("lgdualup", "lgdualup-missing"))
+
+
+class MenubarSourceTests(unittest.TestCase):
+    def test_menubar_only_invokes_desk_switch(self) -> None:
+        src = (ROOT / "macos" / "DeskSwitchBar" / "DeskSwitchBar.swift").read_text()
+        self.assertIn('["status", "--json"]', src)
+        self.assertIn('["to", "mac"]', src)
+        self.assertIn('["to", "linux"]', src)
+        self.assertIn('["full"]', src)
+        self.assertIn('["pbp"]', src)
+        self.assertIn("desk-switch", src)
+        self.assertNotIn("lib/desk-switch/mxswitch", src)
+        self.assertNotIn("lib/desk-switch/lgdualup", src)
 
 
 class LgdualupCallTests(unittest.TestCase):
