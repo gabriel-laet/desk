@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Apply macOS resolution/rotation for DualUp full vs PBP.
+
+Used by the desk-switch dualup adapter after `lgdualup pbp`. Not a
+user-facing command — call `desk-switch full` / `desk-switch pbp`.
+
+    dualup-layout full|pbp [--id UUID] [--res WxH] [--degree N]
+
+The panel is physically tilted. Both modes use degree 270:
+  full → 2880x2560 @ 270
+  pbp  → 2880x1280 @ 270 (tilted vertical half, on-screen 1280×2880)
+         then 1280x2880 / 2560x1440 / 1920x1080 if EDID has those instead
+
+Exit 0: layout applied (or displayplacer missing — skipped)
+Exit 2: target mode not in EDID yet (caller should retry)
+Exit 1: hard failure
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+FULL_RES = "2880x2560"
+PBP_RES_CANDIDATES = ("2880x1280", "1280x2880", "2560x1440", "1920x1080", "1080x1920")
+PBP_EXCLUDE = {"2880x2560", "2560x2880"}
+RES_RE = re.compile(r"(?:res:)?(\d{3,5})x(\d{3,5})")
+TILT_DEGREE = 270
+DUALUP_MARKERS = (
+    "2880x2560",
+    "2560x2880",
+    "2560x1440",
+    "2880x1280",
+    "1280x2880",
+    "28 inch",
+    "DualUp",
+    "SDQHD",
+    "28MQ780",
+)
+
+
+def run(cmd: list[str], timeout: float = 8.0) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def parse_screens(text: str) -> list[dict]:
+    screens: list[dict] = []
+    current: dict | None = None
+    for line in text.splitlines():
+        if line.startswith("Persistent screen id:"):
+            if current:
+                screens.append(current)
+            current = {
+                "id": line.split(":", 1)[1].strip(),
+                "text": line + "\n",
+                "builtin": False,
+            }
+            continue
+        if current is None:
+            continue
+        current["text"] += line + "\n"
+        if re.search(r"built[ -]?in", line, re.I):
+            current["builtin"] = True
+    if current:
+        screens.append(current)
+    return screens
+
+
+def looks_like_dualup(screen: dict) -> bool:
+    blob = screen.get("text") or ""
+    if screen.get("builtin"):
+        return False
+    return any(marker.lower() in blob.lower() for marker in DUALUP_MARKERS)
+
+
+def detect_id(screens: list[dict]) -> str:
+    for screen in screens:
+        if looks_like_dualup(screen) and screen.get("id"):
+            return str(screen["id"])
+    return ""
+
+
+def mode_offered(text: str, res: str) -> bool:
+    if f"res:{res}" in text:
+        return True
+    return bool(re.search(rf"\b{re.escape(res)}\b", text))
+
+
+def listed_modes(text: str) -> list[tuple[int, int, str]]:
+    found: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for match in RES_RE.finditer(text):
+        width, height = int(match.group(1)), int(match.group(2))
+        key = f"{width}x{height}"
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append((width, height, key))
+    return found
+
+
+def best_landscape(text: str) -> str | None:
+    """Prefer known PBP sizes, else the largest landscape mode EDID lists."""
+    landscapes = [
+        (w, h, key)
+        for w, h, key in listed_modes(text)
+        if w > h and key not in PBP_EXCLUDE
+    ]
+    if not landscapes:
+        return None
+    keys = {key for _w, _h, key in landscapes}
+    for pref in PBP_RES_CANDIDATES:
+        if pref in keys:
+            return pref
+    _w, _h, key = max(landscapes, key=lambda item: item[0] * item[1])
+    return key
+
+
+def pick_res(mode: str, text: str, requested: str) -> str | None:
+    if requested:
+        return requested if mode_offered(text, requested) else None
+    if mode == "full":
+        return FULL_RES if mode_offered(text, FULL_RES) else None
+    return best_landscape(text)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("full", "pbp"))
+    parser.add_argument("--id", default=os.environ.get("DUALUP_DISPLAY_ID", ""))
+    parser.add_argument("--res", default="")
+    parser.add_argument("--degree", type=int, default=None)
+    args = parser.parse_args(argv)
+
+    degree = TILT_DEGREE if args.degree is None else args.degree
+    display_id = (args.id or "").strip()
+
+    placer = shutil.which("displayplacer")
+    if not placer:
+        print(
+            "dualup-layout: displayplacer not found — "
+            "brew install jakehilborn/jakehilborn/displayplacer (OS layout skipped)",
+            file=sys.stderr,
+        )
+        return 0
+
+    try:
+        listed = run([placer, "list"], timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"dualup-layout: displayplacer list failed: {exc}", file=sys.stderr)
+        return 1
+    if listed.returncode != 0:
+        err = (listed.stderr or listed.stdout or "").strip()
+        print(f"dualup-layout: displayplacer list failed: {err}", file=sys.stderr)
+        return 1
+
+    text = listed.stdout or ""
+    screens = parse_screens(text)
+    if display_id:
+        if display_id not in text:
+            print(f"dualup-layout: display {display_id} not in displayplacer list yet", file=sys.stderr)
+            return 2
+    else:
+        display_id = detect_id(screens)
+        if not display_id:
+            print("dualup-layout: DualUp display not found yet (set adapters.dualup.display_id)", file=sys.stderr)
+            return 2
+
+    res = pick_res(args.mode, text, args.res.strip())
+    if not res:
+        want = args.res.strip() or (FULL_RES if args.mode == "full" else "a landscape PBP mode")
+        print(f"dualup-layout: {want} not in EDID yet", file=sys.stderr)
+        return 2
+
+    cmd = [placer, f"id:{display_id} res:{res} degree:{degree}"]
+    print(f"dualup-layout {args.mode} → id:{display_id} res:{res} degree:{degree}")
+    try:
+        applied = run(cmd, timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"dualup-layout: displayplacer apply failed: {exc}", file=sys.stderr)
+        return 2
+    out = (applied.stdout or "").rstrip()
+    err = (applied.stderr or "").rstrip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr if applied.returncode else sys.stdout)
+    if applied.returncode != 0:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

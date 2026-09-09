@@ -15,9 +15,10 @@ Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 `lgdualup` (DualUp USB HID — `macos/lgdualup.c`, `linux/lgdualup.sh`, udev
 rule), Omarchy bar plugin, macOS menu bar app, LaunchAgent / systemd units.
 
-**Not in this repo:** peer-SSH DualUp layout sync, a `dualup-layout` script,
-or anything that remotes into the other machine. `full` / `pbp` talk to the
-local USB helper only.
+The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
+(`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS
+resolution/rotation (`dualup-layout` via displayplacer on macOS, hyprctl on
+Linux). Optional `adapters.dualup.peer` SSHes layout-only to the other host.
 
 ## How it works
 
@@ -43,6 +44,17 @@ desk-switch to linux          (or the Omarchy / macOS panel)
         │
         ├─ mouse adapter  → Linux channel
         └─ dualup adapter → DualUp input (if configured + USB is on this host)
+
+desk-switch pbp                 (or DualUp PBP in the menu bar / Omarchy panel)
+        │
+        ├─ lgdualup pbp 50-50
+        ├─ lgdualup pbp-assign hdmi1 dp   (Main + Sub; 0xF4 alone cannot set Sub)
+        └─ dualup-layout pbp      (Mac 2880x1280@270 / Linux 1280x2880 t3)
+
+desk-switch full
+        │
+        ├─ lgdualup pbp full
+        └─ dualup-layout full     (Mac 2880x2560@270 / Linux 2560x2880 t3)
 ```
 
 Adapters (more can be added later without renaming the model):
@@ -51,7 +63,7 @@ Adapters (more can be added later without renaming the model):
 |---|---|---|
 | **mouse** | HID++ Easy-Switch hop | `~/.local/lib/desk-switch/mxswitch` |
 | **hosts** | Mac vs Linux, channels, HHKB follow target | config |
-| **dualup** | DualUp input + PBP/full | `~/.local/lib/desk-switch/lgdualup` |
+| **dualup** | DualUp USB input + PBP/full + OS layout | `lgdualup` + `dualup-layout` |
 
 `status --json` exposes `adapters.mouse` / `adapters.hosts` / `adapters.dualup`
 and still has the Omarchy fields (`target_hint`, `lgdualup`, `hhkb`,
@@ -64,9 +76,10 @@ and still has the Omarchy fields (`target_hint`, `lgdualup`, `hhkb`,
 - Python 3.9+
 - macOS: Xcode Command Line Tools (`clang` for helpers; `swiftc` for the menu bar)
 - Linux: `hidraw` + the udev rules below
-- DualUp hardware is optional. The helper **is** in-tree and installed by
-  `make install`. Control is USB HID `043e:9a39` — plug that cable into the
-  machine that should flip the monitor.
+- DualUp hardware is optional. The USB helper **and** the OS layout helper
+  are in-tree (`make install`). Control is USB HID `043e:9a39` — plug that
+  cable into the machine that should flip the monitor. macOS layout needs
+  `displayplacer`; Linux layout needs Hyprland `hyprctl`.
 
 Pairing that works:
 
@@ -98,7 +111,8 @@ install` updates. Put `~/.local/bin` on `PATH`.
 ~/.local/bin/desk-switch                 # the CLI
 ~/.local/bin/hhkb-mx-follow              # same program (legacy name)
 ~/.local/lib/desk-switch/mxswitch        # mouse adapter
-~/.local/lib/desk-switch/lgdualup        # dualup adapter (in-tree)
+~/.local/lib/desk-switch/lgdualup        # dualup USB helper (in-tree)
+~/.local/lib/desk-switch/dualup-layout   # dualup OS layout (displayplacer / hyprctl)
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
 ~/.config/desk-switch/config.json        # first install only
@@ -253,9 +267,9 @@ desk-switch to linux
 desk-switch to linux --mouse-only
 desk-switch switch mac          # same as `to mac`
 desk-switch switch 2            # mouse only, Easy-Switch 1|2|3
-desk-switch pbp                 # uses adapters.dualup.pbp_mode
-desk-switch pbp 50-50           # or 50 / 50/50 / on / 66 / 66/33
-desk-switch full                # single pane (lgdualup pbp full)
+desk-switch pbp                 # USB PBP + hdmi1/dp inputs + OS layout
+desk-switch pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
+desk-switch full                # USB full + OS layout (Mac 2880x2560@270 / Linux 2560x2880 t3)
 desk-switch watch               # HHKB leave → mouse only
 desk-switch watch --dry-run
 desk-switch --version
@@ -264,8 +278,23 @@ desk-switch --version
 `watch` never touches DualUp. Use `to mac` / `to linux` (or a panel) for
 mouse + monitor together.
 
-`pbp` / `full` no-op with a message if the dualup adapter is missing. They
-do not SSH anywhere.
+`pbp` / `full` no-op with a message if the dualup adapter is missing. After
+a successful USB toggle, `pbp` assigns the cabling pair (Linux DisplayPort
+`dp` first, then Mac Studio `hdmi1`) and both commands apply OS layout.
+PBP Main/Sub assignment uses `lgdualup pbp-assign` (sub VCPs 0x55/0x5A plus
+a Main→swap→Main dance). Plain `input dp` cannot change the sub window
+(it stays HDMI2). After assign, layout retries ~8s while EDID catches up.
+PBP layout is OS-specific (same on-screen half, different EDID naming):
+
+| Host | PBP | Full |
+|---|---|---|
+| macOS (displayplacer) | `2880x1280 @ 270°` → on-screen 1280×2880 | `2880x2560 @ 270°` |
+| Linux / Omarchy (`hyprctl`, typically `DP-2`) | `1280x2880@59.96` transform **3** | `2560x2880` transform **3** |
+
+Not `2880x1280` t3 (stretched) and not `1280x2880` t0 (wrong orientation).
+If the half mode is not in EDID yet, the helper exits 2 and `desk-switch`
+retries.
+Set `adapters.dualup.peer` to SSH layout-only to the other machine.
 
 Compat: `hhkb-mx-follow` is the same CLI. `mxswitch` / `lgdualup` on PATH
 exec the private helpers.
@@ -289,7 +318,8 @@ Edit [`config.example.json`](config.example.json) →
       "enabled": true,
       "pbp_mode": "50-50",
       "switch_pbp": false,
-      "inputs": { "mac": "usbc", "linux": "dp" }
+      "display_id": "9134432D-0196-4653-9712-EFCAF1980612",
+      "inputs": { "mac": "hdmi1", "linux": "dp" }
     }
   }
 }
@@ -300,17 +330,37 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
 | `adapters.hosts.*.channel` | Easy-Switch slot for `to mac` / `to linux` |
-| `adapters.dualup.inputs.*` | DualUp input name for that host (`usbc`, `dp`, `hdmi1`, …). Empty = mouse only |
-| `adapters.dualup.switch_pbp` | If true, `to mac\|linux` also sets PBP |
+| `adapters.dualup.inputs.*` | DualUp input for that host. PBP uses Mac=`hdmi1`, Linux=`dp` when empty. `to mac\|linux` without `switch_pbp` leaves input alone if empty |
+| `adapters.dualup.switch_pbp` | If true, `to mac\|linux` also runs the PBP sequence (USB + inputs + layout) |
 | `adapters.dualup.pbp_mode` | Mode for `desk-switch pbp` and for `to` when `switch_pbp` is true |
+| `adapters.dualup.display_id` | macOS displayplacer UUID or Hyprland connector. Empty = detect DualUp |
+| `adapters.dualup.layout` | Apply OS resolution/rotation after USB (default true) |
+| `adapters.dualup.peer` | Optional SSH host; runs `dualup-layout` there (no USB) |
 | `poll_interval_s` / `absent_polls_required` | Watcher debounce (defaults 0.5s × 4 ≈ 2s) |
 
 Inputs the helper accepts: `usbc` / `usb-c` / `dp3`, `dp` / `dp1`, `dp2`,
 `hdmi1`, `hdmi2`, `auto`. List devices: `lgdualup --list` (or `--info`).
 
 PBP on `to mac|linux` stays off unless `switch_pbp` is true or a host entry
-has `"pbp": "…"`. `desk-switch full` / `pbp` always pass through when the
-helper exists.
+has `"pbp": "…"`. `desk-switch full` / `pbp` always run the dualup adapter
+when the USB helper exists.
+
+Desk cabling: Mac Studio = **HDMI1**, Omarchy/Linux = **DisplayPort (`dp`)**.
+Do not set Mac to `usbc`.
+
+Confirmed desk layouts (same on-screen DualUp geometry, different EDID names):
+
+| Host | PBP | Full |
+|---|---|---|
+| macOS (displayplacer) | **`2880x1280 @ 270°`** | `2880x2560 @ 270°` |
+| Linux / Omarchy (`DP-2`) | **`1280x2880@59.96` transform 3** | `2560x2880` transform 3 |
+
+`2880x1280` t3 stretches; `1280x2880` t0 is the wrong orientation. If EDID
+has not published the half mode yet, the helper exits 2 and `desk-switch`
+retries.
+macOS needs
+[displayplacer](https://github.com/jakehilborn/displayplacer)
+(`brew install jakehilborn/jakehilborn/displayplacer`). Linux uses `hyprctl`.
 
 Legacy keys (`mxswitch`, `lgdualup`, `this_host`, `hosts`, `target_channel`)
 still load. New installs write the adapters shape.
@@ -339,7 +389,12 @@ must be in the **host running the command**. Typical desk: cable in the Mac,
 so `to linux` from the Mac flips the input; Linux cannot see the device.
 `make install` installs the helper; empty `adapters.dualup.inputs` means
 `to mac|linux` leaves the input alone. Linux also needs
-`43-lg-dualup.rules`. `full` / `pbp` never talk to a peer over SSH.
+`43-lg-dualup.rules`. After PBP the host must also get the OS layout —
+Mac `2880x1280@270`, Linux `1280x2880` transform 3 (not t0, not `2880x1280` t3).
+If Linux PBP is stretched or rotated wrong, `make install` again. Set
+`adapters.dualup.display_id` (`DP-2` on Omarchy) if auto-detect misses
+the DualUp. Optional `adapters.dualup.peer` SSHes layout-only to the
+other machine.
 
 **Panel / menu bar shows `?` or “desk-switch not found”.** CLI not installed,
 or GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in
