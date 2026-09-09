@@ -643,26 +643,61 @@ class DualupLayoutScriptTests(unittest.TestCase):
             proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
         self.assertEqual(proc.returncode, 2)
 
-    def test_linux_pbp_uses_transform_3(self) -> None:
+    def _write_hyprctl(self, bin_dir: Path, monitors_json: str) -> None:
+        hypr = bin_dir / "hyprctl"
+        hypr.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = -j ] || [ \"$2\" = -j ]; then\n"
+            f"cat <<'EOF'\n{monitors_json}\nEOF\n"
+            "exit 0\n"
+            "fi\n"
+            "echo \"keyword:$*\"\n"
+        )
+        hypr.chmod(0o755)
+
+    def test_linux_pbp_uses_1280x2880_transform_0(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            hypr = bin_dir / "hyprctl"
-            hypr.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = -j ] || [ \"$2\" = -j ]; then\n"
-                "cat <<'EOF'\n"
-                "[{\"name\":\"DP-3\",\"description\":\"LG Electronics LG SDQHD\","
-                "\"width\":1920,\"height\":1080,\"x\":0,\"y\":0,\"scale\":1.0,"
-                "\"refreshRate\":60.0,\"availableModes\":[\"1920x1080@60.00Hz\"]}]\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo \"keyword:$*\"\n"
+            self._write_hyprctl(
+                bin_dir,
+                '[{"name":"DP-2","description":"LG Electronics LG SDQHD",'
+                '"width":1280,"height":2880,"x":0,"y":0,"scale":1.0,'
+                '"refreshRate":59.96,"availableModes":['
+                '"1280x2880@59.96Hz","2560x2880@59.96Hz","2560x1440@59.96Hz"]}]',
             )
-            hypr.chmod(0o755)
-            proc = self._run_script(self.LNX, ["pbp", "--id", "DP-3"], bin_dir)
+            proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertIn("1920x1080@60,0x0,1,transform,3", proc.stdout)
+        self.assertIn("DP-2,1280x2880@59.96,0x0,1,transform,0", proc.stdout)
+        self.assertNotIn("2560x1440", proc.stdout)
+        self.assertNotIn("transform,3", proc.stdout)
+
+    def test_linux_full_uses_2560x2880_transform_3(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_hyprctl(
+                bin_dir,
+                '[{"name":"DP-2","description":"LG Electronics LG SDQHD",'
+                '"width":2560,"height":2880,"x":0,"y":0,"scale":1.0,'
+                '"refreshRate":59.96,"availableModes":['
+                '"2560x2880@59.96Hz","2880x2560@59.96Hz","1280x2880@59.96Hz"]}]',
+            )
+            proc = self._run_script(self.LNX, ["full", "--id", "DP-2"], bin_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn("DP-2,2560x2880@59.96,0x0,1,transform,3", proc.stdout)
+        self.assertNotIn("2880x2560", proc.stdout)
+
+    def test_linux_pbp_ignores_2560x1440_and_exits_2_without_half_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_hyprctl(
+                bin_dir,
+                '[{"name":"DP-2","description":"LG Electronics LG SDQHD",'
+                '"width":2560,"height":1440,"x":0,"y":0,"scale":1.0,'
+                '"refreshRate":60.0,"availableModes":["2560x1440@60.00Hz"]}]',
+            )
+            proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
+        self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
+        self.assertNotIn("2560x1440", proc.stdout)
 
 
 if __name__ == "__main__":

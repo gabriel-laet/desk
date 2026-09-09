@@ -6,10 +6,13 @@ user-facing command — call `desk-switch full` / `desk-switch pbp`.
 
     dualup-layout full|pbp [--id connector] [--res WxH] [--degree N]
 
-`--id` is a Hyprland connector (`DP-3`) or a description substring.
-The panel is physically tilted. Both modes use degree 270 (transform 3):
-  full → 2880x2560 @ 270
-  pbp  → 2880x1280 @ 270 (tilted vertical half), then 1280x2880 / 2560x1440 / 1920x1080
+`--id` is a Hyprland connector (`DP-2`) or a description substring.
+
+Confirmed Omarchy modes (matches Mac 2880x1280@270 / 2880x2560@270):
+  full → 2560x2880, transform 3
+  pbp  → 1280x2880, transform 0   (not 2560x1440 t0)
+
+`--degree` overrides transform (0→0, 90→1, 180→2, 270→3) when set.
 
 Exit 0: layout applied (or hyprctl missing — skipped)
 Exit 2: target mode not in EDID yet (caller should retry)
@@ -27,16 +30,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-FULL_RES = "2880x2560"
-PBP_RES_CANDIDATES = ("2880x1280", "1280x2880", "2560x1440", "1920x1080", "1080x1920")
-PBP_EXCLUDE = {"2880x2560", "2560x2880"}
-TILT_DEGREE = 270
+FULL_RES = "2560x2880"
+FULL_RES_FALLBACKS = ("2560x2880", "2880x2560")
+PBP_RES_CANDIDATES = ("1280x2880", "2880x1280")
+FULL_TRANSFORM = 3
+PBP_TRANSFORM = 0
 DUALUP_MARKERS = (
-    "2880x2560",
     "2560x2880",
-    "2560x1440",
-    "2880x1280",
+    "2880x2560",
     "1280x2880",
+    "2880x1280",
     "DualUp",
     "SDQHD",
     "28MQ780",
@@ -101,37 +104,18 @@ def mode_offered(mon: dict, res: str) -> bool | None:
     return any(res in str(item) for item in modes)
 
 
-def listed_mode_keys(mon: dict) -> list[str]:
-    keys: list[str] = []
-    seen: set[str] = set()
-    for item in available_modes(mon):
-        match = re.search(r"(\d{3,5})x(\d{3,5})", str(item))
-        if not match:
+def pick_from(mon: dict, candidates: tuple[str, ...]) -> str | None:
+    saw_list = False
+    for res in candidates:
+        offered = mode_offered(mon, res)
+        if offered is None:
             continue
-        key = f"{match.group(1)}x{match.group(2)}"
-        if key in seen:
-            continue
-        seen.add(key)
-        keys.append(key)
-    return keys
-
-
-def best_landscape(mon: dict) -> str | None:
-    """Prefer known PBP sizes, else the largest landscape mode EDID lists."""
-    landscapes: list[tuple[int, int, str]] = []
-    for key in listed_mode_keys(mon):
-        width_s, height_s = key.split("x", 1)
-        width, height = int(width_s), int(height_s)
-        if width > height and key not in PBP_EXCLUDE:
-            landscapes.append((width, height, key))
-    if not landscapes:
-        return None
-    keys = {key for _w, _h, key in landscapes}
-    for pref in PBP_RES_CANDIDATES:
-        if pref in keys:
-            return pref
-    _w, _h, key = max(landscapes, key=lambda item: item[0] * item[1])
-    return key
+        saw_list = True
+        if offered:
+            return res
+    if not saw_list:
+        return candidates[0]
+    return None
 
 
 def pick_res(mode: str, mon: dict, requested: str) -> str | None:
@@ -141,16 +125,8 @@ def pick_res(mode: str, mon: dict, requested: str) -> str | None:
             return None
         return requested
     if mode == "full":
-        offered = mode_offered(mon, FULL_RES)
-        if offered is False:
-            return None
-        return FULL_RES
-    picked = best_landscape(mon)
-    if picked:
-        return picked
-    if not available_modes(mon):
-        return PBP_RES_CANDIDATES[0]
-    return None
+        return pick_from(mon, FULL_RES_FALLBACKS)
+    return pick_from(mon, PBP_RES_CANDIDATES)
 
 
 def looks_like_dualup(mon: dict) -> bool:
@@ -180,12 +156,18 @@ def pick_monitor(mons: list[dict], display_id: str) -> dict | None:
     return None
 
 
-def current_hz(mon: dict) -> str:
+def hz_for(mon: dict, res: str) -> str:
+    for item in available_modes(mon):
+        match = re.search(rf"{re.escape(res)}@([\d.]+)", str(item))
+        if match:
+            return match.group(1).rstrip(".")
     raw = mon.get("refreshRate")
     try:
         hz = float(raw)
         if hz > 0:
-            return str(int(round(hz)))
+            if abs(hz - round(hz)) < 0.02:
+                return str(int(round(hz)))
+            return f"{hz:.2f}".rstrip("0").rstrip(".")
     except (TypeError, ValueError):
         pass
     return "60"
@@ -199,8 +181,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--degree", type=int, default=None)
     args = parser.parse_args(argv)
 
-    degree = TILT_DEGREE if args.degree is None else args.degree
-    transform = DEGREE_TO_TRANSFORM.get(int(degree) % 360, 3)
+    if args.degree is not None:
+        transform = DEGREE_TO_TRANSFORM.get(int(args.degree) % 360, PBP_TRANSFORM)
+    else:
+        transform = PBP_TRANSFORM if args.mode == "pbp" else FULL_TRANSFORM
 
     hyprctl = hyprctl_bin()
     if not hyprctl:
@@ -231,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         scale = float(mon.get("scale") or 1.0)
     except (TypeError, ValueError):
         scale = 1.0
-    hz = current_hz(mon)
+    hz = hz_for(mon, res)
     scale_s = str(int(scale)) if scale == int(scale) else str(scale)
     spec_s = f"{name},{res}@{hz},{x}x{y},{scale_s},transform,{transform}"
     print(f"dualup-layout {args.mode} → {spec_s}")

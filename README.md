@@ -49,12 +49,12 @@ desk-switch pbp                 (or DualUp PBP in the menu bar / Omarchy panel)
         │
         ├─ lgdualup pbp 50-50
         ├─ lgdualup pbp-assign hdmi1 dp   (Main + Sub; 0xF4 alone cannot set Sub)
-        └─ dualup-layout pbp              (2880x1280 @ 270 → on-screen 1280×2880)
+        └─ dualup-layout pbp      (Mac 2880x1280@270 / Linux 1280x2880 t0)
 
 desk-switch full
         │
         ├─ lgdualup pbp full
-        └─ dualup-layout full     (2880x2560 @ 270)
+        └─ dualup-layout full     (Mac 2880x2560@270 / Linux 2560x2880 t3)
 ```
 
 Adapters (more can be added later without renaming the model):
@@ -267,9 +267,9 @@ desk-switch to linux
 desk-switch to linux --mouse-only
 desk-switch switch mac          # same as `to mac`
 desk-switch switch 2            # mouse only, Easy-Switch 1|2|3
-desk-switch pbp                 # USB PBP + hdmi1/dp inputs + tilted OS layout
+desk-switch pbp                 # USB PBP + hdmi1/dp inputs + OS layout
 desk-switch pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
-desk-switch full                # USB full + 2880x2560 @ 270°
+desk-switch full                # USB full + OS layout (Mac 2880x2560@270 / Linux 2560x2880 t3)
 desk-switch watch               # HHKB leave → mouse only
 desk-switch watch --dry-run
 desk-switch --version
@@ -284,9 +284,16 @@ a successful USB toggle, `pbp` assigns the cabling pair (Linux DisplayPort
 PBP Main/Sub assignment uses `lgdualup pbp-assign` (sub VCPs 0x55/0x5A plus
 a Main→swap→Main dance). Plain `input dp` cannot change the sub window
 (it stays HDMI2). After assign, layout retries ~8s while EDID catches up.
-PBP prefers `2880x1280 @ 270°` (tilted half = 1280×2880), then other
-landscape modes if that size is not in EDID yet. Set
-`adapters.dualup.peer` to SSH layout-only to the other machine.
+PBP layout is OS-specific (same on-screen half, different EDID naming):
+
+| Host | PBP | Full |
+|---|---|---|
+| macOS (displayplacer) | `2880x1280 @ 270°` → on-screen 1280×2880 | `2880x2560 @ 270°` |
+| Linux / Omarchy (`hyprctl`, typically `DP-2`) | `1280x2880` transform **0** | `2560x2880` transform **3** |
+
+Not `2560x1440` transform 0 — that was the old Linux helper. If the half
+mode is not in EDID yet, the helper exits 2 and `desk-switch` retries.
+Set `adapters.dualup.peer` to SSH layout-only to the other machine.
 
 Compat: `hhkb-mx-follow` is the same CLI. `mxswitch` / `lgdualup` on PATH
 exec the private helpers.
@@ -340,10 +347,11 @@ when the USB helper exists.
 Desk cabling: Mac Studio = **HDMI1**, Omarchy/Linux = **DisplayPort (`dp`)**.
 Do not set Mac to `usbc`.
 
-The panel is physically tilted. **full** is `2880x2560 @ 270°`. **PBP** is
-the same tilt (not `degree:0`): **`2880x1280 @ 270°`** (on-screen
-`1280×2880`). Not `2560x1440@0` and not `1080x1920@270`. If EDID has not
-published `2880x1280` yet, the helper takes the next landscape size.
+The panel is physically tilted. macOS reports the tilt as displayplacer
+`degree:270`; Hyprland reports the matching half as **`1280x2880` transform 0**
+(confirmed on Omarchy `DP-2` @ 59.96 Hz) and full as **`2560x2880` transform 3**.
+Not the old Linux `2560x1440` t0. If EDID has not published the half mode
+yet, the helper exits 2 and `desk-switch` retries.
 macOS needs
 [displayplacer](https://github.com/jakehilborn/displayplacer)
 (`brew install jakehilborn/jakehilborn/displayplacer`). Linux uses `hyprctl`.
@@ -375,10 +383,12 @@ must be in the **host running the command**. Typical desk: cable in the Mac,
 so `to linux` from the Mac flips the input; Linux cannot see the device.
 `make install` installs the helper; empty `adapters.dualup.inputs` means
 `to mac|linux` leaves the input alone. Linux also needs
-`43-lg-dualup.rules`. After PBP the host must also get the tilted layout —
-if rotation stays 0° you are on an old helper; `make install` again. Set
-`adapters.dualup.display_id` if auto-detect misses the DualUp. Optional
-`adapters.dualup.peer` SSHes layout-only to the other machine.
+`43-lg-dualup.rules`. After PBP the host must also get the OS layout —
+Mac `2880x1280@270`, Linux `1280x2880` transform 0 (not `2560x1440` t0).
+If Linux PBP is still landscape 2560×1440, `make install` again. Set
+`adapters.dualup.display_id` (`DP-2` on Omarchy) if auto-detect misses
+the DualUp. Optional `adapters.dualup.peer` SSHes layout-only to the
+other machine.
 
 **Panel / menu bar shows `?` or “desk-switch not found”.** CLI not installed,
 or GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in
