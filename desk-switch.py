@@ -455,8 +455,9 @@ def call_lgdualup(cfg: dict, args: list[str], *, missing: str) -> int:
     if path is None:
         print(missing)
         return 0
+    timeout = 15.0 if args and args[0] == "pbp-assign" else 8.0
     try:
-        proc = run([str(path), *args], timeout=8.0)
+        proc = run([str(path), *args], timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"lgdualup failed to start: {exc}", file=sys.stderr)
         return 1
@@ -582,17 +583,16 @@ def dualup_pbp_inputs(cfg: dict) -> list[tuple[str, str]]:
 
 
 def dualup_assign_pbp_inputs(cfg: dict) -> int:
-    """After PBP enable, DualUp defaults to HDMI1+HDMI2 — reassign the desk pair."""
-    rc = 0
-    for host, name in dualup_pbp_inputs(cfg):
-        print(f"DualUp input → {name} ({host})")
-        inp_rc = call_lgdualup(
-            cfg,
-            ["input", name],
-            missing="lgdualup not on PATH — run `make install`",
-        )
-        rc = rc or inp_rc
-    return rc
+    """Assign PBP Main/Sub. 0xF4 alone cannot set the sub window (stays HDMI2)."""
+    by_host = dict(dualup_pbp_inputs(cfg))
+    main = by_host.get("mac") or PBP_INPUT_DEFAULTS["mac"]
+    sub = by_host.get("linux") or PBP_INPUT_DEFAULTS["linux"]
+    print(f"DualUp PBP assign → main={main} (mac)  sub={sub} (linux)")
+    return call_lgdualup(
+        cfg,
+        ["pbp-assign", main, sub],
+        missing="lgdualup not on PATH — run `make install`",
+    )
 
 
 def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:

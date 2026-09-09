@@ -48,9 +48,8 @@ desk-switch to linux          (or the Omarchy / macOS panel)
 desk-switch pbp                 (or DualUp PBP in the menu bar / Omarchy panel)
         │
         ├─ lgdualup pbp 50-50
-        ├─ lgdualup input dp      (Linux / secondary)
-        ├─ lgdualup input hdmi1   (Mac / primary)
-        └─ dualup-layout pbp      (tilted half: 2560x1440 @ 270, else 1920x1080 @ 270)
+        ├─ lgdualup pbp-assign hdmi1 dp   (Main + Sub; 0xF4 alone cannot set Sub)
+        └─ dualup-layout pbp              (2880x1280 @ 270 → on-screen 1280×2880)
 
 desk-switch full
         │
@@ -282,9 +281,11 @@ mouse + monitor together.
 `pbp` / `full` no-op with a message if the dualup adapter is missing. After
 a successful USB toggle, `pbp` assigns the cabling pair (Linux DisplayPort
 `dp` first, then Mac Studio `hdmi1`) and both commands apply OS layout.
-After inputs settle, layout retries ~8s while EDID catches up. PBP does
-not require `2560x1440`: it uses that size at 270° when offered, otherwise
-the best landscape mode (often `1920x1080 @ 270°`). Set
+PBP Main/Sub assignment uses `lgdualup pbp-assign` (sub VCPs 0x55/0x5A plus
+a Main→swap→Main dance). Plain `input dp` cannot change the sub window
+(it stays HDMI2). After assign, layout retries ~8s while EDID catches up.
+PBP prefers `2880x1280 @ 270°` (tilted half = 1280×2880), then other
+landscape modes if that size is not in EDID yet. Set
 `adapters.dualup.peer` to SSH layout-only to the other machine.
 
 Compat: `hhkb-mx-follow` is the same CLI. `mxswitch` / `lgdualup` on PATH
@@ -340,8 +341,9 @@ Desk cabling: Mac Studio = **HDMI1**, Omarchy/Linux = **DisplayPort (`dp`)**.
 Do not set Mac to `usbc`.
 
 The panel is physically tilted. **full** is `2880x2560 @ 270°`. **PBP** is
-the same tilt (not `degree:0`): prefer `2560x1440 @ 270°`, else the best
-landscape EDID mode — commonly `1920x1080 @ 270°` (on-screen `1080x1920`).
+the same tilt (not `degree:0`): **`2880x1280 @ 270°`** (on-screen
+`1280×2880`). Not `2560x1440@0` and not `1080x1920@270`. If EDID has not
+published `2880x1280` yet, the helper takes the next landscape size.
 macOS needs
 [displayplacer](https://github.com/jakehilborn/displayplacer)
 (`brew install jakehilborn/jakehilborn/displayplacer`). Linux uses `hyprctl`.

@@ -3,7 +3,14 @@
 #
 #   ./lgdualup.sh --info
 #   ./lgdualup.sh input usbc|dp|dp1|dp2|hdmi1|hdmi2
+#   ./lgdualup.sh input-main <name>
+#   ./lgdualup.sh input-sub <name>
+#   ./lgdualup.sh swap
+#   ./lgdualup.sh pbp-assign <main> <sub>
 #   ./lgdualup.sh pbp on|off|full|50-50|1|2|3|5
+#
+# VCP 0xF4 @ 0x50 is Main only. Sub window needs 0x55/0x5A and/or the
+# Main→swap→Main dance (0xF6).
 #
 # hidraw is root-only by default. One-time:
 #   sudo cp linux/43-lg-dualup.rules /etc/udev/rules.d/
@@ -93,7 +100,7 @@ parse_pbp() {
 }
 
 usage() {
-    echo "usage: $0 --info | --list | input <name> | pbp <mode>" >&2
+    echo "usage: $0 --info | --list | input|input-main|input-sub <name> | swap | pbp-assign <main> <sub> | pbp <mode>" >&2
 }
 
 main() {
@@ -122,7 +129,7 @@ main() {
             echo "hidraw : $node"
             exit 0
             ;;
-        input|pbp) ;;
+        input|input-main|input-sub|swap|pbp-assign|pbp) ;;
         *) usage; exit 2 ;;
     esac
 
@@ -138,14 +145,53 @@ main() {
     fi
 
     case "$cmd" in
-        input)
+        input|input-main)
             local val
             val=$(parse_input "${2:-}") || {
                 echo "unknown input: ${2:-}" >&2
                 exit 2
             }
             send_vcp "$node" $((0x50)) $((0xF4)) "$val" || exit 1
-            printf 'input -> %s (0x%02x)\n' "$2" "$val"
+            printf 'input-main -> %s (0x%02x)\n' "$2" "$val"
+            ;;
+        input-sub)
+            local val
+            val=$(parse_input "${2:-}") || {
+                echo "unknown input: ${2:-}" >&2
+                exit 2
+            }
+            send_vcp "$node" $((0x50)) $((0x55)) "$val" || exit 1
+            sleep 0.08
+            send_vcp "$node" $((0x50)) $((0x5A)) "$val" || true
+            printf 'input-sub -> %s (0x%02x) via 0x55/0x5A\n' "$2" "$val"
+            ;;
+        swap)
+            send_vcp "$node" $((0x50)) $((0xF6)) 1 || exit 1
+            sleep 0.04
+            send_vcp "$node" $((0x51)) $((0xF6)) 1 || true
+            printf 'pbp swap -> main/sub (0xF6=1)\n'
+            ;;
+        pbp-assign)
+            local main_v sub_v
+            main_v=$(parse_input "${2:-}") || {
+                echo "unknown input: ${2:-}" >&2
+                exit 2
+            }
+            sub_v=$(parse_input "${3:-}") || {
+                echo "unknown input: ${3:-}" >&2
+                exit 2
+            }
+            send_vcp "$node" $((0x50)) $((0x55)) "$sub_v" || true
+            sleep 0.08
+            send_vcp "$node" $((0x50)) $((0x5A)) "$sub_v" || true
+            sleep 0.15
+            send_vcp "$node" $((0x50)) $((0xF4)) "$sub_v" || exit 1
+            sleep 0.2
+            send_vcp "$node" $((0x50)) $((0xF6)) 1 || true
+            send_vcp "$node" $((0x51)) $((0xF6)) 1 || true
+            sleep 0.2
+            send_vcp "$node" $((0x50)) $((0xF4)) "$main_v" || exit 1
+            printf 'pbp-assign main=%s (0x%02x) sub=%s (0x%02x)\n' "$2" "$main_v" "$3" "$sub_v"
             ;;
         pbp)
             local val

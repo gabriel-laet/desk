@@ -8,8 +8,8 @@ user-facing command — call `desk-switch full` / `desk-switch pbp`.
 
 The panel is physically tilted. Both modes use degree 270:
   full → 2880x2560 @ 270
-  pbp  → 2560x1440 @ 270 when EDID has it, else 1920x1080 / 1080x1920 @ 270
-         (1920x1080 @ 270 is the tilted half: 1080x1920)
+  pbp  → 2880x1280 @ 270 (tilted vertical half, on-screen 1280×2880)
+         then 1280x2880 / 2560x1440 / 1920x1080 if EDID has those instead
 
 Exit 0: layout applied (or displayplacer missing — skipped)
 Exit 2: target mode not in EDID yet (caller should retry)
@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 FULL_RES = "2880x2560"
-PBP_RES_CANDIDATES = ("2560x1440", "1920x1080", "1080x1920")
+PBP_RES_CANDIDATES = ("2880x1280", "1280x2880", "2560x1440", "1920x1080", "1080x1920")
 PBP_EXCLUDE = {"2880x2560", "2560x2880"}
 RES_RE = re.compile(r"(?:res:)?(\d{3,5})x(\d{3,5})")
 TILT_DEGREE = 270
@@ -34,6 +34,8 @@ DUALUP_MARKERS = (
     "2880x2560",
     "2560x2880",
     "2560x1440",
+    "2880x1280",
+    "1280x2880",
     "28 inch",
     "DualUp",
     "SDQHD",

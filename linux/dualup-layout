@@ -9,7 +9,7 @@ user-facing command — call `desk-switch full` / `desk-switch pbp`.
 `--id` is a Hyprland connector (`DP-3`) or a description substring.
 The panel is physically tilted. Both modes use degree 270 (transform 3):
   full → 2880x2560 @ 270
-  pbp  → 2560x1440 @ 270 when EDID has it, else 1920x1080 / 1080x1920 @ 270
+  pbp  → 2880x1280 @ 270 (tilted vertical half), then 1280x2880 / 2560x1440 / 1920x1080
 
 Exit 0: layout applied (or hyprctl missing — skipped)
 Exit 2: target mode not in EDID yet (caller should retry)
@@ -28,13 +28,15 @@ import sys
 from pathlib import Path
 
 FULL_RES = "2880x2560"
-PBP_RES_CANDIDATES = ("2560x1440", "1920x1080", "1080x1920")
+PBP_RES_CANDIDATES = ("2880x1280", "1280x2880", "2560x1440", "1920x1080", "1080x1920")
 PBP_EXCLUDE = {"2880x2560", "2560x2880"}
 TILT_DEGREE = 270
 DUALUP_MARKERS = (
     "2880x2560",
     "2560x2880",
     "2560x1440",
+    "2880x1280",
+    "1280x2880",
     "DualUp",
     "SDQHD",
     "28MQ780",

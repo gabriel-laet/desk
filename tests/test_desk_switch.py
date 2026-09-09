@@ -373,9 +373,8 @@ class DualupAdapterTests(unittest.TestCase):
                 rc = ds.cmd_pbp(cfg, None)
             self.assertEqual(rc, 0)
             self.assertEqual(calls[0][1:], ["pbp", "50-50"])
-            self.assertEqual(calls[1][1:], ["input", "dp"])
-            self.assertEqual(calls[2][1:], ["input", "hdmi1"])
-            self.assertEqual(calls[3], [str(layout), "pbp"])
+            self.assertEqual(calls[1][1:], ["pbp-assign", "hdmi1", "dp"])
+            self.assertEqual(calls[2], [str(layout), "pbp"])
             self.assertIn("ok:pbp 50-50", buf.getvalue())
             self.assertIn("ok:pbp", buf.getvalue())
 
@@ -508,6 +507,10 @@ class DualupAdapterTests(unittest.TestCase):
         for src in (c_src, sh_src):
             self.assertIn("full", src)
             self.assertIn("50-50", src)
+            self.assertIn("pbp-assign", src)
+            self.assertIn("input-sub", src)
+            self.assertIn("0x55", src)
+            self.assertIn("0xF6", src)
 
 
 class DualupLayoutScriptTests(unittest.TestCase):
@@ -550,7 +553,7 @@ class DualupLayoutScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("res:2880x2560 degree:270", proc.stdout)
 
-    def test_macos_pbp_prefers_2560x1440_at_270(self) -> None:
+    def test_macos_pbp_prefers_2880x1280_at_270(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
             placer = bin_dir / "displayplacer"
@@ -560,8 +563,9 @@ class DualupLayoutScriptTests(unittest.TestCase):
                 "cat <<'EOF'\n"
                 "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
                 "Type: 28 inch external screen\n"
-                "  mode 0: res:2560x1440 hz:60\n"
-                "  mode 1: res:1920x1080 hz:60\n"
+                "  mode 0: res:2880x1280 hz:60\n"
+                "  mode 1: res:2560x1440 hz:60\n"
+                "  mode 2: res:1920x1080 hz:60\n"
                 "EOF\n"
                 "exit 0\n"
                 "fi\n"
@@ -570,8 +574,9 @@ class DualupLayoutScriptTests(unittest.TestCase):
             placer.chmod(0o755)
             proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:2560x1440 degree:270", proc.stdout)
+        self.assertIn("res:2880x1280 degree:270", proc.stdout)
         self.assertNotIn("degree:0", proc.stdout)
+        self.assertNotIn("1080x1920", proc.stdout)
 
     def test_macos_pbp_falls_back_to_best_landscape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,7 +14,15 @@
  * Usage:
  *     ./lgdualup --info
  *     ./lgdualup input usbc|dp|dp1|dp2|hdmi1|hdmi2
+ *     ./lgdualup input-main <name>     (same as input — PBP Main Input List)
+ *     ./lgdualup input-sub <name>      (PBP Sub Input List)
+ *     ./lgdualup swap                  (Main/Sub Screen Change)
+ *     ./lgdualup pbp-assign <main> <sub>
  *     ./lgdualup pbp on|off|full|50-50|1|2|3|5
+ *
+ * VCP 0xF4 @ 0x50 is Main only. After PBP the sub window stays HDMI2 unless
+ * we write the sub VCPs (0x55 / 0x5A) and/or put the sub source on Main,
+ * swap (0xF6), then restore Main — same pattern as ddcutil 0xF6 swap.
  */
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -31,6 +39,9 @@
 #define REPORT_ID 0x08
 
 #define VCP_INPUT 0xF4
+#define VCP_INPUT_SUB 0x55   /* firmware: tracks bottom/sub PBP source */
+#define VCP_INPUT_SUB2 0x5A  /* firmware: "other pbp input?" */
+#define VCP_SWAP 0xF6        /* Main/Sub Screen Change (ddcutil PBP swap) */
 #define VCP_PBP 0xD7
 #define ADDR_INPUT 0x50
 #define ADDR_PBP 0x51
@@ -223,7 +234,8 @@ static int parse_pbp(const char *s, uint16_t *out) {
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
-                "usage: %s --info | --list | input <name> | pbp <mode>\n",
+                "usage: %s --info | --list | input|input-main|input-sub <name> | "
+                "swap | pbp-assign <main> <sub> | pbp <mode>\n",
                 argv[0]);
         return 2;
     }
@@ -248,7 +260,8 @@ int main(int argc, char **argv) {
     }
 
     int ok = 0;
-    if (!strcmp(argv[1], "input") && argc >= 3) {
+    if ((!strcmp(argv[1], "input") || !strcmp(argv[1], "input-main")) &&
+        argc >= 3) {
         uint16_t val;
         if (!parse_input(argv[2], &val)) {
             fprintf(stderr, "unknown input: %s\n", argv[2]);
@@ -257,7 +270,49 @@ int main(int argc, char **argv) {
         }
         ok = send_vcp(t.dev, ADDR_INPUT, VCP_INPUT, val);
         if (ok)
-            printf("input -> %s (0x%02x)\n", argv[2], val);
+            printf("input-main -> %s (0x%02x)\n", argv[2], val);
+    } else if (!strcmp(argv[1], "input-sub") && argc >= 3) {
+        uint16_t val;
+        if (!parse_input(argv[2], &val)) {
+            fprintf(stderr, "unknown input: %s\n", argv[2]);
+            lg_release(&t);
+            return 2;
+        }
+        /* DualUp OSD Sub Input List. 0xF4 never reaches the sub pane. */
+        ok = send_vcp(t.dev, ADDR_INPUT, VCP_INPUT_SUB, val);
+        usleep(80000);
+        send_vcp(t.dev, ADDR_INPUT, VCP_INPUT_SUB2, val);
+        if (ok)
+            printf("input-sub -> %s (0x%02x) via 0x55/0x5A\n", argv[2], val);
+    } else if (!strcmp(argv[1], "swap")) {
+        ok = send_vcp(t.dev, ADDR_INPUT, VCP_SWAP, 1);
+        usleep(40000);
+        send_vcp(t.dev, ADDR_PBP, VCP_SWAP, 1);
+        if (ok)
+            printf("pbp swap -> main/sub (0xF6=1)\n");
+    } else if (!strcmp(argv[1], "pbp-assign") && argc >= 4) {
+        uint16_t main_v, sub_v;
+        if (!parse_input(argv[2], &main_v) || !parse_input(argv[3], &sub_v)) {
+            fprintf(stderr, "unknown input: %s / %s\n", argv[2], argv[3]);
+            lg_release(&t);
+            return 2;
+        }
+        /* Dedicated sub VCPs (best-effort), then swap-dance:
+         * 0xF4 only sets Main. Put the desired sub on Main, swap, restore Main.
+         */
+        send_vcp(t.dev, ADDR_INPUT, VCP_INPUT_SUB, sub_v);
+        usleep(80000);
+        send_vcp(t.dev, ADDR_INPUT, VCP_INPUT_SUB2, sub_v);
+        usleep(150000);
+        ok = send_vcp(t.dev, ADDR_INPUT, VCP_INPUT, sub_v);
+        usleep(200000);
+        send_vcp(t.dev, ADDR_INPUT, VCP_SWAP, 1);
+        send_vcp(t.dev, ADDR_PBP, VCP_SWAP, 1);
+        usleep(200000);
+        ok = send_vcp(t.dev, ADDR_INPUT, VCP_INPUT, main_v) && ok;
+        if (ok)
+            printf("pbp-assign main=%s (0x%02x) sub=%s (0x%02x)\n",
+                   argv[2], main_v, argv[3], sub_v);
     } else if (!strcmp(argv[1], "pbp") && argc >= 3) {
         uint16_t val;
         if (!parse_pbp(argv[2], &val)) {
@@ -270,7 +325,8 @@ int main(int argc, char **argv) {
             printf("pbp -> %s (0x%02x)\n", argv[2], val);
     } else {
         fprintf(stderr,
-                "usage: %s --info | --list | input <name> | pbp <mode>\n",
+                "usage: %s --info | --list | input|input-main|input-sub <name> | "
+                "swap | pbp-assign <main> <sub> | pbp <mode>\n",
                 argv[0]);
         lg_release(&t);
         return 2;
