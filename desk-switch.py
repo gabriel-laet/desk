@@ -5,7 +5,8 @@ Core command is `desk-switch`. Pieces of the desk plug in as adapters:
 
     mouse   — HID++ Easy-Switch hop (backend: mxswitch)
     hosts   — which machine is Mac vs Linux, channels, HHKB follow target
-    dualup  — LG DualUp input + PBP/full (backend: lgdualup)
+    dualup  — LG DualUp input + PBP/full USB + OS layout
+              (backends: lgdualup, dualup-layout)
 
 Helpers live under `~/.local/lib/desk-switch/` after `make install`.
 `mxswitch` / `lgdualup` on PATH are compatibility shims, not the product.
@@ -39,7 +40,10 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.2.0"
+VERSION = "1.3.0"
+LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
+PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}
+PBP_INPUT_ORDER = ("linux", "mac")  # secondary first, primary last
 HHKB_VID_DEFAULT = 0x04FE
 HHKB_PID_DEFAULT = 0x0016
 HOST_ALIASES = {
@@ -168,6 +172,7 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         cfg["target_channel"] = hosts_ad["follow_channel"]
 
     cfg["_dualup_enabled"] = bool(dual.get("enabled", True))
+    cfg["_dualup_layout"] = bool(dual.get("layout", True))
     if dual.get("enabled") is False:
         cfg["switch_monitor"] = False
     if dual.get("path"):
@@ -176,6 +181,14 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         cfg["pbp_mode"] = str(dual["pbp_mode"])
     if "switch_pbp" in dual:
         cfg["switch_pbp"] = bool(dual["switch_pbp"])
+    if dual.get("layout_helper"):
+        cfg["_dualup_layout_helper"] = str(dual["layout_helper"])
+    if dual.get("display_id"):
+        cfg["_dualup_display_id"] = str(dual["display_id"])
+    if dual.get("peer"):
+        cfg["_dualup_peer"] = str(dual["peer"])
+    cfg["_dualup_layout_retries"] = as_int(dual.get("layout_retries"), 8)
+    cfg["_dualup_layout_retry_delay_s"] = float(dual.get("layout_retry_delay_s") or 0.5)
     return cfg
 
 
@@ -446,6 +459,146 @@ def call_lgdualup(cfg: dict, args: list[str], *, missing: str) -> int:
     return proc.returncode
 
 
+def layout_verb(mode: str) -> str:
+    """Map an lgdualup pbp mode string to a dualup-layout profile."""
+    key = (mode or "").strip().lower()
+    if key in LAYOUT_FULL_MODES:
+        return "full"
+    return "pbp"
+
+
+def dualup_layout_path(cfg: dict) -> Path | None:
+    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    if cfg.get("_dualup_layout", adapters.get("layout", True)) is False:
+        return None
+    configured = cfg.get("_dualup_layout_helper") or adapters.get("layout_helper")
+    path = which_adapter("dualup-layout", str(configured) if configured else None)
+    if path:
+        return path
+    sub = "macos" if SYSTEM == "Darwin" else "linux"
+    bundled = HERE / sub / "dualup-layout"
+    if bundled.is_file() and os.access(bundled, os.X_OK):
+        return bundled
+    return None
+
+
+def _print_helper(proc: subprocess.CompletedProcess) -> None:
+    out = (proc.stdout or "").rstrip()
+    err = (proc.stderr or "").rstrip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr if proc.returncode else sys.stdout)
+
+
+def apply_dualup_layout(cfg: dict, mode: str) -> int:
+    """Apply host resolution/rotation; retry while EDID still shows the old mode."""
+    path = dualup_layout_path(cfg)
+    if path is None:
+        if cfg.get("_dualup_layout") is False:
+            return 0
+        print("dualup layout helper not found — run `make install` (OS layout skipped)")
+        return 0
+    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    display_id = str(
+        cfg.get("_dualup_display_id") or adapters.get("display_id") or ""
+    ).strip()
+    retries = as_int(cfg.get("_dualup_layout_retries", adapters.get("layout_retries")), 8)
+    raw_delay = cfg.get("_dualup_layout_retry_delay_s")
+    if raw_delay is None:
+        raw_delay = adapters.get("layout_retry_delay_s", 0.5)
+    delay = float(raw_delay)
+    verb = layout_verb(mode)
+    cmd = [str(path), verb]
+    if display_id:
+        cmd.extend(["--id", display_id])
+    user = _as_dict(_as_dict(adapters.get("layouts")).get(verb))
+    if user.get("res"):
+        cmd.extend(["--res", str(user["res"])])
+    if user.get("degree") is not None:
+        cmd.extend(["--degree", str(user["degree"])])
+    last_rc = 1
+    for attempt in range(1, max(retries, 1) + 1):
+        try:
+            proc = run(cmd, timeout=12.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"dualup-layout failed to start: {exc}", file=sys.stderr)
+            return 1
+        _print_helper(proc)
+        last_rc = proc.returncode
+        if last_rc == 0:
+            return 0
+        if last_rc != 2 or attempt >= retries:
+            break
+        time.sleep(delay)
+    return last_rc
+
+
+def apply_peer_layout(cfg: dict, mode: str) -> int:
+    """Best-effort SSH of layout-only to the other machine (no USB toggle)."""
+    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    peer = str(cfg.get("_dualup_peer") or adapters.get("peer") or "").strip()
+    if not peer:
+        return 0
+    verb = layout_verb(mode)
+    remote = str(adapters.get("peer_layout") or "~/.local/lib/desk-switch/dualup-layout")
+    print(f"DualUp peer layout → {peer} {verb}")
+    try:
+        proc = run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", peer, f"{remote} {verb}"],
+            timeout=15.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"dualup peer layout skipped: {exc}", file=sys.stderr)
+        return 0
+    _print_helper(proc)
+    if proc.returncode != 0:
+        print(f"dualup peer layout failed (rc={proc.returncode})", file=sys.stderr)
+    return 0
+
+
+def dualup_pbp_inputs(cfg: dict) -> list[tuple[str, str]]:
+    """PBP input pair in apply order: Linux/dp (secondary), then Mac/hdmi1 (primary)."""
+    hosts = cfg.get("hosts") or {}
+    out: list[tuple[str, str]] = []
+    for host in PBP_INPUT_ORDER:
+        spec = _as_dict(hosts.get(host))
+        name = str(spec.get("dualup_input") or "").strip() or PBP_INPUT_DEFAULTS[host]
+        out.append((host, name))
+    return out
+
+
+def dualup_assign_pbp_inputs(cfg: dict) -> int:
+    """After PBP enable, DualUp defaults to HDMI1+HDMI2 — reassign the desk pair."""
+    rc = 0
+    for host, name in dualup_pbp_inputs(cfg):
+        print(f"DualUp input → {name} ({host})")
+        inp_rc = call_lgdualup(
+            cfg,
+            ["input", name],
+            missing="lgdualup not on PATH — run `make install`",
+        )
+        rc = rc or inp_rc
+    return rc
+
+
+def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
+    """USB PBP/full, then (for PBP) input pair, then tilted OS layout."""
+    chosen = mode.strip()
+    verb = layout_verb(chosen)
+    print(f"DualUp {verb} → {chosen}")
+    rc = call_lgdualup(cfg, ["pbp", chosen], missing=missing)
+    if lgdualup_path(cfg) is None:
+        return rc
+    if rc != 0:
+        return rc
+    if verb == "pbp":
+        rc = rc or dualup_assign_pbp_inputs(cfg)
+    layout_rc = apply_dualup_layout(cfg, chosen)
+    apply_peer_layout(cfg, chosen)
+    return rc or layout_rc
+
+
 def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
     if mouse_only or not cfg.get("switch_monitor", True):
         return 0
@@ -454,29 +607,25 @@ def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
         print("lgdualup not on PATH — run `make install` (DualUp helper ships in this repo)")
         return 0
     spec = (cfg.get("hosts") or {}).get(normalize_host(host), {})
-    name = str(spec.get("dualup_input") or "").strip()
-    rc = 0
-    if name:
-        print(f"DualUp input → {name}")
-        rc = call_lgdualup(
-            cfg,
-            ["input", name],
-            missing="lgdualup not on PATH — run `make install`",
-        )
-    else:
-        print(f"no dualup_input configured for {host} — leaving DualUp input alone")
     pbp = spec.get("pbp")
     if pbp or cfg.get("switch_pbp"):
         mode = str(pbp or cfg.get("pbp_mode") or "").strip()
         if mode:
-            print(f"DualUp PBP → {mode}")
-            pbp_rc = call_lgdualup(
+            return dualup_set_mode(
                 cfg,
-                ["pbp", mode],
+                mode,
                 missing="lgdualup not on PATH — run `make install`",
             )
-            rc = rc or pbp_rc
-    return rc
+    name = str(spec.get("dualup_input") or "").strip()
+    if name:
+        print(f"DualUp input → {name}")
+        return call_lgdualup(
+            cfg,
+            ["input", name],
+            missing="lgdualup not on PATH — run `make install`",
+        )
+    print(f"no dualup_input configured for {host} — leaving DualUp input alone")
+    return 0
 
 
 def cmd_to(cfg: dict, host: str, *, mouse_only: bool = False) -> int:
@@ -504,17 +653,17 @@ def cmd_pbp(cfg: dict, mode: str | None) -> int:
     if not chosen:
         print("usage: desk-switch pbp <mode>   (mode is whatever lgdualup pbp accepts)")
         return 2
-    return call_lgdualup(
+    return dualup_set_mode(
         cfg,
-        ["pbp", chosen],
+        chosen,
         missing="lgdualup not on PATH — DualUp PBP needs `make install`",
     )
 
 
 def cmd_full(cfg: dict) -> int:
-    return call_lgdualup(
+    return dualup_set_mode(
         cfg,
-        ["pbp", "full"],
+        "full",
         missing="lgdualup not on PATH — DualUp full needs `make install`",
     )
 
@@ -522,6 +671,7 @@ def cmd_full(cfg: dict) -> int:
 def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path | None, dual_path: Path | None) -> dict:
     """User-facing adapter snapshot. Keep this shape stable; add keys, don't rename."""
     hosts = cfg.get("hosts") or {}
+    layout_path = dualup_layout_path(cfg)
     return {
         "mouse": {
             "enabled": bool(cfg.get("_mouse_enabled", True)),
@@ -541,6 +691,9 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
             "available": dual_path is not None,
             "backend": "lgdualup",
             "path": str(dual_path) if dual_path else None,
+            "layout": bool(cfg.get("_dualup_layout", True)),
+            "layout_helper": str(layout_path) if layout_path else None,
+            "display_id": str(cfg.get("_dualup_display_id") or "") or None,
         },
     }
 
@@ -699,9 +852,9 @@ def build_parser() -> argparse.ArgumentParser:
     to = sub.add_parser("to", help="switch mouse + optional DualUp input to a host")
     to.add_argument("host", help="mac or linux")
     to.add_argument("--mouse-only", action="store_true", help="do not call lgdualup")
-    pbp = sub.add_parser("pbp", help="DualUp PBP via lgdualup (no-op if missing)")
-    pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp`")
-    sub.add_parser("full", help="DualUp full-screen via `lgdualup pbp full`")
+    pbp = sub.add_parser("pbp", help="DualUp PBP: USB toggle, input pair, tilted OS layout")
+    pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
+    sub.add_parser("full", help="DualUp full: USB toggle + 2880x2560 @ 270°")
     return parser
 
 

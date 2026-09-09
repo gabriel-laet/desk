@@ -38,9 +38,11 @@ install: mxswitch lgdualup
 ifeq ($(UNAME),Darwin)
 	install -m 755 mxswitch $(LIBDIR)/mxswitch
 	install -m 755 lgdualup $(LIBDIR)/lgdualup
+	install -m 755 macos/dualup-layout $(LIBDIR)/dualup-layout
 else
 	install -m 755 linux/mxswitch.py $(LIBDIR)/mxswitch
 	install -m 755 linux/lgdualup.sh $(LIBDIR)/lgdualup
+	install -m 755 linux/dualup-layout $(LIBDIR)/dualup-layout
 endif
 	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/mxswitch
 	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/lgdualup
@@ -58,7 +60,7 @@ endif
 		echo "wrote $(CONFDIR_NEW)/config.json — set adapters.dualup.inputs from desk-switch status / DualUp --list"; \
 	fi
 	@echo "installed $(BINDIR)/desk-switch"
-	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup"
+	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout"
 	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/hhkb-mx-follow"
 	@echo "Linux DualUp USB: sudo cp linux/43-lg-dualup.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger"
 ifeq ($(UNAME),Darwin)
@@ -67,7 +69,7 @@ endif
 
 uninstall:
 	rm -f $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow $(BINDIR)/mxswitch $(BINDIR)/lgdualup
-	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup
+	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout
 
 menubar:
 ifeq ($(UNAME),Darwin)

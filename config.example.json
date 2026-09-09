@@ -17,9 +17,10 @@
       "enabled": true,
       "pbp_mode": "50-50",
       "switch_pbp": false,
+      "display_id": "9134432D-0196-4653-9712-EFCAF1980612",
       "inputs": {
-        "mac": "",
-        "linux": ""
+        "mac": "hdmi1",
+        "linux": "dp"
       }
     }
   },
