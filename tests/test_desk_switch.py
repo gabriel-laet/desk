@@ -655,7 +655,7 @@ class DualupLayoutScriptTests(unittest.TestCase):
         )
         hypr.chmod(0o755)
 
-    def test_linux_pbp_uses_1280x2880_transform_0(self) -> None:
+    def test_linux_pbp_uses_1280x2880_transform_3(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
             self._write_hyprctl(
@@ -663,13 +663,13 @@ class DualupLayoutScriptTests(unittest.TestCase):
                 '[{"name":"DP-2","description":"LG Electronics LG SDQHD",'
                 '"width":1280,"height":2880,"x":0,"y":0,"scale":1.0,'
                 '"refreshRate":59.96,"availableModes":['
-                '"1280x2880@59.96Hz","2560x2880@59.96Hz","2560x1440@59.96Hz"]}]',
+                '"1280x2880@59.96Hz","2880x1280@59.96Hz","2560x2880@59.96Hz"]}]',
             )
             proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertIn("DP-2,1280x2880@59.96,0x0,1,transform,0", proc.stdout)
-        self.assertNotIn("2560x1440", proc.stdout)
-        self.assertNotIn("transform,3", proc.stdout)
+        self.assertIn("DP-2,1280x2880@59.96,0x0,1,transform,3", proc.stdout)
+        self.assertNotIn("2880x1280", proc.stdout)
+        self.assertNotIn("transform,0", proc.stdout)
 
     def test_linux_full_uses_2560x2880_transform_3(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

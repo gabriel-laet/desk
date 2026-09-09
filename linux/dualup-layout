@@ -8,9 +8,9 @@ user-facing command — call `desk-switch full` / `desk-switch pbp`.
 
 `--id` is a Hyprland connector (`DP-2`) or a description substring.
 
-Confirmed Omarchy modes (matches Mac 2880x1280@270 / 2880x2560@270):
+Confirmed Omarchy modes (DP-2; matches Mac 2880x1280@270 / 2880x2560@270):
   full → 2560x2880, transform 3
-  pbp  → 1280x2880, transform 0   (not 2560x1440 t0)
+  pbp  → 1280x2880, transform 3   (not 2880x1280 t3 / not 1280x2880 t0)
 
 `--degree` overrides transform (0→0, 90→1, 180→2, 270→3) when set.
 
@@ -34,7 +34,7 @@ FULL_RES = "2560x2880"
 FULL_RES_FALLBACKS = ("2560x2880", "2880x2560")
 PBP_RES_CANDIDATES = ("1280x2880", "2880x1280")
 FULL_TRANSFORM = 3
-PBP_TRANSFORM = 0
+PBP_TRANSFORM = 3
 DUALUP_MARKERS = (
     "2560x2880",
     "2880x2560",
