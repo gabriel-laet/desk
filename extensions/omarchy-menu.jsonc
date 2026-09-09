@@ -23,14 +23,20 @@
   },
   "trigger.desk-switch.full": {
     "icon": "󰍹",
-    "label": "DualUp Full",
+    "label": "DualUp Full  ⌘⌥⇧F",
     "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
     "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch full'"
   },
   "trigger.desk-switch.pbp": {
     "icon": "󰍺",
-    "label": "DualUp PBP",
+    "label": "DualUp PBP  ⌘⌥⇧P",
     "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
     "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch pbp'"
+  },
+  "trigger.desk-switch.layout": {
+    "icon": "󰍹",
+    "label": "Auto layout  ⌘⌥U",
+    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch layout'"
   }
 }

@@ -125,8 +125,9 @@ struct DeskPanel: View {
             DeskRow(title: "Switch to Mac") { model.run(["to", "mac"]) }
             DeskRow(title: "Switch to Linux") { model.run(["to", "linux"]) }
             if model.dualUpAvailable {
-                DeskRow(title: "DualUp Full") { model.run(["full"]) }
-                DeskRow(title: "DualUp PBP") { model.run(["pbp"]) }
+                DeskRow(title: "DualUp Full    ⌘⌥⇧F") { model.run(["full"]) }
+                DeskRow(title: "DualUp PBP    ⌘⌥⇧P") { model.run(["pbp"]) }
+                DeskRow(title: "Auto layout    ⌘⌥U") { model.run(["layout"]) }
             }
             Divider()
             DeskRow(title: "Quit") { NSApplication.shared.terminate(nil) }
@@ -339,7 +340,9 @@ struct StatusSnapshot {
             dual = available && (dualup["enabled"] as? Bool ?? true)
         }
         let mode = (obj["dualup_mode"] as? String ?? "unknown").lowercased()
+        let modeKnown = mode == "pbp" || mode == "full"
         let modeLabel = mode == "pbp" ? "PBP" : (mode == "full" ? "FULL" : "unknown")
+        dual = dual || modeKnown
         var macIn = "hdmi1"
         var lnxIn = "dp"
         if let inputs = obj["dualup_inputs"] as? [String: Any] {

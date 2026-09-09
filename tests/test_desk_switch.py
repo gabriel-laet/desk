@@ -281,6 +281,10 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn('["to", "linux"]', src)
         self.assertIn('["full"]', src)
         self.assertIn('["pbp"]', src)
+        self.assertIn('["layout"]', src)
+        self.assertIn("⌘⌥⇧F", src)
+        self.assertIn("⌘⌥⇧P", src)
+        self.assertIn("⌘⌥U", src)
         self.assertIn("desk-switch", src)
         self.assertIn("bar_label", src)
         self.assertIn("hhkb_usb", src)
@@ -300,6 +304,9 @@ class BarWidgetSourceTests(unittest.TestCase):
         self.assertIn("USB on this host", panel)
         self.assertIn("BT only", panel)
         self.assertIn("StatusChip", panel)
+        self.assertIn("⌘⌥⇧F", panel)
+        self.assertIn("⌘⌥⇧P", panel)
+        self.assertIn("layout", panel)
 
 
 class LgdualupCallTests(unittest.TestCase):
@@ -594,7 +601,7 @@ class DualupLayoutScriptTests(unittest.TestCase):
         self.assertNotIn("degree:0", proc.stdout)
         self.assertNotIn("1080x1920", proc.stdout)
 
-    def test_macos_pbp_falls_back_to_best_landscape(self) -> None:
+    def test_macos_full_accepts_degree0_edid_2560x2880(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
             placer = bin_dir / "displayplacer"
@@ -604,19 +611,19 @@ class DualupLayoutScriptTests(unittest.TestCase):
                 "cat <<'EOF'\n"
                 "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
                 "Type: 28 inch external screen\n"
-                "  mode 0: res:1600x900 hz:60\n"
-                "  mode 1: res:1280x720 hz:60\n"
+                "Resolution: 2560x2880\n"
+                "  mode 0: res:2560x2880 hz:60\n"
                 "EOF\n"
                 "exit 0\n"
                 "fi\n"
                 "echo \"applied:$*\"\n"
             )
             placer.chmod(0o755)
-            proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+            proc = self._run_script(self.MAC, ["full", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:1600x900 degree:270", proc.stdout)
+        self.assertIn("res:2880x2560 degree:270", proc.stdout)
 
-    def test_macos_pbp_falls_back_to_1920x1080_at_270(self) -> None:
+    def test_macos_pbp_accepts_degree0_edid_1280x2880(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
             placer = bin_dir / "displayplacer"
@@ -626,8 +633,8 @@ class DualupLayoutScriptTests(unittest.TestCase):
                 "cat <<'EOF'\n"
                 "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
                 "Type: 28 inch external screen\n"
-                "Resolution: 1920x1080\n"
-                "  mode 0: res:1920x1080 hz:60\n"
+                "Resolution: 1280x2880\n"
+                "  mode 0: res:1280x2880 hz:60\n"
                 "EOF\n"
                 "exit 0\n"
                 "fi\n"
@@ -636,7 +643,56 @@ class DualupLayoutScriptTests(unittest.TestCase):
             placer.chmod(0o755)
             proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:1920x1080 degree:270", proc.stdout)
+        self.assertIn("res:2880x1280 degree:270", proc.stdout)
+        self.assertNotIn("res:1280x2880", proc.stdout)
+
+    def test_macos_res_flag_accepts_axis_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            placer = bin_dir / "displayplacer"
+            placer.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = list ]; then\n"
+                "cat <<'EOF'\n"
+                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
+                "Type: 28 inch external screen\n"
+                "  mode 0: res:2560x2880 hz:60\n"
+                "EOF\n"
+                "exit 0\n"
+                "fi\n"
+                "echo \"applied:$*\"\n"
+            )
+            placer.chmod(0o755)
+            proc = self._run_script(
+                self.MAC,
+                ["full", "--id", "9134432D-0196-4653-9712-EFCAF1980612", "--res", "2560x2880"],
+                bin_dir,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("res:2880x2560 degree:270", proc.stdout)
+
+    def test_macos_pbp_does_not_use_generic_landscape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            placer = bin_dir / "displayplacer"
+            placer.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = list ]; then\n"
+                "cat <<'EOF'\n"
+                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
+                "Type: 28 inch external screen\n"
+                "  mode 0: res:1920x1080 hz:60\n"
+                "  mode 1: res:2560x1440 hz:60\n"
+                "EOF\n"
+                "exit 0\n"
+                "fi\n"
+                "echo \"applied:$*\"\n"
+            )
+            placer.chmod(0o755)
+            proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertNotIn("1920x1080", proc.stdout)
+        self.assertNotIn("2560x1440", proc.stdout)
 
     def test_macos_pbp_exits_2_when_edid_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -867,6 +923,16 @@ class HintAndCacheTests(unittest.TestCase):
             }
         )
         self.assertEqual(label, "LNX  kbU  mx2~  PBP")
+        no_hint = ds.format_bar_label(
+            {
+                "target_hint": "?",
+                "hhkb_present": False,
+                "mouse_channel": None,
+                "dualup_mode": "pbp",
+            }
+        )
+        self.assertEqual(no_hint, "kb-  mx-  PBP")
+        self.assertNotIn("?", no_hint)
 
     def test_mac_status_uses_cached_channel_and_bt_hhkb(self) -> None:
         cfg = {
@@ -1033,6 +1099,18 @@ class DualupModeDetectTests(unittest.TestCase):
             "Resolution: 2880x2560\n"
         )
         self.assertEqual(ds.detect_dualup_mode_macos(full), "full")
+        swapped = (
+            "Persistent screen id: ABC\n"
+            "Type: 28 inch external screen\n"
+            "Resolution: 2560x2880\n"
+        )
+        self.assertEqual(ds.detect_dualup_mode_macos(swapped), "full")
+        pbp0 = (
+            "Persistent screen id: ABC\n"
+            "Type: 28 inch external screen\n"
+            "Resolution: 1280x2880\n"
+        )
+        self.assertEqual(ds.detect_dualup_mode_macos(pbp0), "pbp")
 
     def test_status_json_exports_transport_fields(self) -> None:
         env = os.environ.copy()

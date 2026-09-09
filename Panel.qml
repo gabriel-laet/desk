@@ -189,14 +189,20 @@ Panel {
 
         DeskButton {
           visible: root.dualUpAvailable
-          label: "DualUp Full"
+          label: "DualUp Full    ⌘⌥⇧F"
           onClicked: root.actionRequested("full")
         }
 
         DeskButton {
           visible: root.dualUpAvailable
-          label: "DualUp PBP"
+          label: "DualUp PBP    ⌘⌥⇧P"
           onClicked: root.actionRequested("pbp")
+        }
+
+        DeskButton {
+          visible: root.dualUpAvailable
+          label: "Auto layout    ⌘⌥U"
+          onClicked: root.actionRequested("layout")
         }
       }
     }

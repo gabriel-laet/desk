@@ -215,8 +215,9 @@ Easy-Switch channel (cached / peer if the local probe misses). Click for:
 | Refresh status | `desk-switch status --json` |
 | Switch to Mac | `desk-switch to mac` |
 | Switch to Linux | `desk-switch to linux` |
-| DualUp Full | `desk-switch full` — hidden unless the dualup adapter is present |
-| DualUp PBP | `desk-switch pbp` — uses `pbp_mode` from config; same visibility |
+| DualUp Full  ⌘⌥⇧F | `desk-switch full` — hidden unless DualUp is present or mode is known |
+| DualUp PBP  ⌘⌥⇧P | `desk-switch pbp` — uses `pbp_mode` from config; same visibility |
+| Auto layout  ⌘⌥U | `desk-switch layout` — re-applies full or PBP from the live display |
 
 Polls about every 15s. Looks up `desk-switch` via `bash -lc` with
 `~/.local/bin` on `PATH` (falls back to `hhkb-mx-follow`).
@@ -253,7 +254,10 @@ open -a DeskSwitchBar
 ```
 
 `xcode-select --install` if `swiftc` is missing. Refresh every ~15s and
-again when the panel opens.
+again when the panel opens. DualUp rows show Karabiner shortcuts already
+bound on this desk: **⌘⌥⇧F** full, **⌘⌥⇧P** PBP, **⌘⌥U** auto layout.
+Those keys should run `desk-switch full` / `pbp` / `layout` (USB + OS
+layout), not bare `dualup-layout`.
 
 Login item:
 
@@ -278,6 +282,7 @@ desk-switch switch 2            # mouse only, Easy-Switch 1|2|3
 desk-switch pbp                 # USB PBP + hdmi1/dp inputs + OS layout
 desk-switch pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
 desk-switch full                # USB full + OS layout (Mac 2880x2560@270 / Linux 2560x2880 t3)
+desk-switch layout              # re-apply full or PBP from the live DualUp geometry
 desk-switch watch               # HHKB leave → mouse away; USB appear → to this host
 desk-switch watch --dry-run
 desk-switch --version
@@ -296,7 +301,7 @@ PBP layout is OS-specific (same on-screen half, different EDID naming):
 
 | Host | PBP | Full |
 |---|---|---|
-| macOS (displayplacer) | `2880x1280 @ 270°` → on-screen 1280×2880 | `2880x2560 @ 270°` |
+| macOS (displayplacer) | `2880x1280 @ 270°` (EDID may list `1280x2880` at 0°) | `2880x2560 @ 270°` (EDID may list `2560x2880` at 0°) |
 | Linux / Omarchy (`hyprctl`, typically `DP-2`) | `1280x2880@59.96` transform **3** | `2560x2880` transform **3** |
 
 Not `2880x1280` t3 (stretched) and not `1280x2880` t0 (wrong orientation).
@@ -362,7 +367,7 @@ Confirmed desk layouts (same on-screen DualUp geometry, different EDID names):
 
 | Host | PBP | Full |
 |---|---|---|
-| macOS (displayplacer) | **`2880x1280 @ 270°`** | `2880x2560 @ 270°` |
+| macOS (displayplacer) | **`2880x1280 @ 270°`** (EDID may list `1280x2880` at 0°) | `2880x2560 @ 270°` (EDID may list `2560x2880` at 0°) |
 | Linux / Omarchy (`DP-2`) | **`1280x2880@59.96` transform 3** | `2560x2880` transform 3 |
 
 `2880x1280` t3 stretches; `1280x2880` t0 is the wrong orientation. If EDID

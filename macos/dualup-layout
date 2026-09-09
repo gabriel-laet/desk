@@ -6,10 +6,17 @@ user-facing command — call `desk-switch full` / `desk-switch pbp`.
 
     dualup-layout full|pbp [--id UUID] [--res WxH] [--degree N]
 
-The panel is physically tilted. Both modes use degree 270:
-  full → 2880x2560 @ 270
-  pbp  → 2880x1280 @ 270 (tilted vertical half, on-screen 1280×2880)
-         then 1280x2880 / 2560x1440 / 1920x1080 if EDID has those instead
+The panel is physically tilted. displayplacer lists modes for the *current*
+rotation: at degree 0 the full panel is ``2560x2880`` and PBP is
+``1280x2880``. We always apply the tilted-frame size at degree 270:
+
+  full → 2880x2560 @ 270   (EDID may list 2880x2560 or 2560x2880)
+  pbp  → 2880x1280 @ 270   (EDID may list 2880x1280 or 1280x2880)
+
+No fallback to generic landscapes (1920x1080 / 2560x1440) when DualUp
+half/full markers are what we want — wait for the real mode (exit 2).
+
+``--res`` accepts the axis-swapped form of a listed mode.
 
 Exit 0: layout applied (or displayplacer missing — skipped)
 Exit 2: target mode not in EDID yet (caller should retry)
@@ -26,8 +33,9 @@ import subprocess
 import sys
 
 FULL_RES = "2880x2560"
-PBP_RES_CANDIDATES = ("2880x1280", "1280x2880", "2560x1440", "1920x1080", "1080x1920")
-PBP_EXCLUDE = {"2880x2560", "2560x2880"}
+FULL_EDID = ("2880x2560", "2560x2880")
+PBP_RES = "2880x1280"
+PBP_EDID = ("2880x1280", "1280x2880")
 RES_RE = re.compile(r"(?:res:)?(\d{3,5})x(\d{3,5})")
 TILT_DEGREE = 270
 DUALUP_MARKERS = (
@@ -84,10 +92,19 @@ def detect_id(screens: list[dict]) -> str:
     return ""
 
 
+def swap_res(res: str) -> str:
+    width, _, height = res.partition("x")
+    return f"{height}x{width}" if width and height else res
+
+
 def mode_offered(text: str, res: str) -> bool:
     if f"res:{res}" in text:
         return True
     return bool(re.search(rf"\b{re.escape(res)}\b", text))
+
+
+def mode_offered_or_swapped(text: str, res: str) -> bool:
+    return mode_offered(text, res) or mode_offered(text, swap_res(res))
 
 
 def listed_modes(text: str) -> list[tuple[int, int, str]]:
@@ -103,29 +120,30 @@ def listed_modes(text: str) -> list[tuple[int, int, str]]:
     return found
 
 
-def best_landscape(text: str) -> str | None:
-    """Prefer known PBP sizes, else the largest landscape mode EDID lists."""
-    landscapes = [
-        (w, h, key)
-        for w, h, key in listed_modes(text)
-        if w > h and key not in PBP_EXCLUDE
-    ]
-    if not landscapes:
-        return None
-    keys = {key for _w, _h, key in landscapes}
-    for pref in PBP_RES_CANDIDATES:
-        if pref in keys:
-            return pref
-    _w, _h, key = max(landscapes, key=lambda item: item[0] * item[1])
-    return key
+def canonicalize_res(res: str) -> str:
+    """Map an EDID/axis-swapped size to the tilted apply size."""
+    if res in FULL_EDID or swap_res(res) in FULL_EDID:
+        return FULL_RES
+    if res in PBP_EDID or swap_res(res) in PBP_EDID:
+        return PBP_RES
+    return res
 
 
 def pick_res(mode: str, text: str, requested: str) -> str | None:
     if requested:
-        return requested if mode_offered(text, requested) else None
+        if not mode_offered_or_swapped(text, requested):
+            return None
+        canon = canonicalize_res(requested)
+        if canon != requested:
+            return canon
+        return requested if mode_offered(text, requested) else swap_res(requested)
     if mode == "full":
-        return FULL_RES if mode_offered(text, FULL_RES) else None
-    return best_landscape(text)
+        if any(mode_offered(text, key) for key in FULL_EDID):
+            return FULL_RES
+        return None
+    if any(mode_offered(text, key) for key in PBP_EDID):
+        return PBP_RES
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:

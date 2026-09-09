@@ -1014,6 +1014,14 @@ def cmd_full(cfg: dict) -> int:
     )
 
 
+def cmd_layout(cfg: dict) -> int:
+    """Re-apply full or PBP from the live OS geometry (USB + layout)."""
+    mode = detect_dualup_mode(cfg)
+    if mode == "full":
+        return cmd_full(cfg)
+    return cmd_pbp(cfg, None)
+
+
 DUALUP_FULL_RES = {(2880, 2560), (2560, 2880)}
 DUALUP_PBP_RES = {(2880, 1280), (1280, 2880)}
 
@@ -1247,7 +1255,7 @@ def format_bar_label(state: dict) -> str:
     elif state.get("hhkb_bluetooth"):
         kb = "kbB"
     elif state.get("hhkb_present"):
-        kb = "kb?"
+        kb = "kb"
     else:
         kb = "kb-"
     channel = state.get("mouse_channel")
@@ -1258,13 +1266,15 @@ def format_bar_label(state: dict) -> str:
     else:
         mx = f"mx{channel}~"
     mode = str(state.get("dualup_mode") or "unknown").lower()
+    parts: list[str] = []
+    if hint in HINT_FOR_HOST.values():
+        parts.append(hint)
+    parts.extend([kb, mx])
     if mode == "pbp":
-        du = "PBP"
+        parts.append("PBP")
     elif mode == "full":
-        du = "FULL"
-    else:
-        du = "DU-"
-    return f"{hint}  {kb}  {mx}  {du}"
+        parts.append("FULL")
+    return "  ".join(parts) if parts else "desk"
 
 
 def format_bar_tooltip(state: dict) -> str:
@@ -1617,6 +1627,7 @@ def build_parser() -> argparse.ArgumentParser:
     pbp = sub.add_parser("pbp", help="DualUp PBP: USB toggle, input pair, tilted OS layout")
     pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
     sub.add_parser("full", help="DualUp full: USB toggle + 2880x2560 @ 270°")
+    sub.add_parser("layout", help="re-apply DualUp full or PBP from the live display")
     return parser
 
 
@@ -1638,6 +1649,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_pbp(cfg, args.mode)
     if args.cmd == "full":
         return cmd_full(cfg)
+    if args.cmd == "layout":
+        return cmd_layout(cfg)
     return 2
 
 

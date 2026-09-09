@@ -86,6 +86,8 @@ BarWidget {
         dual = data.lgdualup === true
         if (data.adapters && data.adapters.dualup && data.adapters.dualup.available === true)
           dual = true
+        if (String(data.dualup_mode || "") === "pbp" || String(data.dualup_mode || "") === "full")
+          dual = true
         transport = String(data.hhkb_transport || "absent")
         usb = data.hhkb_usb === true
         bluetooth = data.hhkb_bluetooth === true
@@ -106,6 +108,10 @@ BarWidget {
     }
     if (["MAC", "LNX", "?"].indexOf(hint) === -1)
       hint = "?"
+    if (!label || label === "?")
+      label = (hint === "?" ? "" : hint)
+    if (!label)
+      label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")
     root.hint = hint
     root.barLabel = label
     root.barTooltip = tooltip
