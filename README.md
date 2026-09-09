@@ -1,17 +1,21 @@
 # desk-switch
 
-Desk switcher for a Mac Studio + Omarchy/Linux desk: hop a Logitech MX Master
-between Easy-Switch channels and, when you want it, flip an [LG DualUp](https://www.lg.com/us/monitors/lg-28mq780-b)
-input. The original HHKB follow behaviour is still here — when the
-[HHKB Studio](https://happyhackingkb.com/) leaves this host, the mouse is
-pushed to the other machine.
+One CLI for a Mac Studio + Omarchy/Linux desk. Hop the Logitech MX Master
+between Easy-Switch channels, optionally flip an [LG DualUp](https://www.lg.com/us/monitors/lg-28mq780-b)
+input, and (if you want) follow the [HHKB Studio](https://happyhackingkb.com/)
+when it leaves this host.
 
-Logitech Enhanced Easy-Switch only links an MX keyboard to an MX mouse. An HHKB
-is invisible to Logi Options+. This repo watches the HHKB leave the current
-machine and sends the mouse a HID++ `ChangeHost` command so it hops to the same
-desk. A unified `desk-switch` CLI (legacy name: `hhkb-mx-follow`) can also
-drive the DualUp through an optional `lgdualup` helper, plus an Omarchy bar
-widget.
+**Learn `desk-switch`.** Mouse hop, host map, and DualUp are adapters the CLI
+plugs in — not peer tools you are expected to memorize.
+
+```
+desk-switch status
+desk-switch to mac|linux
+desk-switch switch …
+desk-switch pbp …
+desk-switch full
+desk-switch watch
+```
 
 Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 *away*. Install the watcher on every computer you leave from.
@@ -26,24 +30,56 @@ Fn+Ctrl+2 on the HHKB
  watcher notices (~2s debounce)
         │
         ▼
- mxswitch 2   →  MX Master joins the other machine
+ desk-switch → mouse adapter (mxswitch) → other machine
 
 desk-switch to linux
         │
-        ├─ mxswitch <linux channel>
-        └─ lgdualup input <name>   (if lgdualup is on PATH)
+        ├─ mouse adapter  → Easy-Switch channel for Linux
+        └─ dualup adapter → DualUp input (if enabled and present)
 ```
+
+Logitech Enhanced Easy-Switch only links an MX keyboard to an MX mouse. An HHKB
+is invisible to Logi Options+. The watcher notices the HHKB leave and the
+mouse adapter sends a HID++ `ChangeHost` so the MX Master hops to the same
+desk.
+
+## Adapters
+
+desk-switch is the core. You plug in adapters for pieces of the desk:
+
+| Adapter | What it does | Backend (private helper) |
+|---|---|---|
+| **mouse** | HID++ Easy-Switch hop | `mxswitch` |
+| **hosts** | Mac vs Linux, channels, HHKB follow target | config only |
+| **dualup** | DualUp input + PBP/full | `lgdualup` |
+
+`make install` puts helpers in a desk-switch-owned layout:
+
+```
+~/.local/bin/desk-switch                 # the product
+~/.local/lib/desk-switch/mxswitch        # mouse adapter
+~/.local/lib/desk-switch/lgdualup        # dualup adapter
+~/.config/desk-switch/config.json
+```
+
+`mxswitch`, `lgdualup`, and `hhkb-mx-follow` on `PATH` are thin compatibility
+shims so old scripts keep working. Prefer `desk-switch`.
+
+`status --json` speaks in adapter terms (`adapters.mouse`, `adapters.hosts`,
+`adapters.dualup`) and still includes the Omarchy fields (`target_hint`,
+`lgdualup`, `hhkb`, `mouse_channel`).
+
+Room for more adapters later (another monitor, …) without renaming this model.
 
 ## Requirements
 
 - HHKB Studio (USB or Bluetooth; VID `04FE` / PID `0016`)
 - MX Master 3 / 3S / 4 paired on matching Easy-Switch channels
 - Python 3.9+
-- macOS: Command Line Tools (`clang`) to build `mxswitch`
-- Linux: `hidraw` access (udev rule included)
-- Optional: `lgdualup` on `PATH` for DualUp USB HID monitor control
-  (device `043e:9a39`). That helper is **not** in this repo — call it by
-  PATH, do not invent DDC codes here.
+- macOS: Command Line Tools (`clang`) to build the mouse / DualUp helpers;
+  `swiftc` only if you want the menu-bar app
+- Linux: `hidraw` access (udev rules included)
+- Optional DualUp USB HID (`043e:9a39`) — helper ships in this repo
 
 Pairing that works cleanly:
 
@@ -59,22 +95,6 @@ to Bluetooth on the other machine, the Mac may still enumerate a USB keyboard
 collection. The watcher then never fires. Use Bluetooth on both hosts and treat
 USB as charging only, or unplug when you hop.
 
-## DualUp monitor control
-
-`lgdualup` ships **in this repo** (same `make install` as the mouse tools):
-
-- macOS: builds `macos/lgdualup.c` → `~/.local/bin/lgdualup`
-- Linux: installs `linux/lgdualup.sh` → `~/.local/bin/lgdualup` (needs `linux/43-lg-dualup.rules` for hidraw)
-
-```bash
-lgdualup --info
-lgdualup --list
-lgdualup input usbc   # or dp / hdmi1 / …
-lgdualup pbp on|off|1|2|3|5
-```
-
-`desk-switch to mac|linux` calls `lgdualup` automatically when configured.
-
 ## Install
 
 ```bash
@@ -89,40 +109,62 @@ install` updates. `hhkb-mx-follow` remains an installed alias of `desk-switch`.
 
 ```bash
 make install
-# → ~/.local/bin/mxswitch
 # → ~/.local/bin/desk-switch
-# → ~/.local/bin/hhkb-mx-follow          (same program)
+# → ~/.local/lib/desk-switch/mxswitch
+# → ~/.local/lib/desk-switch/lgdualup
 # → ~/.config/desk-switch/config.json    (and a copy under hhkb-mx-follow if new)
 
-mxswitch --info          # click the mouse if this fails
 desk-switch status
+```
 
-# run at login (existing unit name — do not rename if already loaded)
+Grant **Input Monitoring** to `~/.local/lib/desk-switch/mxswitch` if macOS
+asks (System Settings → Privacy & Security). `mxswitch --setup` (shim) opens
+that pane.
+
+Set `adapters.hosts.follow_channel` to the Easy-Switch slot of the *other*
+machine (2 if this Mac is channel 1). On Linux set it to 1 (the Mac).
+
+Optional menu bar (MAC / LNX / ? + the same actions as the Omarchy panel):
+
+```bash
+make install-menubar
+# → ~/Applications/DeskSwitchBar.app
+open -a DeskSwitchBar
+```
+
+Needs `swiftc` (Xcode Command Line Tools). Ad-hoc signed, not App Store.
+To launch at login:
+
+```bash
+cp macos/local.desk-switch-bar.plist.example ~/Library/LaunchAgents/local.desk-switch-bar.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.desk-switch-bar.plist
+```
+
+HHKB follow at login (existing unit name — do not rename if already loaded):
+
+```bash
 cp macos/local.hhkb-mx-follow.plist.example ~/Library/LaunchAgents/local.hhkb-mx-follow.plist
 # edit the two /Users/YOU paths, then:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hhkb-mx-follow.plist
 ```
 
-Grant **Input Monitoring** to `~/.local/bin/mxswitch` if macOS asks
-(System Settings → Privacy & Security). `mxswitch --setup` opens that pane.
-
-Set `target_channel` to the Easy-Switch slot of the *other* machine (2 if this
-Mac is channel 1). On Linux set it to 1 (the Mac).
-
-### Linux (udev + systemd — unchanged paths)
+### Linux (udev + systemd — unchanged unit paths)
 
 ```bash
 make install
-# installs mxswitch, desk-switch, and the hhkb-mx-follow alias
+# installs desk-switch, adapter helpers, and PATH shims
 
 sudo cp linux/42-logitech-hidpp.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG input "$USER"   # then log out/in once
 
-# edit ~/.config/desk-switch/config.json  (or ~/.config/hhkb-mx-follow/config.json)
-#   this_host: linux
-#   target_channel: 1          # the Mac
-#   mxswitch: ~/.local/bin/mxswitch
+# DualUp USB (if you use that adapter):
+sudo cp linux/43-lg-dualup.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# edit ~/.config/desk-switch/config.json
+#   adapters.hosts.this_host: linux
+#   adapters.hosts.follow_channel: 1          # the Mac
 
 mkdir -p ~/.config/systemd/user
 cp linux/hhkb-mx-follow.service ~/.config/systemd/user/
@@ -132,83 +174,89 @@ systemctl --user enable --now hhkb-mx-follow.service
 
 The user unit is `WantedBy=graphical-session.target`, so it starts at login
 with Hyprland/Omarchy. `ExecStart` still runs `hhkb-mx-follow watch` so an
-existing enable stays valid. Binaries live in `~/.local/bin`.
+existing enable stays valid. The program is desk-switch.
 
 ## Commands
 
 ```bash
-desk-switch status              # HHKB present? MX channel? DualUp if lgdualup exists
-desk-switch status --json
-desk-switch status --hint       # MAC / LNX / ?  (bar widget)
+desk-switch status              # HHKB / mouse / adapters
+desk-switch status --json       # includes adapters.mouse / hosts / dualup
+desk-switch status --hint       # MAC / LNX / ?  (bar + menu bar)
 desk-switch to mac              # mouse → Mac channel; DualUp input if configured
 desk-switch to linux
 desk-switch switch mac          # same as `to mac`
 desk-switch switch 2            # mouse only, Easy-Switch channel 2
-desk-switch pbp 50-50           # lgdualup pbp <mode>; no-op if missing
-desk-switch full                # lgdualup pbp full; no-op if missing
+desk-switch pbp 50-50           # dualup adapter; no-op if missing
+desk-switch full                # DualUp full-screen; no-op if missing
 desk-switch watch               # follow HHKB departures (mouse only)
 desk-switch watch --dry-run
-
-hhkb-mx-follow status           # legacy name — same CLI
-hhkb-mx-follow watch
-hhkb-mx-follow switch 2
-mxswitch --info
-mxswitch 2
 ```
 
-`watch` is unchanged: it only pushes the mouse when the HHKB leaves. It does
-not touch the DualUp. Use `to mac` / `to linux` (or the Omarchy widget) when
-you want mouse + monitor together.
+`watch` only pushes the mouse when the HHKB leaves. It does not touch the
+DualUp. Use `to mac` / `to linux` (or the Omarchy / macOS UI) when you want
+mouse + monitor together.
 
 Logs:
 
 - macOS LaunchAgent: `~/Library/Logs/hhkb-mx-follow.log`
 - Linux systemd: `journalctl --user -u hhkb-mx-follow -f`
 
-## DualUp (`lgdualup`)
+## Config
 
-`lgdualup` is an optional binary Gabriel already keeps at `~/.local/bin/lgdualup`
-on the Mac (not vendored here):
+`~/.config/desk-switch/config.json`. Register adapters:
 
-```bash
-lgdualup --info
-lgdualup --list
-lgdualup input <name>
-lgdualup pbp <mode>
+```json
+{
+  "adapters": {
+    "mouse": { "enabled": true },
+    "hosts": {
+      "this_host": "mac",
+      "follow_channel": 2,
+      "mac": { "channel": 1 },
+      "linux": { "channel": 2 }
+    },
+    "dualup": {
+      "enabled": true,
+      "pbp_mode": "50-50",
+      "switch_pbp": false,
+      "inputs": { "mac": "", "linux": "" }
+    }
+  }
+}
 ```
 
-desk-switch only invokes those subcommands. Put the binary on `PATH` (or set
-`lgdualup` in config to an absolute path). Set `hosts.mac.dualup_input` and
-`hosts.linux.dualup_input` to names from `lgdualup --list`. Leave them empty to
-switch the mouse only.
+Set `adapters.dualup.inputs` to names from `desk-switch status` / the DualUp
+helper `--list` (`usbc`, `dp`, `hdmi1`, …). Leave them empty to switch the
+mouse only.
 
-PBP is left alone unless you set `switch_pbp: true` or a per-host `pbp` field.
-`desk-switch full` / `desk-switch pbp <mode>` always pass through to
-`lgdualup` when it exists, and print a clear no-op message otherwise.
+PBP is left alone on `to mac|linux` unless `switch_pbp` is true or a per-host
+`pbp` field is set. `desk-switch full` / `desk-switch pbp <mode>` always pass
+through to the dualup adapter when it exists.
+
+Legacy keys (`mxswitch`, `lgdualup`, `this_host`, `hosts`, `target_channel`)
+still load. New installs write the adapters shape.
 
 ## Omarchy plugin
 
 `manifest.json` lives at the **git root**, same pattern as
-[omarchy-hey-plugin](https://github.com/basecamp/omarchy-hey-plugin), so this
-works:
+[omarchy-hey-plugin](https://github.com/basecamp/omarchy-hey-plugin). The bar
+widget only calls `desk-switch`:
 
 ```bash
-# still install the CLI on the Linux box
 make install
-
 omarchy plugin add https://github.com/gabriel-laet/desk-switch.git --enable
 ```
 
 That clones the repo into `~/.config/omarchy/plugins/glaet.desk-switch/` and
-places the bar widget on the **right** section. Click it for:
+places the bar widget on the **right** section. Title is MAC / LNX / ?. Click
+it for:
 
 - status refresh
 - Switch to Mac / Switch to Linux
-- DualUp Full / DualUp PBP (only listed when `lgdualup` is on PATH)
+- DualUp Full / DualUp PBP (only listed when the dualup adapter is present)
 
-The widget shells out to `desk-switch` via `bash -lc` (falls back to
-`hhkb-mx-follow`). The plugin does **not** run `make install`; the CLI must
-already be on `PATH`.
+The plugin does **not** run `make install`; the CLI must already be on `PATH`
+(or in `~/.local/bin`).
 
 Validate without Omarchy:
 
@@ -224,6 +272,24 @@ Copy the keys from [`extensions/omarchy-menu.jsonc`](extensions/omarchy-menu.jso
 into `~/.config/omarchy/extensions/omarchy-menu.jsonc` (merge, do not replace
 your other rows). They land under **Trigger → Desk switch**.
 
+## macOS menu bar
+
+Same job as the Omarchy widget, native `MenuBarExtra`:
+
+```bash
+make menubar              # builds build/DeskSwitchBar.app (needs swiftc)
+make install-menubar      # copies to ~/Applications/DeskSwitchBar.app
+open -a DeskSwitchBar
+```
+
+- Title: `MAC` / `LNX` / `?` (from `desk-switch status --json` → `target_hint`)
+- Click: status summary, Refresh, Switch to Mac / Linux, DualUp Full / PBP
+  when the dualup adapter is available
+- Refresh every ~15s and again when the panel opens
+- Shells out to `desk-switch` only (PATH, then `~/.local/bin`)
+
+Unsigned / ad-hoc local build. macOS 13+.
+
 ## How it decides the keyboard left
 
 - **macOS:** `hidutil list` for the HHKB keyboard collection (usage page 1, usage 6).
@@ -232,11 +298,21 @@ your other rows). They land under **Trigger → Desk switch**.
 A probe error is treated as *present*, so a flaky `hidutil` cannot steal the
 mouse. Sleep/wake clock jumps disarm the watcher until the HHKB is seen again.
 
+## Troubleshooting
+
+- `desk-switch status` — are adapters `available` or `missing`?
+- Mouse hop fails on Mac: Input Monitoring on `~/.local/lib/desk-switch/mxswitch`
+- DualUp no-op: helper missing, or `adapters.dualup.inputs` empty
+- Watcher never fires: HHKB still enumerated over USB on this host
+- Menu bar shows `?` and “desk-switch not found”: `make install` and keep
+  `~/.local/bin` on your GUI `PATH`, or use the default `~/.local/bin` lookup
+
 ## Credits
 
 Mouse channel switching is [mxswitch](https://github.com/marcocosta97/mxswitch)
-(MIT), vendored in `macos/mxswitch.c` and `linux/mxswitch.sh`. The follow idea
-— poll for the keyboard, then `ChangeHost` — is the same pattern as
+(MIT), vendored in `macos/mxswitch.c` and `linux/mxswitch.py` as the mouse
+adapter. The follow idea — poll for the keyboard, then `ChangeHost` — is the
+same pattern as
 [logi_mx_auto_switch](https://github.com/omar16100/logi_mx_auto_switch) and
 [CleverSwitch](https://github.com/MikalaiBarysevich/CleverSwitch), which only
 speak Logitech-to-Logitech.
