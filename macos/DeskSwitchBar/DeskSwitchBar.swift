@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 
 /// Menu-bar companion for desk-switch. Mirrors the Omarchy bar widget:
-/// title is MAC / LNX / ?, menu runs the same `desk-switch` actions.
+/// title is the shared `bar_label` (focus + kb/mouse/DualUp chips).
 /// Does not talk to mxswitch / lgdualup directly.
 
 @main
@@ -14,8 +14,8 @@ struct DeskSwitchBarApp: App {
         MenuBarExtra {
             DeskPanel(model: model)
         } label: {
-            Text(model.hint)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            Text(model.barLabel)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
         }
         .menuBarExtraStyle(.window)
     }
@@ -23,7 +23,12 @@ struct DeskSwitchBarApp: App {
 
 final class DeskSwitchModel: ObservableObject {
     @Published var hint = "?"
+    @Published var barLabel = "?"
     @Published var summary = "Refresh to probe HHKB / MX / DualUp"
+    @Published var hhkbLine = "HHKB  ?"
+    @Published var mouseLine = "MX  ?"
+    @Published var dualLine = "DU  ?"
+    @Published var peerLine = ""
     @Published var dualUpAvailable = false
     @Published var lastLine = ""
 
@@ -47,14 +52,24 @@ final class DeskSwitchModel: ObservableObject {
                 let parsed = StatusSnapshot.parse(raw)
                 DispatchQueue.main.async {
                     self.hint = parsed.hint
+                    self.barLabel = parsed.barLabel
                     self.summary = parsed.summary
+                    self.hhkbLine = parsed.hhkbLine
+                    self.mouseLine = parsed.mouseLine
+                    self.dualLine = parsed.dualLine
+                    self.peerLine = parsed.peerLine
                     self.dualUpAvailable = parsed.dualUpAvailable
                     self.lastLine = ""
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.hint = "?"
+                    self.barLabel = "?"
                     self.summary = error.localizedDescription
+                    self.hhkbLine = "HHKB  ?"
+                    self.mouseLine = "MX  ?"
+                    self.dualLine = "DU  ?"
+                    self.peerLine = ""
                     self.dualUpAvailable = false
                 }
             }
@@ -87,6 +102,15 @@ struct DeskPanel: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Desk → \(model.hint)")
                 .font(.system(size: 13, weight: .semibold))
+            Text(model.barLabel)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+            DeskChip(title: model.hhkbLine)
+            DeskChip(title: model.mouseLine)
+            DeskChip(title: model.dualLine)
+            if !model.peerLine.isEmpty {
+                DeskChip(title: model.peerLine)
+            }
             Text(model.summary)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -108,8 +132,21 @@ struct DeskPanel: View {
             DeskRow(title: "Quit") { NSApplication.shared.terminate(nil) }
         }
         .padding(12)
-        .frame(width: 260)
+        .frame(width: 300)
         .onAppear { model.refresh() }
+    }
+}
+
+struct DeskChip: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, design: .monospaced))
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 4))
     }
 }
 
@@ -231,8 +268,19 @@ enum DeskSwitchCLI {
 
 struct StatusSnapshot {
     var hint = "?"
+    var barLabel = "?"
     var summary = "Refresh to probe HHKB / MX / DualUp"
+    var hhkbLine = "HHKB  ?"
+    var mouseLine = "MX  ?"
+    var dualLine = "DU  ?"
+    var peerLine = ""
     var dualUpAvailable = false
+
+    static func intValue(_ obj: [String: Any], _ key: String) -> Int? {
+        if let n = obj[key] as? Int { return n }
+        if let n = obj[key] as? NSNumber { return n.intValue }
+        return nil
+    }
 
     static func parse(_ raw: String) -> StatusSnapshot {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -242,7 +290,7 @@ struct StatusSnapshot {
         else {
             let first = text.split(whereSeparator: { $0.isWhitespace }).first
             let hint = ["MAC", "LNX", "?"].contains(first.map(String.init) ?? "") ? String(first!) : "?"
-            return StatusSnapshot(hint: hint, summary: text.isEmpty ? "Refresh to probe HHKB / MX / DualUp" : text)
+            return StatusSnapshot(hint: hint, barLabel: hint, summary: text.isEmpty ? "Refresh to probe HHKB / MX / DualUp" : text)
         }
 
         var hint = String(describing: obj["target_hint"] ?? "?")
@@ -250,14 +298,37 @@ struct StatusSnapshot {
             hint = "?"
         }
 
-        let hhkb = String(describing: obj["hhkb"] ?? "?")
-        let channel: String
-        if let n = obj["mouse_channel"] as? Int {
-            channel = "ch \(n)"
-        } else if let n = obj["mouse_channel"] as? NSNumber {
-            channel = "ch \(n.intValue)"
+        let barLabel: String
+        if let label = obj["bar_label"] as? String, !label.isEmpty {
+            barLabel = label
         } else {
-            channel = "ch ?"
+            barLabel = hint
+        }
+
+        let usb = obj["hhkb_usb"] as? Bool ?? false
+        let bluetooth = obj["hhkb_bluetooth"] as? Bool ?? false
+        let present = obj["hhkb_present"] as? Bool ?? false
+        let transport = obj["hhkb_transport"] as? String ?? "absent"
+        let hhkbValue: String
+        if usb {
+            hhkbValue = "USB on this host"
+        } else if bluetooth {
+            hhkbValue = "BT only"
+        } else if present {
+            hhkbValue = "present · \(transport)"
+        } else {
+            hhkbValue = "absent"
+        }
+
+        let channel = intValue(obj, "mouse_channel")
+        let host = (obj["mouse_host"] as? String ?? "").lowercased()
+        let dest = host == "linux" ? "LNX" : (host == "mac" ? "MAC" : (host.isEmpty ? "?" : host.uppercased()))
+        let online = obj["mouse_online"] as? Bool ?? false
+        let mouseValue: String
+        if let channel {
+            mouseValue = "ch \(channel) → \(dest)" + (online ? " online" : " cached")
+        } else {
+            mouseValue = "missing"
         }
 
         var dual = obj["lgdualup"] as? Bool ?? false
@@ -267,11 +338,44 @@ struct StatusSnapshot {
         {
             dual = available && (dualup["enabled"] as? Bool ?? true)
         }
+        let mode = (obj["dualup_mode"] as? String ?? "unknown").lowercased()
+        let modeLabel = mode == "pbp" ? "PBP" : (mode == "full" ? "FULL" : "unknown")
+        var macIn = "hdmi1"
+        var lnxIn = "dp"
+        if let inputs = obj["dualup_inputs"] as? [String: Any] {
+            if let mac = inputs["mac"] as? String, !mac.isEmpty { macIn = mac }
+            if let linux = inputs["linux"] as? String, !linux.isEmpty { lnxIn = linux }
+        }
 
-        let dualLabel = dual ? "lgdualup" : "no DualUp"
+        var peerLine = ""
+        if let peer = obj["peer"] as? [String: Any] {
+            if peer["reachable"] as? Bool ?? false {
+                let peerHost = peer["this_host"] as? String ?? (peer["peer"] as? String ?? "peer")
+                let peerUsb = peer["hhkb_usb"] as? Bool ?? false
+                let peerBt = peer["hhkb_bluetooth"] as? Bool ?? false
+                let peerKb = peerUsb ? "USB" : (peerBt ? "BT" : (peer["hhkb_transport"] as? String ?? "?"))
+                let peerCh = intValue(peer, "mouse_channel").map(String.init) ?? "?"
+                peerLine = "PEER  \(peerHost) · HHKB \(peerKb) · mx \(peerCh)"
+            } else if let name = peer["peer"] as? String {
+                peerLine = "PEER  \(name) unreachable"
+            }
+        }
+
+        let summary: String
+        if let tip = obj["bar_tooltip"] as? String, !tip.isEmpty {
+            summary = tip
+        } else {
+            summary = "\(hhkbValue) · \(mouseValue) · \(modeLabel)"
+        }
+
         return StatusSnapshot(
             hint: hint,
-            summary: "\(hhkb) · \(channel) · \(dualLabel)",
+            barLabel: barLabel,
+            summary: summary,
+            hhkbLine: "HHKB  \(hhkbValue)",
+            mouseLine: "MX  \(mouseValue)",
+            dualLine: "DU  \(modeLabel) · mac=\(macIn) linux=\(lnxIn)",
+            peerLine: peerLine,
             dualUpAvailable: dual
         )
     }

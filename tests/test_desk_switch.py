@@ -282,8 +282,24 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn('["full"]', src)
         self.assertIn('["pbp"]', src)
         self.assertIn("desk-switch", src)
+        self.assertIn("bar_label", src)
+        self.assertIn("hhkb_usb", src)
+        self.assertIn("hhkb_transport", src)
+        self.assertIn("USB on this host", src)
         self.assertNotIn("lib/desk-switch/mxswitch", src)
         self.assertNotIn("lib/desk-switch/lgdualup", src)
+
+
+class BarWidgetSourceTests(unittest.TestCase):
+    def test_omarchy_uses_shared_bar_label(self) -> None:
+        bar = (ROOT / "BarWidget.qml").read_text()
+        panel = (ROOT / "Panel.qml").read_text()
+        self.assertIn("bar_label", bar)
+        self.assertIn("hhkb_usb", bar)
+        self.assertIn("status --json", bar)
+        self.assertIn("USB on this host", panel)
+        self.assertIn("BT only", panel)
+        self.assertIn("StatusChip", panel)
 
 
 class LgdualupCallTests(unittest.TestCase):
@@ -700,5 +716,365 @@ class DualupLayoutScriptTests(unittest.TestCase):
         self.assertNotIn("2560x1440", proc.stdout)
 
 
+class HhkbTransportTests(unittest.TestCase):
+    def test_linux_bluetooth_hid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hid = Path(tmp) / "hid"
+            usb = Path(tmp) / "usb"
+            hid.mkdir()
+            usb.mkdir()
+            node = hid / "0005:000004FE:00000016.0001"
+            node.mkdir()
+            (node / "uevent").write_text("HID_NAME=HHKB-Studio\nHID_ID=0005:000004FE:00000016\n")
+            probe = ds.parse_linux_hhkb_sysfs(hid, usb, 0x04FE, 0x0016)
+        self.assertTrue(probe["present"])
+        self.assertTrue(probe["bluetooth"])
+        self.assertFalse(probe["usb"])
+        self.assertEqual(probe["transport"], "bluetooth")
+
+    def test_linux_usb_and_bluetooth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hid = Path(tmp) / "hid"
+            usb = Path(tmp) / "usb"
+            hid.mkdir()
+            usb.mkdir()
+            bt = hid / "0005:000004FE:00000016.0001"
+            bt.mkdir()
+            (bt / "uevent").write_text("HID_NAME=HHKB-Studio\n")
+            wired = hid / "0003:000004FE:00000016.0002"
+            wired.mkdir()
+            (wired / "uevent").write_text("HID_NAME=HHKB-Studio\n")
+            dev = usb / "1-3"
+            dev.mkdir()
+            (dev / "idVendor").write_text("04fe\n")
+            (dev / "idProduct").write_text("0016\n")
+            probe = ds.parse_linux_hhkb_sysfs(hid, usb, 0x04FE, 0x0016)
+        self.assertTrue(probe["usb"])
+        self.assertTrue(probe["bluetooth"])
+        self.assertEqual(probe["transport"], "both")
+
+    def test_linux_name_match_without_vid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hid = Path(tmp) / "hid"
+            hid.mkdir()
+            node = hid / "0005:00000000:00000000.0008"
+            node.mkdir()
+            (node / "uevent").write_text("HID_NAME=HHKB-Studio1\n")
+            probe = ds.parse_linux_hhkb_sysfs(hid, None, 0x04FE, 0x0016)
+        self.assertTrue(probe["present"])
+        self.assertTrue(probe["bluetooth"])
+
+    def test_ioreg_bluetooth_name_without_vid(self) -> None:
+        hid = """
++-o IOHIDDevice  <class IOHIDDevice>
+  | {
+  |   "Product" = "HHKB-Studio1"
+  |   "VendorID" = 0
+  |   "ProductID" = 0
+  |   "Transport" = "Bluetooth"
+  | }
+"""
+        probe = ds.parse_ioreg_hhkb(hid, "", "", 0x04FE, 0x0016)
+        self.assertTrue(probe["present"])
+        self.assertTrue(probe["bluetooth"])
+        self.assertFalse(probe["usb"])
+        self.assertEqual(probe["transport"], "bluetooth")
+
+    def test_ioreg_usb_cable(self) -> None:
+        usb = """
++-o HHKB-Studio@00100000  <class IOUSBHostDevice>
+  | {
+  |   "idVendor" = 1278
+  |   "idProduct" = 22
+  |   "USB Product Name" = "HHKB-Studio"
+  | }
+"""
+        probe = ds.parse_ioreg_hhkb("", usb, "", 0x04FE, 0x0016)
+        self.assertTrue(probe["usb"])
+        self.assertEqual(probe["transport"], "usb")
+
+    def test_ioreg_bt_device_connected(self) -> None:
+        bt = """
++-o IOBluetoothDevice
+  | {
+  |   "Name" = "HHKB-Studio1"
+  |   "DeviceConnected" = Yes
+  | }
+"""
+        probe = ds.parse_ioreg_hhkb("", "", bt, 0x04FE, 0x0016)
+        self.assertTrue(probe["bluetooth"])
+        self.assertTrue(probe["present"])
+
+    def test_hidutil_product_name_without_usage_6(self) -> None:
+        text = (
+            "Services:\n"
+            "0x0  0x0  0x0  0x1  0x2  0xabc  HHKB-Studio1 Bluetooth\n"
+            "Devices:\n"
+        )
+        probe = ds.parse_hidutil_hhkb(text, 0x04FE, 0x0016)
+        self.assertTrue(probe["present"])
+        self.assertTrue(probe["bluetooth"])
+
+    def test_hidutil_vid_pid_any_usage(self) -> None:
+        text = "Services:\n0x4fe  0x16  0x0  0x1  0x1  0xabc  something\n"
+        probe = ds.parse_hidutil_hhkb(text, 0x04FE, 0x0016)
+        self.assertTrue(probe["present"])
+
+
+class HintAndCacheTests(unittest.TestCase):
+    def test_hint_mouse_wins_over_missing_hhkb(self) -> None:
+        cfg = {
+            "this_host": "mac",
+            "hosts": {"mac": {"channel": 1}, "linux": {"channel": 2}},
+        }
+        self.assertEqual(ds.target_hint(cfg, 2, False), "LNX")
+        hint, source = ds.resolve_target_hint(cfg, mouse_channel=2, hhkb_present=False)
+        self.assertEqual(hint, "LNX")
+        self.assertEqual(source, "mouse")
+
+    def test_hint_peer_mouse_when_local_unknown(self) -> None:
+        cfg = {
+            "this_host": "mac",
+            "hosts": {"mac": {"channel": 1}, "linux": {"channel": 2}},
+        }
+        hint, source = ds.resolve_target_hint(
+            cfg, mouse_channel=None, hhkb_present=False, peer_channel=2
+        )
+        self.assertEqual(hint, "LNX")
+        self.assertEqual(source, "peer_mouse")
+
+    def test_mouse_cache_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "cache_dir", return_value=Path(tmp)):
+                self.assertEqual(ds.load_mouse_cache(now=100.0), (None, None))
+                ds.save_mouse_cache(2, now=50.0)
+                channel, ts = ds.load_mouse_cache(now=80.0)
+                self.assertEqual(channel, 2)
+                self.assertEqual(ts, 50.0)
+                expired, _ = ds.load_mouse_cache(now=50.0 + ds.MOUSE_CACHE_TTL_S + 1)
+                self.assertIsNone(expired)
+
+    def test_bar_label_chips(self) -> None:
+        label = ds.format_bar_label(
+            {
+                "target_hint": "LNX",
+                "hhkb_usb": True,
+                "hhkb_bluetooth": False,
+                "hhkb_present": True,
+                "mouse_channel": 2,
+                "mouse_online": False,
+                "dualup_mode": "pbp",
+            }
+        )
+        self.assertEqual(label, "LNX  kbU  mx2~  PBP")
+
+    def test_mac_status_uses_cached_channel_and_bt_hhkb(self) -> None:
+        cfg = {
+            "this_host": "mac",
+            "hosts": {
+                "mac": {"channel": 1, "dualup_input": "hdmi1"},
+                "linux": {"channel": 2, "dualup_input": "dp"},
+            },
+            "hhkb_vendor_id": 0x04FE,
+            "hhkb_product_id": 0x0016,
+            "_config_path": "(test)",
+            "_mouse_enabled": True,
+            "_dualup_enabled": False,
+            "mxswitch": "/no/mx",
+            "follow_hhkb_usb": True,
+            "target_channel": 2,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "cache_dir", return_value=Path(tmp)), mock.patch.object(
+                ds,
+                "hhkb_probe",
+                return_value={
+                    "present": True,
+                    "usb": False,
+                    "bluetooth": True,
+                    "transport": "bluetooth",
+                    "unknown": False,
+                    "names": ["HHKB-Studio1"],
+                },
+            ), mock.patch.object(ds, "mouse_info", return_value=("No Logitech device", None)), mock.patch.object(
+                ds, "which_adapter", return_value=None
+            ), mock.patch.object(ds, "lgdualup_path", return_value=None), mock.patch.object(
+                ds, "detect_dualup_mode", return_value="pbp"
+            ):
+                ds.save_mouse_cache(2)
+                state = ds.collect_status(cfg, local_only=True)
+        self.assertEqual(state["target_hint"], "LNX")
+        self.assertEqual(state["target_hint_source"], "mouse_cached")
+        self.assertTrue(state["hhkb_bluetooth"])
+        self.assertFalse(state["hhkb_usb"])
+        self.assertEqual(state["hhkb_transport"], "bluetooth")
+        self.assertEqual(state["mouse_channel"], 2)
+        self.assertFalse(state["mouse_online"])
+        self.assertEqual(state["mouse_host"], "linux")
+        self.assertEqual(state["bar_label"], "LNX  kbB  mx2~  PBP")
+        self.assertEqual(state["dualup_inputs"]["mac"], "hdmi1")
+
+    def test_peer_live_mouse_fills_mac_gap(self) -> None:
+        cfg = {
+            "this_host": "mac",
+            "hosts": {"mac": {"channel": 1}, "linux": {"channel": 2}},
+            "hhkb_vendor_id": 0x04FE,
+            "hhkb_product_id": 0x0016,
+            "_config_path": "(test)",
+            "target_channel": 2,
+        }
+        peer = {
+            "reachable": True,
+            "this_host": "linux",
+            "mouse_channel": 2,
+            "mouse_online": True,
+            "hhkb_usb": True,
+            "hhkb_transport": "usb",
+            "target_hint": "LNX",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "cache_dir", return_value=Path(tmp)), mock.patch.object(
+                ds, "hhkb_probe", return_value=ds.empty_hhkb_probe()
+            ), mock.patch.object(ds, "mouse_info", return_value=("missing", None)), mock.patch.object(
+                ds, "which_adapter", return_value=None
+            ), mock.patch.object(ds, "lgdualup_path", return_value=None), mock.patch.object(
+                ds, "detect_dualup_mode", return_value="unknown"
+            ), mock.patch.object(ds, "peek_peer_status", return_value=peer):
+                state = ds.collect_status(cfg, local_only=False)
+        self.assertEqual(state["target_hint"], "LNX")
+        self.assertEqual(state["target_hint_source"], "peer_mouse")
+        self.assertEqual(state["mouse_channel"], 2)
+        self.assertEqual(state["peer"]["hhkb_transport"], "usb")
+
+
+class WatchUsbFollowTests(unittest.TestCase):
+    def test_rising_edge_fires_once(self) -> None:
+        self.assertEqual(ds.watch_usb_rising_edge(None, True, True), (True, False))
+        self.assertEqual(ds.watch_usb_rising_edge(False, True, True), (True, True))
+        self.assertEqual(ds.watch_usb_rising_edge(True, True, True), (True, False))
+        self.assertEqual(ds.watch_usb_rising_edge(True, False, True), (False, False))
+        self.assertEqual(ds.watch_usb_rising_edge(False, True, False), (True, False))
+
+    def test_follow_hhkb_usb_default_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text("{}")
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)):
+                cfg = ds.load_config()
+        self.assertTrue(cfg["follow_hhkb_usb"])
+
+    def test_follow_hhkb_usb_can_disable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(json.dumps({"adapters": {"hosts": {"follow_hhkb_usb": False}}}))
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)):
+                cfg = ds.load_config()
+        self.assertFalse(cfg["follow_hhkb_usb"])
+
+    def test_usb_edge_calls_to_this_host(self) -> None:
+        cfg = {
+            "this_host": "mac",
+            "follow_hhkb_usb": True,
+            "hosts": {"mac": {"channel": 1}, "linux": {"channel": 2}},
+            "target_channel": 2,
+            "poll_interval_s": 0.01,
+            "absent_polls_required": 1,
+            "sleep_gap_s": 30,
+            "switch_retries": 1,
+            "switch_retry_delay_s": 0,
+        }
+        probes = [
+            {
+                "present": True,
+                "usb": False,
+                "bluetooth": True,
+                "transport": "bluetooth",
+                "unknown": False,
+            },
+            {
+                "present": True,
+                "usb": True,
+                "bluetooth": False,
+                "transport": "usb",
+                "unknown": False,
+            },
+        ]
+        calls: list[str] = []
+
+        def fake_to(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            calls.append(host)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(ds, "hhkb_probe", side_effect=probes), mock.patch.object(
+            ds, "cmd_to", side_effect=fake_to
+        ), mock.patch.object(ds.time, "sleep"), mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                ds.cmd_watch(cfg, dry_run=False)
+        self.assertEqual(calls, ["mac"])
+
+
+class DualupModeDetectTests(unittest.TestCase):
+    def test_linux_pbp_and_full(self) -> None:
+        pbp = [{"name": "DP-2", "description": "LG Electronics LG SDQHD", "width": 1280, "height": 2880}]
+        full = [{"name": "DP-2", "description": "LG Electronics LG SDQHD", "width": 2560, "height": 2880}]
+        self.assertEqual(ds.detect_dualup_mode_linux(pbp), "pbp")
+        self.assertEqual(ds.detect_dualup_mode_linux(full), "full")
+
+    def test_macos_pbp_from_displayplacer(self) -> None:
+        text = (
+            "Persistent screen id: ABC\n"
+            "Type: 28 inch external screen\n"
+            "Resolution: 2880x1280\n"
+        )
+        self.assertEqual(ds.detect_dualup_mode_macos(text), "pbp")
+        full = (
+            "Persistent screen id: ABC\n"
+            "Type: 28 inch external screen\n"
+            "Resolution: 2880x2560\n"
+        )
+        self.assertEqual(ds.detect_dualup_mode_macos(full), "full")
+
+    def test_status_json_exports_transport_fields(self) -> None:
+        env = os.environ.copy()
+        env["PATH"] = "/usr/bin:/bin"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env["HOME"] = str(home)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps({
+                    "this_host": "linux",
+                    "target_channel": 1,
+                    "mxswitch": "/no/such/mxswitch",
+                    "lgdualup": "lgdualup-missing",
+                })
+            )
+            js = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(js.returncode, 0, js.stderr)
+        data = json.loads(js.stdout)
+        for key in (
+            "hhkb_transport",
+            "hhkb_usb",
+            "hhkb_bluetooth",
+            "bar_label",
+            "target_hint",
+            "follow_hhkb_usb",
+            "dualup_mode",
+            "dualup_inputs",
+        ):
+            self.assertIn(key, data)
+        self.assertIn(data["hhkb_transport"], {"usb", "bluetooth", "both", "unknown", "absent"})
+        self.assertEqual(data["dualup_inputs"]["mac"], "hdmi1")
+        self.assertEqual(data["dualup_inputs"]["linux"], "dp")
+
+
 if __name__ == "__main__":
     unittest.main()
+
