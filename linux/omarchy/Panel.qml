@@ -122,6 +122,25 @@ Panel {
     return []
   }
 
+  // Stub-read slot flavors. macOS HUD paints by kind; this panel still
+  // uses the dump layout. Do not fork the schema — same tokens as core.
+  function slotKind(slot) {
+    if (slot && slot.kind)
+      return String(slot.kind)
+    const id = slot && slot.id ? String(slot.id) : ""
+    if (id === "kettle")
+      return "face"
+    if (id === "weather")
+      return "chip"
+    if (id === "lights")
+      return "toggle"
+    if (id === "dualup")
+      return "mode"
+    if (id === "host")
+      return "host"
+    return slot && slot.face ? "face" : "chip"
+  }
+
   function faceSlot() {
     const items = root.slotList()
     for (let i = 0; i < items.length; i++) {

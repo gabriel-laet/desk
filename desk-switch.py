@@ -268,29 +268,56 @@ def _as_bool(value: object, default: bool) -> bool:
 # Quiet default extra: weather → kettle → DualUp. Lights stay off until opted in.
 DEFAULT_TRAY_SLOT_IDS = ("weather", "kettle", "dualup")
 KNOWN_TRAY_SLOT_IDS = ("weather", "kettle", "dualup", "lights")
+KNOWN_SLOT_KINDS = ("face", "chip", "toggle", "mode", "host")
+# Shells paint by `kind`. Ids only seed the v1 registry when an adapter
+# omits it — a new espresso slot can set `"kind": "face"` and the HUD
+# learns the flavor without a Swift/QML special case.
+SLOT_KIND_BY_ID = {
+    "weather": "chip",
+    "kettle": "face",
+    "dualup": "mode",
+    "lights": "toggle",
+    "host": "host",
+}
 ALTITUDE_DETAIL_RE = re.compile(r"^\d+m$")
+
+
+def resolve_slot_kind(slot_id: str, raw_kind: object = None) -> str:
+    kind = str(raw_kind or "").strip().lower()
+    if kind in KNOWN_SLOT_KINDS:
+        return kind
+    return SLOT_KIND_BY_ID.get(str(slot_id or "").strip(), "chip")
 
 
 def default_tray_slot_prefs(*, lights: bool = False) -> list[dict]:
     return [
-        {"id": "weather", "enabled": True},
-        {"id": "kettle", "enabled": True},
-        {"id": "dualup", "enabled": True},
-        {"id": "lights", "enabled": bool(lights)},
+        {"id": "weather", "enabled": True, "kind": "chip", "show_altitude": True},
+        {"id": "kettle", "enabled": True, "kind": "face"},
+        {"id": "dualup", "enabled": True, "kind": "mode"},
+        {"id": "lights", "enabled": bool(lights), "kind": "toggle"},
     ]
 
 
 def parse_slot_pref(raw: object) -> dict | None:
-    """Accept a pin string (`\"kettle\"`) or `{id, enabled}` object."""
+    """Accept a pin string (`\"kettle\"`) or `{id, enabled, kind?, …}` object."""
     if isinstance(raw, str):
         slot_id = raw.strip()
-        return {"id": slot_id, "enabled": True} if slot_id else None
+        if not slot_id:
+            return None
+        return {"id": slot_id, "enabled": True, "kind": resolve_slot_kind(slot_id)}
     if not isinstance(raw, dict):
         return None
     slot_id = str(raw.get("id") or "").strip()
     if not slot_id:
         return None
-    return {"id": slot_id, "enabled": _as_bool(raw.get("enabled"), True)}
+    pref: dict = {
+        "id": slot_id,
+        "enabled": _as_bool(raw.get("enabled"), True),
+        "kind": resolve_slot_kind(slot_id, raw.get("kind")),
+    }
+    if "show_altitude" in raw:
+        pref["show_altitude"] = _as_bool(raw.get("show_altitude"), True)
+    return pref
 
 
 def parse_tray_slot_list(raw: object) -> tuple[list[dict] | None, bool, bool]:
@@ -328,13 +355,19 @@ def parse_ui_section(ui: object) -> dict:
                 lights = True
     density = str(tray.get("density") or "strip").strip().lower()
     hud_raw = str(hud.get("density") or "regular").strip().lower()
+    show_altitude = _as_bool(hud.get("show_altitude"), True)
+    if slots:
+        for pref in slots:
+            if pref.get("kind") == "chip" and "show_altitude" in pref:
+                show_altitude = bool(pref["show_altitude"])
+                break
     return {
         "tray_density": "chips" if density == "chips" else "strip",
         "tray_lights": lights,
         "slots": slots,
         "slots_exclusive": exclusive,
         "slots_from_user": from_user,
-        "hud_show_altitude": _as_bool(hud.get("show_altitude"), True),
+        "hud_show_altitude": show_altitude,
         "hud_show_faces": _as_bool(hud.get("show_faces"), True),
         "hud_density": "compact" if hud_raw == "compact" else "regular",
     }
@@ -367,16 +400,34 @@ def public_slot_prefs(cfg: dict) -> list[dict]:
             exclusive = True
         else:
             return catalog
-    out = [{"id": item["id"], "enabled": bool(item.get("enabled", True))} for item in prefs]
+    out = [_public_slot_pref(item, cfg) for item in prefs]
     seen = {item["id"] for item in out}
     if exclusive:
         for item in catalog:
             if item["id"] not in seen:
-                out.append({"id": item["id"], "enabled": False})
+                hidden = _public_slot_pref(item, cfg)
+                hidden["enabled"] = False
+                out.append(hidden)
         return out
     for item in catalog:
         if item["id"] not in seen:
-            out.append(item)
+            out.append(_public_slot_pref(item, cfg))
+    return out
+
+
+def _public_slot_pref(item: dict, cfg: dict) -> dict:
+    slot_id = str(item.get("id") or "")
+    kind = resolve_slot_kind(slot_id, item.get("kind"))
+    out: dict = {
+        "id": slot_id,
+        "enabled": bool(item.get("enabled", True)),
+        "kind": kind,
+    }
+    if kind == "chip":
+        if "show_altitude" in item:
+            out["show_altitude"] = _as_bool(item.get("show_altitude"), True)
+        else:
+            out["show_altitude"] = _as_bool(cfg.get("_hud_show_altitude"), True)
     return out
 
 
@@ -385,6 +436,10 @@ def format_public_ui(cfg: dict) -> dict:
     lights = bool(cfg.get("_tray_lights")) or any(
         item["id"] == "lights" and item["enabled"] for item in slots
     )
+    chip_alt = next(
+        (item["show_altitude"] for item in slots if item.get("kind") == "chip" and "show_altitude" in item),
+        _as_bool(cfg.get("_hud_show_altitude"), True),
+    )
     return {
         "tray": {
             "density": tray_density(cfg),
@@ -392,7 +447,9 @@ def format_public_ui(cfg: dict) -> dict:
             "slots": slots,
         },
         "hud": {
-            "show_altitude": _as_bool(cfg.get("_hud_show_altitude"), True),
+            # Mirror of the first chip slot's show_altitude. Prefer the
+            # per-slot key; this stays so older shells keep working.
+            "show_altitude": chip_alt,
             "show_faces": _as_bool(cfg.get("_hud_show_faces"), True),
             "density": hud_density(cfg),
         },
@@ -455,7 +512,10 @@ def apply_slot_prefs(available: list[dict], prefs: list[dict] | None, *, exclusi
         if not pref.get("enabled", True):
             continue
         if slot_id in by_id:
-            out.append(by_id[slot_id])
+            slot = dict(by_id[slot_id])
+            if pref.get("kind"):
+                slot["kind"] = resolve_slot_kind(slot_id, pref.get("kind"))
+            out.append(slot)
     if exclusive:
         return out
     for slot in available:
@@ -472,14 +532,24 @@ def strip_altitude_from_detail(detail: str) -> str:
     return " · ".join(kept)
 
 
+def _slot_show_altitude(pref: dict | None, cfg: dict) -> bool:
+    if pref and "show_altitude" in pref:
+        return _as_bool(pref.get("show_altitude"), True)
+    return _as_bool(cfg.get("_hud_show_altitude"), True)
+
+
 def apply_hud_prefs(slots: list[dict], cfg: dict | None = None) -> list[dict]:
     cfg = cfg or {}
-    show_altitude = _as_bool(cfg.get("_hud_show_altitude"), True)
+    prefs = cfg.get("_ui_slots") if isinstance(cfg.get("_ui_slots"), list) else []
+    by_id = {str(item.get("id") or ""): item for item in prefs if isinstance(item, dict)}
     show_faces = _as_bool(cfg.get("_hud_show_faces"), True)
     out: list[dict] = []
     for slot in slots:
         item = dict(slot)
-        if not show_altitude and item.get("id") == "weather":
+        slot_id = str(item.get("id") or "")
+        pref = by_id.get(slot_id)
+        item["kind"] = resolve_slot_kind(slot_id, (pref or {}).get("kind") or item.get("kind"))
+        if item["kind"] == "chip" and not _slot_show_altitude(pref, cfg):
             detail = strip_altitude_from_detail(str(item.get("detail") or ""))
             if detail:
                 item["detail"] = detail
@@ -1932,7 +2002,12 @@ def normalize_slot(raw: object) -> dict | None:
     label = str(raw.get("label") or "").strip()
     if not slot_id or not (glyph or label):
         return None
-    slot: dict = {"id": slot_id, "glyph": glyph or "dot", "label": label or slot_id}
+    slot: dict = {
+        "id": slot_id,
+        "glyph": glyph or "dot",
+        "label": label or slot_id,
+        "kind": resolve_slot_kind(slot_id, raw.get("kind")),
+    }
     if raw.get("detail"):
         slot["detail"] = str(raw["detail"])
     if "hot" in raw:
@@ -1974,11 +2049,13 @@ def display_slot(state: dict) -> dict | None:
         return None
     return {
         "id": "dualup",
+        "kind": "mode",
         "glyph": glyph,
         "label": label,
         "actions": [
             {"label": "Full", "argv": ["full"]},
             {"label": "PBP", "argv": ["pbp"]},
+            {"label": "Auto layout", "argv": ["layout"]},
         ],
     }
 
@@ -2013,6 +2090,7 @@ def lights_slot(mark: str) -> dict:
         glyph, label = "light.off", "?"
     return {
         "id": "lights",
+        "kind": "toggle",
         "glyph": glyph,
         "label": label,
         "hot": state == "on",
@@ -2027,7 +2105,8 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
     """Compose additive tray/HUD slots. Shells only paint. Missing adapter ⇒ omit.
 
     Default order is weather → kettle → dualup. `ui.tray.slots` reorders and
-    hides. Lights stay out unless `ui.tray.lights` or the lights pref is on.
+    hides. Each slot carries `kind` (face / chip / toggle / mode). Lights
+    stay out unless `ui.tray.lights` or the lights pref is on.
     """
     cfg = cfg or {}
     adapters = state.get("adapters") or {}

@@ -33,5 +33,10 @@ Optional pin:
 }
 ```
 
+The tray slot is `kind: chip` (ambient ° + optional mood / altitude).
+Altitude is adapter-owned — hide it with the weather slot’s
+`show_altitude` pref in [`docs/ui-config.md`](../../docs/ui-config.md),
+not a global HUD flag.
+
 `DESK_SWITCH_WEATHER_URL` overrides the forecast URL (tests). Cache:
 `$XDG_CACHE_HOME/desk-switch/weather.json` (10 minutes).

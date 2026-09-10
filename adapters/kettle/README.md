@@ -4,8 +4,9 @@ Role: **`kettle`**. Id: **`kettle`**. Core never `GET`s the kettle.
 
 Fellow Stagg LAN HTTP (`GET /cli?cmd=…`) lives here. The old
 `gabriel-laet/kettle` repo was hard-deleted; this adapter is the source
-of truth. DeskSwitchBar / the Omarchy tray paint the kettle **slot** —
-there is no standalone Kettle.app in this product.
+of truth. DeskSwitchBar / the Omarchy tray paint the kettle **slot**
+(`kind: face` — circular gauge + scoped Heat/Off). There is no
+standalone Kettle.app in this product.
 
 ```
 ~/.local/lib/desk-switch/kettle

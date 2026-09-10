@@ -63,14 +63,13 @@
       "density": "strip",
       "lights": false,
       "slots": [
-        { "id": "weather", "enabled": true },
-        { "id": "kettle", "enabled": true },
-        { "id": "dualup", "enabled": true },
-        { "id": "lights", "enabled": false }
+        { "id": "weather", "enabled": true, "kind": "chip", "show_altitude": true },
+        { "id": "kettle", "enabled": true, "kind": "face" },
+        { "id": "dualup", "enabled": true, "kind": "mode" },
+        { "id": "lights", "enabled": false, "kind": "toggle" }
       ]
     },
     "hud": {
-      "show_altitude": true,
       "show_faces": true,
       "density": "regular"
     }

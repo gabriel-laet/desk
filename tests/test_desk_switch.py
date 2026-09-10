@@ -340,12 +340,19 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("NSImage", src)
         self.assertIn("SlotGlyphMap", src)
         self.assertIn("SlotHUD", src)
+        self.assertIn("WidgetKind", src)
+        self.assertIn("HostWidget", src)
+        self.assertIn("FaceFlavor", src)
+        self.assertIn("ChipFlavor", src)
+        self.assertIn("ToggleFlavor", src)
+        self.assertIn("ModeFlavor", src)
         self.assertIn("TraySettingsPanel", src)
         self.assertIn("DeskUIConfig", src)
         self.assertIn("DeskUIConfigStore", src)
         self.assertIn("Configure tray", src)
         self.assertIn("applyOptimisticLight", src)
         self.assertIn("placeholderLights", src)
+        self.assertIn("WidgetKind.toggle", src)
         self.assertIn("onMove", src)
         self.assertIn(".config/desk-switch", src)
         self.assertIn("show_altitude", src)
@@ -376,6 +383,7 @@ class BarWidgetSourceTests(unittest.TestCase):
         self.assertIn("uiConfig", panel)
         self.assertIn("TODO: Omarchy drag-reorder", bar)
         self.assertIn("faceSlotLabel", panel)
+        self.assertIn("slotKind", panel)
         self.assertIn("slotActions", panel)
         self.assertIn("hhkb_usb", bar)
         self.assertIn("status --json", bar)
@@ -641,7 +649,12 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertFalse(example["ui"]["tray"]["lights"])
         ids = [item["id"] for item in example["ui"]["tray"]["slots"]]
         self.assertEqual(ids, ["weather", "kettle", "dualup", "lights"])
-        self.assertTrue(example["ui"]["hud"]["show_altitude"])
+        weather = example["ui"]["tray"]["slots"][0]
+        self.assertEqual(weather["kind"], "chip")
+        self.assertTrue(weather["show_altitude"])
+        self.assertEqual(example["ui"]["tray"]["slots"][1]["kind"], "face")
+        self.assertEqual(example["ui"]["tray"]["slots"][2]["kind"], "mode")
+        self.assertEqual(example["ui"]["tray"]["slots"][3]["kind"], "toggle")
         self.assertTrue(example["ui"]["hud"]["show_faces"])
         self.assertEqual(example["ui"]["hud"]["density"], "regular")
 
@@ -1789,6 +1802,7 @@ class AlexaAdapterTests(unittest.TestCase):
             lights_slot = next(item for item in before_data["slots"] if item["id"] == "lights")
             self.assertEqual(lights_slot["label"], "?")
             self.assertEqual(lights_slot["glyph"], "light.off")
+            self.assertEqual(lights_slot["kind"], "toggle")
             on = subprocess.run(
                 [sys.executable, str(ROOT / "desk-switch.py"), "smarthome", "on"],
                 capture_output=True,
@@ -1808,6 +1822,7 @@ class AlexaAdapterTests(unittest.TestCase):
             slot = next(item for item in after_data["slots"] if item["id"] == "lights")
             self.assertEqual(slot["glyph"], "light.on")
             self.assertEqual(slot["label"], "ON")
+            self.assertEqual(slot["kind"], "toggle")
             self.assertEqual(after_data["bar_strip"]["lights"], "on")
 
     def test_smarthome_cli_on_invokes_adapter(self) -> None:
@@ -2076,6 +2091,7 @@ class KettleAdapterTests(unittest.TestCase):
         self.assertEqual(slot["label"], "65°")
         self.assertTrue(slot["hot"])
         self.assertTrue(slot["face"])
+        self.assertEqual(slot["kind"], "face")
         self.assertIn("heat", slot["actions"][0]["argv"])
 
 
@@ -2140,11 +2156,19 @@ class WeatherAdapterTests(unittest.TestCase):
         data = json.loads(proc.stdout)
         self.assertTrue(data["reachable"])
         self.assertEqual(data["slot"]["id"], "weather")
+        self.assertEqual(data["slot"]["kind"], "chip")
         self.assertEqual(data["slot"]["label"], "18°")
         self.assertEqual(data["slot"]["glyph"], "sun.max")
 
 
 class UIConfigTests(unittest.TestCase):
+    def test_ui_config_docs_kinds_and_per_slot_altitude(self) -> None:
+        text = (ROOT / "docs" / "ui-config.md").read_text()
+        for token in ("`kind`", "`face`", "`chip`", "`toggle`", "`mode`", "`host`", "show_altitude"):
+            self.assertIn(token, text)
+        self.assertIn("adapter-owned", text)
+        self.assertIn("Deprecated mirror", text)
+
     def test_parse_defaults_when_missing(self) -> None:
         parsed = ds.parse_ui_section({})
         self.assertEqual(parsed["tray_density"], "strip")
@@ -2361,10 +2385,12 @@ class SlotComposeTests(unittest.TestCase):
         }
         slots = ds.collect_slots(state, {})
         self.assertEqual([item["id"] for item in slots], ["weather", "kettle", "dualup"])
+        self.assertEqual([item["kind"] for item in slots], ["chip", "face", "mode"])
         self.assertEqual(slots[0]["label"], "22°")
         self.assertEqual(slots[1]["glyph"], "mug")
         self.assertEqual(slots[2]["label"], "PBP")
         self.assertEqual(slots[1]["actions"][0]["argv"], ["kettle", "heat", "93"])
+        self.assertEqual(slots[2]["actions"][2]["argv"], ["layout"])
         self.assertNotIn("lights", [item["id"] for item in slots])
 
     def test_collect_slots_lights_on_off_unknown(self) -> None:
@@ -2375,6 +2401,7 @@ class SlotComposeTests(unittest.TestCase):
         self.assertEqual(ds.collect_slots(state, {}), [])
         on = ds.collect_slots(state, {"_tray_lights": True})
         self.assertEqual(on[0]["id"], "lights")
+        self.assertEqual(on[0]["kind"], "toggle")
         self.assertEqual(on[0]["glyph"], "light.on")
         self.assertEqual(on[0]["label"], "ON")
         self.assertEqual(on[0]["actions"][0]["argv"], ["smarthome", "on"])
@@ -2382,16 +2409,19 @@ class SlotComposeTests(unittest.TestCase):
         off = ds.collect_slots(state, {"_tray_lights": True})
         self.assertEqual(off[0]["glyph"], "light.off")
         self.assertEqual(off[0]["label"], "OFF")
+        self.assertEqual(off[0]["kind"], "toggle")
         state["adapters"]["smarthome"]["lights"] = [{"state": "unknown"}]
         unknown = ds.collect_slots(state, {"_tray_lights": True})
         self.assertEqual(unknown[0]["glyph"], "light.off")
         self.assertEqual(unknown[0]["label"], "?")
+        self.assertEqual(unknown[0]["kind"], "toggle")
         pinned = ds.collect_slots(
             {"dualup_mode": "unknown", "adapters": {"smarthome": {"lights": []}}},
             {"_ui_slots": [{"id": "lights", "enabled": True}], "_ui_slots_exclusive": True},
         )
         self.assertEqual([item["id"] for item in pinned], ["lights"])
         self.assertEqual(pinned[0]["label"], "?")
+        self.assertEqual(pinned[0]["kind"], "toggle")
 
     def test_weather_slot_survives_offline_kettle(self) -> None:
         state = {
@@ -2460,7 +2490,66 @@ class SlotComposeTests(unittest.TestCase):
         )
         self.assertEqual([item["id"] for item in slots], ["weather", "kettle"])
         self.assertEqual(slots[0]["detail"], "Cloudy")
+        self.assertEqual(slots[0]["kind"], "chip")
         self.assertNotIn("face", slots[1])
+
+    def test_per_slot_altitude_pref_wins_over_hud_mirror(self) -> None:
+        state = {
+            "dualup_mode": "unknown",
+            "adapters": {
+                "weather": {
+                    "slot": {
+                        "id": "weather",
+                        "kind": "chip",
+                        "glyph": "cloud",
+                        "label": "19°",
+                        "detail": "Cloudy · 780m",
+                    }
+                }
+            },
+        }
+        prefs = [
+            {
+                "id": "weather",
+                "enabled": True,
+                "kind": "chip",
+                "show_altitude": False,
+            }
+        ]
+        slots = ds.collect_slots(
+            state,
+            {
+                "_ui_slots": prefs,
+                "_ui_slots_exclusive": False,
+                "_hud_show_altitude": True,
+            },
+        )
+        self.assertEqual(slots[0]["detail"], "Cloudy")
+        parsed = ds.parse_ui_section(
+            {
+                "tray": {"slots": prefs},
+                "hud": {"show_altitude": True},
+            }
+        )
+        self.assertFalse(parsed["hud_show_altitude"])
+        public = ds.format_public_ui(
+            {
+                "_ui_slots": prefs,
+                "_ui_slots_exclusive": False,
+                "_hud_show_altitude": True,
+            }
+        )
+        self.assertEqual(public["tray"]["slots"][0]["kind"], "chip")
+        self.assertFalse(public["tray"]["slots"][0]["show_altitude"])
+        self.assertFalse(public["hud"]["show_altitude"])
+
+    def test_kind_registry_fallback_and_override(self) -> None:
+        self.assertEqual(ds.resolve_slot_kind("espresso"), "chip")
+        self.assertEqual(ds.resolve_slot_kind("espresso", "face"), "face")
+        slot = ds.normalize_slot(
+            {"id": "espresso", "kind": "face", "glyph": "mug", "label": "90°"}
+        )
+        self.assertEqual(slot["kind"], "face")
 
     def test_status_json_includes_slots_and_legacy_keys(self) -> None:
         env = os.environ.copy()
@@ -2537,6 +2626,9 @@ class SlotComposeTests(unittest.TestCase):
         ids = [item["id"] for item in data["slots"]]
         self.assertIn("weather", ids)
         self.assertIn("kettle", ids)
+        kinds = {item["id"]: item.get("kind") for item in data["slots"]}
+        self.assertEqual(kinds.get("weather"), "chip")
+        self.assertEqual(kinds.get("kettle"), "face")
 
     def test_core_forwards_kettle_verbs(self) -> None:
         src = (ROOT / "desk-switch.py").read_text()
