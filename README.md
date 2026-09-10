@@ -48,11 +48,13 @@ desk-switch pbp                 (or DualUp PBP in the menu bar / Omarchy panel)
         │
         ├─ lgdualup pbp 50-50
         ├─ lgdualup pbp-assign hdmi1 dp   (Main + Sub; 0xF4 alone cannot set Sub)
+        ├─ settle (layout_settle_s, default 0.5s)
         └─ dualup-layout pbp      (Mac 2880x1280@270 / Linux 1280x2880 t3)
 
 desk-switch full
         │
         ├─ lgdualup pbp full
+        ├─ settle (layout_settle_s, default 0.5s)
         └─ dualup-layout full     (Mac 2880x2560@270 / Linux 2560x2880 t3)
 ```
 
@@ -296,7 +298,12 @@ a successful USB toggle, `pbp` assigns the cabling pair (Linux DisplayPort
 `dp` first, then Mac Studio `hdmi1`) and both commands apply OS layout.
 PBP Main/Sub assignment uses `lgdualup pbp-assign` (sub VCPs 0x55/0x5A plus
 a Main→swap→Main dance). Plain `input dp` cannot change the sub window
-(it stays HDMI2). After assign, layout retries ~8s while EDID catches up.
+(it stays HDMI2). After the USB toggle (and PBP assign), both `full` and
+`pbp` wait `layout_settle_s` (default 0.5s) so EDID can settle, then apply
+OS layout. Layout retries ~8s while EDID catches up. On macOS the helper
+applies the verbose displayplacer profile (hz / color_depth / scaling /
+origin) and re-lists to confirm Resolution + Rotation — a 0 from
+displayplacer is not enough (full can stay `2560x2880` @ 0°).
 PBP layout is OS-specific (same on-screen half, different EDID naming):
 
 | Host | PBP | Full |
@@ -349,6 +356,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.dualup.pbp_mode` | Mode for `desk-switch pbp` and for `to` when `switch_pbp` is true |
 | `adapters.dualup.display_id` | macOS displayplacer UUID or Hyprland connector. Empty = detect DualUp |
 | `adapters.dualup.layout` | Apply OS resolution/rotation after USB (default true) |
+| `adapters.dualup.layout_settle_s` | Seconds to wait after USB (and PBP assign) before OS layout. Default 0.5. Full and PBP. |
 | `adapters.dualup.peer` | Optional SSH host; runs `dualup-layout` there (no USB) |
 | `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance (`Fn+Ctrl+0`) as `to <this_host>` |
 | `poll_interval_s` / `absent_polls_required` | Watcher debounce (defaults 0.5s × 4 ≈ 2s) |
@@ -371,8 +379,8 @@ Confirmed desk layouts (same on-screen DualUp geometry, different EDID names):
 | Linux / Omarchy (`DP-2`) | **`1280x2880@59.96` transform 3** | `2560x2880` transform 3 |
 
 `2880x1280` t3 stretches; `1280x2880` t0 is the wrong orientation. If EDID
-has not published the half mode yet, the helper exits 2 and `desk-switch`
-retries.
+has not published the half mode yet — or macOS accepted a layout apply
+without actually rotating — the helper exits 2 and `desk-switch` retries.
 macOS needs
 [displayplacer](https://github.com/jakehilborn/displayplacer)
 (`brew install jakehilborn/jakehilborn/displayplacer`). Linux uses `hyprctl`.
@@ -415,8 +423,11 @@ must be in the **host running the command**. Typical desk: cable in the Mac,
 so `to linux` from the Mac flips the input; Linux cannot see the device.
 `make install` installs the helper; empty `adapters.dualup.inputs` means
 `to mac|linux` leaves the input alone. Linux also needs
-`43-lg-dualup.rules`. After PBP the host must also get the OS layout —
-Mac `2880x1280@270`, Linux `1280x2880` transform 3 (not t0, not `2880x1280` t3).
+`43-lg-dualup.rules`. After PBP / full the host must also get the OS layout —
+Mac `2880x1280@270` / `2880x2560@270`, Linux `1280x2880` / `2560x2880`
+transform 3 (not t0, not `2880x1280` t3). `full` waits the same settle as
+PBP before calling displayplacer; if macOS stays `2560x2880` @ 0°, the
+helper retries (exit 2) instead of trusting displayplacer’s return code.
 If Linux PBP is stretched or rotated wrong, `make install` again. Set
 `adapters.dualup.display_id` (`DP-2` on Omarchy) if auto-detect misses
 the DualUp. Optional `adapters.dualup.peer` SSHes layout-only to the
