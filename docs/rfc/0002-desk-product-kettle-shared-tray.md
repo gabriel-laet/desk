@@ -1,6 +1,6 @@
 # RFC 0002 — desk product, kettle adapter, shared tray / HUD
 
-**Status:** draft (review first, **no implementation in this PR**)
+**Status:** accepted for phase B (weather role updated — see §3)
 **Extends:** [RFC 0001](0001-rust-core-and-adapters.md) — same pluggability
 north star; this RFC adds the product name, the kettle fold, and a
 generic slot tray / HUD.
@@ -12,9 +12,10 @@ One product: **desk**. Core orchestrates. Hardware and services plug in
 under `adapters/`. One Mac extra and one Omarchy tray paint the same
 slots. They do not know kettle or Alexa.
 
-This PR is markdown only. It does **not** rename the GitHub repo, does
-**not** delete [gabriel-laet/kettle](https://github.com/gabriel-laet/kettle),
-and does **not** move or implement adapters.
+Phase B implements `adapters/kettle/`, first-class `adapters/weather/`,
+and additive `slots` on `status --json`. It does **not** rename the
+GitHub repo and does **not** delete
+[gabriel-laet/kettle](https://github.com/gabriel-laet/kettle).
 
 ### Design principle — pluggability (unchanged)
 
@@ -23,13 +24,13 @@ and does **not** move or implement adapters.
 RFC 0001 already said MX / DualUp / HHKB are reference adapters, not
 in-core special cases. Alexa already shipped that way (`adapters/alexa`,
 role `smarthome`, `desk-switch smarthome …`). Kettle is the same shape:
-Fellow LAN HTTP lives under `adapters/kettle/`. Weather is a tray
-side-feed, not a device.
+Fellow LAN HTTP lives under `adapters/kettle/`. Weather is its own
+first-class adapter (`adapters/weather/`), not a kettle side-feed.
 
 ```
 core     = config · status · watch · to/full/pbp · adapter registry
            · compose `bar_strip` + additive `slots`
-adapters = mouse / keyboard.presence / display / smarthome / appliance
+adapters = mouse / keyboard.presence / display / smarthome / appliance / weather
 shells   = paint slots (composite extra + generic HUD); never speak
            HID, hyprctl, kettle HTTP, or alexacli
 ```
@@ -76,9 +77,10 @@ shells   = paint slots (composite extra + generic HUD); never speak
   kettle PR [#15](https://github.com/gabriel-laet/kettle/pull/15)
   branch `cursor/macos-kettle-app-icon-35ac`.
 - Teaching shells kettle HTTP (`GET /cli?cmd=…`), Open-Meteo, or
-  `alexacli`. Those stay in adapters / side-feeds.
-- Treating weather as a device adapter. It is a tray side-feed
-  (today: São Paulo ambient + altitude on the kettle extra).
+  `alexacli`. Those stay in adapters.
+- Burying weather inside kettle. Ambient ° + altitude is
+  `adapters/weather/` (Gabriel’s later call; this amends the first
+  draft that called weather a tray side-feed).
 - Putting Alexa lights in the default strip. `ui.tray.lights` already
   exists; default stays off (RFC 0001 + current core).
 - Renaming the CLI to `desk` in this series. `desk-switch` stays the
@@ -104,7 +106,7 @@ Gabriel locked these. Argue only if they break the 0001 north star.
 | When to rename this repo | **After** migrate is green — not this PR. Then `desk-switch` → `desk` |
 | Kettle repo after that | **Hard-delete** `gabriel-laet/kettle` (remove the GitHub repo; do **not** archive). Only after migrate + rename + Gabriel confirms the Mac install. Not this PR |
 | Alexa | First-class **device** adapter (already `adapters/alexa`) |
-| Weather | Tray **side-feed**, not a device / not `adapters/weather` |
+| Weather | First-class adapter **`adapters/weather/`** (not a kettle side-feed). Owns ambient ° + altitude. |
 | Tray / HUD | One Mac extra + one Omarchy tray/plugin + one Watch-style HUD. **No** kettle-specific or Alexa-specific chrome |
 | This PR | Docs only. No code, no deletes, no GitHub rename |
 
@@ -194,7 +196,8 @@ is **not** `desk-switch status --json`. Typical extras:
 
 `kettle --weather bar` is how weather got onto that extra. After the
 fold, that bundling is a **compat shim**, not the architecture.
-Weather stays a side-feed. The kettle adapter reports kettle state.
+Weather is `adapters/weather/` (Open-Meteo). The kettle adapter
+reports kettle state only. A down kettle must not hide weather.
 
 ### 4.3 The MenuBarExtra lesson (kettle PR #14)
 
@@ -222,7 +225,7 @@ If a file is hardware- or vendor-shaped, it lives under
 |---|---|---|---|---|
 | Config, `watch`, `to` / `full` / `pbp`, host map, adapter registry | **core** | `desk-switch.py` (Rust later, RFC 0001 phase 2) | core. Orchestration + contract only. Composes `bar_strip` **and** `slots`. | ownership yes |
 | `status --json` | **core** | flat keys + `adapters.*` + `bar_strip` | **add** `slots` (§7). Do not rename existing keys. | additive |
-| Weather (ambient °, mood, altitude as tray chrome) | **side-feed** | bundled inside kettle `--weather bar` / Mac `WeatherService` | core (or a tiny non-device helper) publishes a `weather` **slot**. Not `adapters/weather`. Not a kettle capability. | new home |
+| Weather (ambient °, mood, altitude) | **adapter** `weather` | bundled inside kettle `--weather bar` / Mac `WeatherService` | **`adapters/weather/`**. Own id, own slot(s). Independent of the kettle host. | **fold / split** |
 | MX Master | **adapter** `mxswitch` | `adapters/mxswitch/` | same | yes |
 | LG DualUp + layout | **adapter** `lgdualup` | `adapters/lgdualup/` | same. May publish a `dualup` / `display` slot (`label: "PBP"`). | yes |
 | HHKB presence | **adapter** `hhkb` | `adapters/hhkb/` | same | yes |
@@ -245,6 +248,7 @@ adapters/
   hhkb/              # keyboard.presence        (unchanged)
   alexa/             # smarthome reference      (unchanged)
   kettle/            # appliance reference      (fold from gabriel-laet/kettle)
+  weather/           # Open-Meteo ambient       (first-class; not a kettle feed)
 crates/              # RFC 0001 phase 2 — not this PR
   desk-switch-core/
   desk-switch/
@@ -253,8 +257,9 @@ shells/
   omarchy/           # one plugin + generic HUD
 ```
 
-**This PR does not create `adapters/kettle/` or `shells/`.** Markdown
-only. Hold the fold for the migrate series.
+Phase B creates `adapters/kettle/` and `adapters/weather/`. Shells
+stay at `macos/DeskSwitchBar/` and the git-root QML until a later
+`shells/` move.
 
 ---
 
@@ -268,7 +273,7 @@ RFC ends.
 
 | Surface | Shows | Does not show / do |
 |---|---|---|
-| **Strip / extra** (always visible) | Composite of selected `slots` (glyphs + short labels). Default set is quiet-ish: weather side-feed, kettle if bound, display mode if known. Focus can stay a slot or stay on `bar_strip`. | Nested SwiftUI `Image+Text` pairs; vendor HTTP; Echo phrases; chip-soup `bar_label` (unless `ui.tray.density: "chips"`) |
+| **Strip / extra** (always visible) | Composite of selected `slots` (glyphs + short labels). Default set is quiet-ish: weather, kettle if bound, display mode if known. Focus can stay a slot or stay on `bar_strip`. | Nested SwiftUI `Image+Text` pairs; vendor HTTP; Echo phrases; chip-soup `bar_label` (unless `ui.tray.density: "chips"`) |
 | **HUD** (click the extra) | Generic Watch-style face driven by the same `slots` (+ optional per-slot `detail` / actions). Heat / Off / Full / PBP / light are **actions on a slot**, not hardcoded buttons named in the shell. | Kettle-only dial types, Alexa-only rows, DualUp geometry |
 | **Settings** (later, RFC 0001 phase 3) | Host, kettle host/discover, Echo device, tray which-slots | HID reports, raw `alexacli` |
 
@@ -342,8 +347,8 @@ an adapter-private compat command. Desk shells do not parse it.
 
 ### 7.2 Additive `slots` (proposed)
 
-Core composes `slots` from adapter snapshots + the weather
-side-feed. Shells only paint.
+Core composes `slots` from adapter snapshots (weather, kettle,
+display). Shells only paint.
 
 ```json
 {
@@ -394,7 +399,7 @@ Field sketch (discard / tighten when the first port PR lands):
 | Field | Who sets it | Meaning |
 |---|---|---|
 | `id` | core (stable token) | `weather`, `kettle`, `dualup`, later maybe `focus`, `lights` |
-| `glyph` | core, from adapter/side-feed **semantics** | Token, not a codepoint. Shells map to SF Symbols / Nerd Font. Examples: `mug`, `flame`, `cloud.rain`, `display.split`, `display.full` |
+| `glyph` | core, from adapter **semantics** | Token, not a codepoint. Shells map to SF Symbols / Nerd Font. Examples: `mug`, `flame`, `cloud.rain`, `display.split`, `display.full` |
 | `label` | core | Short extra text (`65°`, `PBP`, `22°`) |
 | `detail` | core, optional | HUD / tooltip (`780m`, `holding → 96°`) |
 | `hot` | kettle adapter → core, optional | Heating / holding-hot. Extra may swap `mug` → `flame` from this flag **or** from `glyph` already being `flame`. Prefer one source; don't make the shell infer Fellow modes. |
@@ -406,7 +411,7 @@ Rules:
   stays. Slots are how weather + kettle + display share one extra.
 - Missing adapter ⇒ omit that slot. A mouse-only desk still works.
 - Alexa / lights: omit from `slots` unless `ui.tray.lights`.
-- Weather: omit if the side-feed failed; kettle slot must still
+- Weather: omit if `adapters/weather` failed; kettle slot must still
   render (kettle PR #14's "mug-only when weather nil" is correct).
 - `adapters.kettle` (when present) holds the rich snapshot for
   `jq` / tests / settings. Shells should not *need* it if `slots`
@@ -446,7 +451,8 @@ RFC 0001 roles stay. One additive role:
 | `keyboard` | `keyboard.presence` | `hhkb` | `adapters.keyboard` |
 | `display` | `display.input` / `pbp` / `full`, `layout.apply` | `lgdualup` | `adapters.display` (legacy `dualup`) |
 | `smarthome` | `smarthome.list` / `smarthome.status` / `light.on` / `light.off` | `alexa` | `adapters.smarthome` |
-| **`appliance`** | **`appliance.status` / `appliance.heat` / `appliance.off`** | **`kettle`** | **`adapters.kettle`** (or `adapters.appliance` + `backend: kettle` — pick one in the port PR; don't ship both) |
+| **`kettle`** | **`appliance.status` / `appliance.heat` / `appliance.off`** | **`kettle`** | **`adapters.kettle`** |
+| **`weather`** | **`weather.status`** | **`weather`** | **`adapters.weather`** |
 | `hosts` | config only | — | `adapters.hosts` |
 
 Kettle capability sketch (map to today's CLI, keep helper argv
@@ -474,11 +480,9 @@ Core never names `192.168.3.36`, never `GET /cli`, never ships
 Fellow mode enums as core types. LAN security warning (no auth on
 port 80) travels with the **adapter**, not the orchestrator.
 
-**Weather is not a kettle capability.** If the first port still
-calls `kettle --weather bar` to avoid rewriting Open-Meteo, that is
-a temporary bridge. Status composition should still emit a
-`weather` slot with `id: "weather"`, not nest weather only under
-`adapters.kettle`.
+**Weather is not a kettle capability.** It is `adapters/weather/`
+(Open-Meteo). Status composition emits a `weather` slot with
+`id: "weather"`. Do not nest weather only under `adapters.kettle`.
 
 ---
 
@@ -512,31 +516,29 @@ then — not in this PR.
 
 No calendar. Each step is a later PR series. **This RFC is step 1.**
 
-### Phase A — this PR (docs)
+### Phase A — RFC (docs; landed)
 
 - [x] Ownership map: kettle → `adapters/kettle/`; Alexa stays;
-      shared tray/HUD shells; weather is a side-feed.
+      shared tray/HUD shells.
 - [x] Slot contract sketch on top of existing `status --json`.
 - [x] Product name `desk` recorded; GitHub rename deferred.
-- [ ] **No code.** No `adapters/kettle/`. No deletes. No rename.
+- [x] Weather amended to `adapters/weather/` (not a side-feed).
 
-**Exit:** RFC accepted or revised. Implementation stays held.
+**Exit:** RFC accepted. Implementation is phase B.
 
-### Phase B — port kettle into the adapter (still this git repo)
+### Phase B — port kettle + weather + slots (this series)
 
-- [ ] Copy / port the Rust CLI (or a thin wrapper) into
-      `adapters/kettle/`. Manifest + libdir install.
-- [ ] `status --json` grows `adapters.kettle` and additive `slots`.
-      Golden tests: existing keys unchanged; new keys present when
-      the adapter is bound.
-- [ ] Mac + Omarchy extras consume **unified** `slots`. Composite
+- [x] Port the Fellow LAN CLI into `adapters/kettle/` (Python,
+      matching `alexa` / `hhkb`). Manifest + libdir install.
+- [x] `status --json` grows `adapters.kettle` / `adapters.weather`
+      and additive `slots`. Existing keys stay.
+- [x] Mac + Omarchy extras consume **unified** `slots`. Composite
       `NSImage` on Mac (PR #14 lesson). Generic HUD from the same
       array.
-- [ ] Weather slot from the side-feed, not from shell-local
-      Open-Meteo as the long-term design.
-- [ ] Do **not** merge kettle PRs into `gabriel-laet/kettle` for
-      this. Read kettle `main` (and the icon branch below) and
-      bring files here.
+- [x] Weather is `adapters/weather/` (Open-Meteo). Independent of
+      the kettle host.
+- [x] Do **not** merge kettle PRs into `gabriel-laet/kettle`.
+      Protocol + MenuBarExtra lesson pulled into desk.
 
 **Exit:** `desk-switch status --json` shows a kettle slot on a LAN
 with the Stagg; heat/off work via desk-switch; bars do not import
@@ -651,13 +653,15 @@ not perform E and does not delete anything.
    relocate it.
 4. **One tray + one generic HUD.** Shells paint `slots`. They do
    not know Fellow or Alexa.
-5. **Weather is a side-feed slot**, not a device adapter.
+5. **Weather is `adapters/weather/`**, a first-class adapter (not a
+   kettle side-feed). Ambient ° + altitude. Own slot.
 6. **`slots` is additive** on `status --json`. `bar_strip` /
    `bar_label` / `adapters.*` stay.
 7. **Mac extra composites one `NSImage`** (kettle PR #14).
 8. **Do not merge work into kettle** to prepare the fold. Pull
-   into desk, including PR #15 icon work.
-9. **This PR is markdown only.**
+   into desk.
+9. **Repo rename and kettle hard-delete stay phase E.** Phase B is
+   code in this repo only.
 
 ### Still open (do not block accepting the RFC)
 
@@ -673,17 +677,18 @@ not perform E and does not delete anything.
 
 ---
 
-## 14. What this PR is
+## 14. What phase B is
 
-Markdown only.
+Implementation of the fold sketched above, plus Gabriel’s later
+call that weather is `adapters/weather/`.
 
-- Adds this RFC.
-- Points RFC 0001 and the README at it.
+- `adapters/kettle/` — Fellow LAN status / heat / off
+- `adapters/weather/` — Open-Meteo ambient ° + altitude
+- Additive `slots` on `desk-switch status --json`
+- One Mac extra (composite NSImage) + generic HUD; Omarchy paints
+  the same slots
+- README + this RFC point at the new adapters
 
-No adapter code, no file moves, no tray restyle, no Cargo.toml, no
-GitHub rename, no kettle delete (hard-delete is phase E only).
-
-**Hold the fold** until this RFC is accepted.
-
-Next PR, if this holds: phase B — `adapters/kettle/` + additive
-`slots` in `status --json`, still no repo rename.
+No GitHub rename, no kettle delete (hard-delete is phase E only).
+After Gabriel confirms the Mac install: rename repo → hard-delete
+`gabriel-laet/kettle`.

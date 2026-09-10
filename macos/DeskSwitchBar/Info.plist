@@ -9,9 +9,9 @@
   <key>CFBundleIdentifier</key>
   <string>glaet.desk-switch.bar</string>
   <key>CFBundleVersion</key>
-  <string>1.4.0</string>
+  <string>1.7.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.4.0</string>
+  <string>1.7.0</string>
   <key>CFBundleExecutable</key>
   <string>DeskSwitchBar</string>
   <key>CFBundlePackageType</key>

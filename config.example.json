@@ -36,6 +36,19 @@
       "enabled": true,
       "backend": "alexa",
       "device": "Escritório"
+    },
+    "kettle": {
+      "enabled": true,
+      "backend": "kettle",
+      "host": "192.168.3.36"
+    },
+    "weather": {
+      "enabled": true,
+      "backend": "weather",
+      "latitude": -23.5505,
+      "longitude": -46.6333,
+      "timezone": "America/Sao_Paulo",
+      "label": "São Paulo"
     }
   },
   "hhkb_vendor_id": 1278,

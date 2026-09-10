@@ -9,6 +9,8 @@ Core is orchestration + contract. Hardware plugs in as adapters:
     display    — input + PBP/full + OS layout (reference: lgdualup)
                  `adapters.dualup` is a legacy alias of `display`
     smarthome  — list devices + light on/off (reference: alexa)
+    kettle     — Fellow Stagg LAN appliance (reference: kettle)
+    weather    — Open-Meteo ambient ° + altitude (reference: weather)
 
 Reference adapters live under `adapters/` in this repo and install to
 `~/.local/lib/desk-switch/` (`$DESK_SWITCH_LIB`). Third parties drop a
@@ -26,6 +28,10 @@ binary + `*.manifest.json` (`api_version: 1`) in that libdir, or
     desk-switch smarthome list     # Echo / smart-home devices (adapter)
     desk-switch smarthome status
     desk-switch smarthome on|off   # desk light via the bound adapter
+    desk-switch kettle status      # Fellow Stagg LAN (adapter)
+    desk-switch kettle heat 93
+    desk-switch kettle off
+    desk-switch weather status     # Open-Meteo ambient (adapter)
     desk-switch watch              # HHKB leave → mouse away; USB appear → desk here
     desk-switch watch --dry-run
 
@@ -48,7 +54,7 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
@@ -84,12 +90,16 @@ ROLE_CAPABILITIES = {
     "display": ("display.input", "display.pbp", "display.full", "layout.apply"),
     "keyboard": ("keyboard.presence",),
     "smarthome": ("smarthome.list", "smarthome.status", "light.on", "light.off"),
+    "kettle": ("appliance.status", "appliance.heat", "appliance.off"),
+    "weather": ("weather.status",),
 }
 ROLE_REFERENCE_ID = {
     "mouse": "mxswitch",
     "display": "lgdualup",
     "keyboard": "hhkb",
     "smarthome": "alexa",
+    "kettle": "kettle",
+    "weather": "weather",
 }
 BUILTIN_MANIFESTS = {
     "mxswitch": {
@@ -121,6 +131,18 @@ BUILTIN_MANIFESTS = {
         "id": "alexa",
         "name": "Alexa smart home",
         "capabilities": ["smarthome.list", "smarthome.status", "light.on", "light.off"],
+    },
+    "kettle": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "kettle",
+        "name": "Fellow Stagg EKG Pro",
+        "capabilities": ["appliance.status", "appliance.heat", "appliance.off"],
+    },
+    "weather": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "weather",
+        "name": "Open-Meteo ambient",
+        "capabilities": ["weather.status"],
     },
 }
 
@@ -233,6 +255,8 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     hosts_ad = _as_dict(adapters.get("hosts"))
     keyboard = _as_dict(adapters.get("keyboard"))
     smarthome = _as_dict(adapters.get("smarthome"))
+    kettle = _as_dict(adapters.get("kettle"))
+    weather = _as_dict(adapters.get("weather"))
     dual = display_adapter_cfg(user)
     ui = _as_dict(user.get("ui"))
     tray = _as_dict(ui.get("tray"))
@@ -272,6 +296,36 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
             extras[key] = str(smarthome[key])
     cfg["_smarthome_extras"] = extras
 
+    cfg["_kettle_enabled"] = bool(kettle.get("enabled", True))
+    if kettle.get("backend"):
+        cfg["_kettle_backend"] = str(kettle["backend"])
+    if kettle.get("path"):
+        cfg["_kettle_path"] = str(kettle["path"])
+    kettle_extras: dict[str, str] = {}
+    for key in ("host", "timeout"):
+        if kettle.get(key) is not None and str(kettle.get(key)):
+            kettle_extras[key] = str(kettle[key])
+    cfg["_kettle_extras"] = kettle_extras
+
+    cfg["_weather_enabled"] = bool(weather.get("enabled", True))
+    if weather.get("backend"):
+        cfg["_weather_backend"] = str(weather["backend"])
+    if weather.get("path"):
+        cfg["_weather_path"] = str(weather["path"])
+    weather_extras: dict[str, str] = {}
+    for key, flag in (
+        ("latitude", "--latitude"),
+        ("longitude", "--longitude"),
+        ("timezone", "--timezone"),
+        ("label", "--label"),
+        ("altitude_m", "--altitude-m"),
+        ("url", "--url"),
+        ("timeout", "--timeout"),
+    ):
+        if weather.get(key) is not None and str(weather.get(key)):
+            weather_extras[flag] = str(weather[key])
+    cfg["_weather_extras"] = weather_extras
+
     cfg["_dualup_enabled"] = bool(dual.get("enabled", True))
     cfg["_dualup_layout"] = bool(dual.get("layout", True))
     if dual.get("enabled") is False:
@@ -303,6 +357,8 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     if tray.get("density"):
         cfg["_tray_density"] = str(tray["density"])
     cfg["_tray_lights"] = bool(tray.get("lights"))
+    if isinstance(tray.get("slots"), list):
+        cfg["_tray_slots"] = [str(item) for item in tray["slots"] if str(item).strip()]
     return cfg
 
 
@@ -490,6 +546,24 @@ def alexa_source_path() -> Path | None:
     if installed.is_file():
         return installed
     return None
+
+
+def python_adapter_source_path(adapter_id: str) -> Path | None:
+    bundled = HERE / "adapters" / adapter_id / f"{adapter_id}.py"
+    if bundled.is_file():
+        return bundled
+    installed = libexec_dir() / adapter_id
+    if installed.is_file():
+        return installed
+    return None
+
+
+def kettle_source_path() -> Path | None:
+    return python_adapter_source_path("kettle")
+
+
+def weather_source_path() -> Path | None:
+    return python_adapter_source_path("weather")
 
 
 def load_hhkb_module():
@@ -758,6 +832,10 @@ def _role_enabled(cfg: dict, role: str) -> bool:
         return bool(cfg.get("_keyboard_enabled", True))
     if role == "smarthome":
         return bool(cfg.get("_smarthome_enabled", True))
+    if role == "kettle":
+        return bool(cfg.get("_kettle_enabled", True))
+    if role == "weather":
+        return bool(cfg.get("_weather_enabled", True))
     return True
 
 
@@ -771,6 +849,10 @@ def _role_pin(cfg: dict, role: str) -> tuple[str | None, str | None]:
         return cfg.get("_keyboard_backend"), cfg.get("_keyboard_path") or None
     if role == "smarthome":
         return cfg.get("_smarthome_backend"), cfg.get("_smarthome_path") or None
+    if role == "kettle":
+        return cfg.get("_kettle_backend"), cfg.get("_kettle_path") or None
+    if role == "weather":
+        return cfg.get("_weather_backend"), cfg.get("_weather_path") or None
     return None, None
 
 
@@ -852,6 +934,14 @@ def bind_role(cfg: dict, role: str) -> dict:
             resolved = resolve_backend_id(reference) or alexa_source_path()
             cache[role] = _binding("alexa", resolved, "reference" if resolved else "missing", enabled=True)
             return cache[role]
+        if role == "kettle":
+            resolved = resolve_backend_id(reference) or kettle_source_path()
+            cache[role] = _binding("kettle", resolved, "reference" if resolved else "missing", enabled=True)
+            return cache[role]
+        if role == "weather":
+            resolved = resolve_backend_id(reference) or weather_source_path()
+            cache[role] = _binding("weather", resolved, "reference" if resolved else "missing", enabled=True)
+            return cache[role]
     cache[role] = _binding(reference, None, "missing", enabled=True)
     return cache[role]
 
@@ -866,6 +956,10 @@ def discovered_adapters(cfg: dict | None = None) -> list[dict]:
             path = hhkb_source_path()
         if path is None and adapter_id == "alexa":
             path = alexa_source_path()
+        if path is None and adapter_id == "kettle":
+            path = kettle_source_path()
+        if path is None and adapter_id == "weather":
+            path = weather_source_path()
         if path is None:
             continue
         found[adapter_id] = {
@@ -931,6 +1025,28 @@ def invoke_smarthome(cfg: dict, verb: str, *extra: str, timeout: float = 20.0) -
     cmd = smarthome_adapter_cmd(cfg, verb, *extra)
     if cmd is None:
         return None
+    return invoke_adapter_cmd(cmd, timeout=timeout)
+
+
+def role_adapter_path(cfg: dict, role: str, enabled_key: str) -> Path | None:
+    if not cfg.get(enabled_key, True):
+        return None
+    bound = bind_role(cfg, role)
+    path = bound.get("path")
+    return Path(path) if path else None
+
+
+def kettle_adapter_path(cfg: dict) -> Path | None:
+    return role_adapter_path(cfg, "kettle", "_kettle_enabled")
+
+
+def weather_adapter_path(cfg: dict) -> Path | None:
+    return role_adapter_path(cfg, "weather", "_weather_enabled")
+
+
+def invoke_adapter_cmd(cmd: list[str], timeout: float = 8.0) -> dict | None:
+    if not cmd:
+        return None
     try:
         proc = run(cmd, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -947,6 +1063,44 @@ def invoke_smarthome(cfg: dict, verb: str, *extra: str, timeout: float = 20.0) -
         data.setdefault("error", (proc.stderr or "").strip() or f"exit {proc.returncode}")
     data["_returncode"] = proc.returncode
     return data
+
+
+def kettle_adapter_cmd(cfg: dict, *verbs: str) -> list[str] | None:
+    path = kettle_adapter_path(cfg)
+    if path is None:
+        return None
+    cmd = [str(path), *[str(v) for v in verbs]]
+    extras = cfg.get("_kettle_extras") if isinstance(cfg.get("_kettle_extras"), dict) else {}
+    if extras.get("host"):
+        cmd.extend(["--host", str(extras["host"])])
+    if extras.get("timeout"):
+        cmd.extend(["--timeout", str(extras["timeout"])])
+    return cmd
+
+
+def weather_adapter_cmd(cfg: dict, *verbs: str) -> list[str] | None:
+    path = weather_adapter_path(cfg)
+    if path is None:
+        return None
+    cmd = [str(path), *[str(v) for v in verbs]]
+    extras = cfg.get("_weather_extras") if isinstance(cfg.get("_weather_extras"), dict) else {}
+    for flag, value in extras.items():
+        cmd.extend([str(flag), str(value)])
+    return cmd
+
+
+def invoke_kettle(cfg: dict, verb: str, *extra: str, timeout: float = 8.0) -> dict | None:
+    cmd = kettle_adapter_cmd(cfg, verb, *extra)
+    if cmd is None:
+        return None
+    return invoke_adapter_cmd(cmd, timeout=timeout)
+
+
+def invoke_weather(cfg: dict, verb: str, *extra: str, timeout: float = 4.0) -> dict | None:
+    cmd = weather_adapter_cmd(cfg, verb, *extra)
+    if cmd is None:
+        return None
+    return invoke_adapter_cmd(cmd, timeout=timeout)
 
 
 def switch_mouse(cfg: dict, channel: int | None = None) -> int:
@@ -1506,6 +1660,129 @@ def format_bar_strip(state: dict) -> dict:
     return strip
 
 
+ADAPTER_SNAPSHOT_RESERVED = {
+    "enabled",
+    "available",
+    "backend",
+    "path",
+    "source",
+    "capabilities",
+    "candidates",
+}
+
+
+def merge_adapter_snapshot(target: dict | None, snapshot: dict | None) -> dict | None:
+    """Copy adapter JSON into adapters.<role>. Keep binding keys from core."""
+    if not isinstance(target, dict) or not isinstance(snapshot, dict):
+        return target
+    for key, value in snapshot.items():
+        if str(key).startswith("_") or key in ADAPTER_SNAPSHOT_RESERVED:
+            continue
+        target[key] = value
+    return target
+
+
+def normalize_slot(raw: object) -> dict | None:
+    """Keep a small public slot shape. Extra keys (hot, face, progress, actions) pass through."""
+    if not isinstance(raw, dict):
+        return None
+    slot_id = str(raw.get("id") or "").strip()
+    glyph = str(raw.get("glyph") or "").strip()
+    label = str(raw.get("label") or "").strip()
+    if not slot_id or not (glyph or label):
+        return None
+    slot: dict = {"id": slot_id, "glyph": glyph or "dot", "label": label or slot_id}
+    if raw.get("detail"):
+        slot["detail"] = str(raw["detail"])
+    if "hot" in raw:
+        slot["hot"] = bool(raw["hot"])
+    if "face" in raw:
+        slot["face"] = bool(raw["face"])
+    if raw.get("progress") is not None:
+        try:
+            slot["progress"] = max(0.0, min(1.0, float(raw["progress"])))
+        except (TypeError, ValueError):
+            pass
+    actions = raw.get("actions")
+    if isinstance(actions, list):
+        cleaned = []
+        for item in actions:
+            if not isinstance(item, dict):
+                continue
+            argv = item.get("argv")
+            if not isinstance(argv, list) or not argv:
+                continue
+            cleaned.append(
+                {
+                    "label": str(item.get("label") or argv[0]),
+                    "argv": [str(part) for part in argv],
+                }
+            )
+        if cleaned:
+            slot["actions"] = cleaned
+    return slot
+
+
+def display_slot(state: dict) -> dict | None:
+    mode = str(state.get("dualup_mode") or "unknown").lower()
+    if mode == "pbp":
+        glyph, label = "display.split", "PBP"
+    elif mode == "full":
+        glyph, label = "display.full", "FULL"
+    else:
+        return None
+    return {
+        "id": "dualup",
+        "glyph": glyph,
+        "label": label,
+        "actions": [
+            {"label": "Full", "argv": ["full"]},
+            {"label": "PBP", "argv": ["pbp"]},
+        ],
+    }
+
+
+def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
+    """Compose additive tray/HUD slots. Shells only paint. Missing adapter ⇒ omit."""
+    adapters = state.get("adapters") or {}
+    ordered: list[dict] = []
+    for role in ("weather", "kettle"):
+        snap = adapters.get(role) if isinstance(adapters.get(role), dict) else {}
+        if snap.get("enabled") is False:
+            continue
+        slot = normalize_slot(snap.get("slot"))
+        if slot:
+            ordered.append(slot)
+    display = normalize_slot(display_slot(state))
+    if display:
+        ordered.append(display)
+    if (cfg or {}).get("_tray_lights") or state.get("_tray_lights"):
+        home = adapters.get("smarthome") if isinstance(adapters.get("smarthome"), dict) else {}
+        lights = home.get("lights") if isinstance(home.get("lights"), list) else []
+        mark = None
+        if lights and isinstance(lights[0], dict):
+            mark = str(lights[0].get("state") or "")
+        if mark in ("on", "off"):
+            light = normalize_slot(
+                {
+                    "id": "lights",
+                    "glyph": "light.on" if mark == "on" else "light.off",
+                    "label": mark.upper(),
+                    "actions": [
+                        {"label": "On", "argv": ["smarthome", "on"]},
+                        {"label": "Off", "argv": ["smarthome", "off"]},
+                    ],
+                }
+            )
+            if light:
+                ordered.append(light)
+    wanted = (cfg or {}).get("_tray_slots")
+    if isinstance(wanted, list) and wanted:
+        allow = {str(item) for item in wanted}
+        ordered = [slot for slot in ordered if slot["id"] in allow]
+    return ordered
+
+
 def format_strip_title(strip: dict) -> str:
     """Painted default strip: MAC/LNX plus PBP/FULL when a display mode is known."""
     focus = str(strip.get("focus") or "?")
@@ -1612,6 +1889,33 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
     }
     if smarthome_bound.get("candidates"):
         smarthome["candidates"] = smarthome_bound["candidates"]
+    kettle_bound = bind_role(cfg, "kettle")
+    kettle_path = kettle_bound.get("path")
+    kettle = {
+        "enabled": bool(cfg.get("_kettle_enabled", True)),
+        "available": kettle_path is not None,
+        "backend": kettle_bound.get("id") or "kettle",
+        "path": str(kettle_path) if kettle_path else None,
+        "source": kettle_bound.get("source"),
+        "capabilities": list(kettle_bound.get("capabilities") or []),
+    }
+    if kettle_bound.get("candidates"):
+        kettle["candidates"] = kettle_bound["candidates"]
+    extras = cfg.get("_kettle_extras") if isinstance(cfg.get("_kettle_extras"), dict) else {}
+    if extras.get("host"):
+        kettle["host"] = extras["host"]
+    weather_bound = bind_role(cfg, "weather")
+    weather_path = weather_bound.get("path")
+    weather = {
+        "enabled": bool(cfg.get("_weather_enabled", True)),
+        "available": weather_path is not None,
+        "backend": weather_bound.get("id") or "weather",
+        "path": str(weather_path) if weather_path else None,
+        "source": weather_bound.get("source"),
+        "capabilities": list(weather_bound.get("capabilities") or []),
+    }
+    if weather_bound.get("candidates"):
+        weather["candidates"] = weather_bound["candidates"]
     discovered = []
     for item in discovered_adapters(cfg):
         discovered.append(
@@ -1642,6 +1946,8 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
         "display": dict(display),
         "dualup": dict(display),
         "smarthome": smarthome,
+        "kettle": kettle,
+        "weather": weather,
         "discovered": discovered,
     }
 
@@ -1726,12 +2032,11 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         adapters["display"]["usb"] = dual_usb
         adapters["display"]["inputs"] = inputs
     snapshot = invoke_smarthome(cfg, "info", timeout=4.0)
-    if isinstance(snapshot, dict) and isinstance(adapters.get("smarthome"), dict):
-        reserved = {"enabled", "available", "backend", "path", "source", "capabilities", "candidates"}
-        for key, value in snapshot.items():
-            if str(key).startswith("_") or key in reserved:
-                continue
-            adapters["smarthome"][key] = value
+    merge_adapter_snapshot(adapters.get("smarthome"), snapshot)
+    kettle_snap = invoke_kettle(cfg, "info", "--no-default-host", timeout=3.0)
+    merge_adapter_snapshot(adapters.get("kettle"), kettle_snap)
+    weather_snap = invoke_weather(cfg, "info", timeout=3.0)
+    merge_adapter_snapshot(adapters.get("weather"), weather_snap)
     present = bool(adapters["hhkb"]["present"])
     state = {
         "os": SYSTEM,
@@ -1768,6 +2073,7 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
     state["bar_label"] = format_bar_label(state)
     state["bar_tooltip"] = format_bar_tooltip(state)
     state["bar_strip"] = format_bar_strip(state)
+    state["slots"] = collect_slots(state, cfg)
     state.pop("_tray_lights", None)
     return state
 
@@ -1829,6 +2135,35 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
         f"  smarthome   : {home_state}  backend={home.get('backend', 'alexa')}  "
         f"lights={light_mark}  {home.get('path') or '-'}"
     )
+    kettle = adapters.get("kettle") or {}
+    kettle_state = "available" if kettle.get("available") else "missing"
+    if not kettle.get("enabled", True):
+        kettle_state = "disabled"
+    kettle_mark = "offline"
+    if kettle.get("reachable"):
+        kettle_mark = f"{kettle.get('temp_c', '?')}° {kettle.get('mode') or ''}".strip()
+    print(
+        f"  kettle      : {kettle_state}  backend={kettle.get('backend', 'kettle')}  "
+        f"{kettle_mark}  host={kettle.get('host') or '-'}  {kettle.get('path') or '-'}"
+    )
+    weather = adapters.get("weather") or {}
+    weather_state = "available" if weather.get("available") else "missing"
+    if not weather.get("enabled", True):
+        weather_state = "disabled"
+    weather_mark = "offline"
+    if weather.get("reachable") and weather.get("temp_c") is not None:
+        alt = f" {weather.get('altitude_m')}m" if weather.get("altitude_m") is not None else ""
+        weather_mark = f"{weather.get('temp_c')}°{alt}"
+    print(
+        f"  weather     : {weather_state}  backend={weather.get('backend', 'weather')}  "
+        f"{weather_mark}  {weather.get('path') or '-'}"
+    )
+    slots = state.get("slots") or []
+    if slots:
+        painted = "  ".join(
+            f"{item.get('glyph', '')}:{item.get('label', '')}" for item in slots if isinstance(item, dict)
+        )
+        print(f"slots         : {painted}")
     mouse_line = "missing"
     if state.get("mouse_channel") is not None:
         mouse_line = (
@@ -2015,6 +2350,72 @@ def cmd_smarthome(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
         return 1
 
 
+def cmd_kettle(cfg: dict, verb: str | None, temp: str | None = None, *, as_json: bool = False) -> int:
+    action = str(verb or "status").strip().lower()
+    if action in ("info", "probe"):
+        action = "status"
+    if action not in ("status", "heat", "on", "off", "host"):
+        print(f"unknown kettle verb: {verb} (try status, heat, on, off, host)", file=sys.stderr)
+        return 2
+    if kettle_adapter_path(cfg) is None:
+        print("kettle adapter not found (install adapters/kettle or pin adapters.kettle)")
+        return 0
+    extra: list[str] = []
+    if action == "status":
+        data = invoke_kettle(cfg, "status", *extra, timeout=8.0)
+    elif action == "heat":
+        args = ["heat"]
+        if temp:
+            args.append(str(temp))
+        data = invoke_kettle(cfg, *args, timeout=12.0)
+    elif action == "host":
+        args = ["host"]
+        if temp:
+            args.append(str(temp))
+        data = invoke_kettle(cfg, *args, timeout=4.0)
+    else:
+        data = invoke_kettle(cfg, action, timeout=12.0)
+    if data is None:
+        print("kettle adapter not found (install adapters/kettle or pin adapters.kettle)")
+        return 0
+    printable = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    if as_json or action in ("status", "host"):
+        print(json.dumps(printable, indent=2))
+    else:
+        if data.get("ok"):
+            print(f"kettle {action} ok" + (f" {temp}" if temp else ""))
+        else:
+            print(data.get("error") or f"kettle {action} failed")
+    rc = data.get("_returncode")
+    try:
+        return int(rc) if rc is not None else (0 if data.get("ok", True) or data.get("reachable") else 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def cmd_weather(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
+    action = str(verb or "status").strip().lower()
+    if action in ("info", "probe"):
+        action = "status"
+    if action != "status":
+        print(f"unknown weather verb: {verb} (try status)", file=sys.stderr)
+        return 2
+    if weather_adapter_path(cfg) is None:
+        print("weather adapter not found (install adapters/weather or pin adapters.weather)")
+        return 0
+    data = invoke_weather(cfg, "info", timeout=6.0)
+    if data is None:
+        print("weather adapter not found (install adapters/weather or pin adapters.weather)")
+        return 0
+    printable = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    print(json.dumps(printable, indent=2))
+    rc = data.get("_returncode")
+    try:
+        return int(rc) if rc is not None else (0 if data.get("reachable") else 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -2046,6 +2447,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="list | status | on | off",
     )
     smarthome.add_argument("--json", action="store_true", help="print adapter JSON")
+    kettle = sub.add_parser("kettle", help="Fellow Stagg status / heat / off (bound adapter)")
+    kettle.add_argument(
+        "verb",
+        nargs="?",
+        default="status",
+        help="status | heat | on | off | host",
+    )
+    kettle.add_argument("temp", nargs="?", help="celsius for heat, or host IP")
+    kettle.add_argument("--json", action="store_true", help="print adapter JSON")
+    weather = sub.add_parser("weather", help="Open-Meteo ambient status (bound adapter)")
+    weather.add_argument(
+        "verb",
+        nargs="?",
+        default="status",
+        help="status | info",
+    )
+    weather.add_argument("--json", action="store_true", help="print adapter JSON")
     return parser
 
 
@@ -2071,6 +2489,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_layout(cfg)
     if args.cmd == "smarthome":
         return cmd_smarthome(cfg, args.verb, as_json=args.json)
+    if args.cmd == "kettle":
+        return cmd_kettle(cfg, args.verb, args.temp, as_json=args.json)
+    if args.cmd == "weather":
+        return cmd_weather(cfg, args.verb, as_json=args.json)
     return 2
 
 

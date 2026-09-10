@@ -22,6 +22,7 @@ Panel {
   property bool mouseOnline: false
   property string mouseHost: ""
   property string dualupMode: "unknown"
+  property var slots: []
 
   signal actionRequested(string args)
   signal refreshRequested()
@@ -96,6 +97,70 @@ Panel {
     return String(peer.this_host || peer.peer || "peer") + " · HHKB " + kb + " · mx " + (peer.mouse_channel != null ? peer.mouse_channel : "?")
   }
 
+  function slotList() {
+    if (root.slots && root.slots.length)
+      return root.slots
+    const data = root.parsedStatus()
+    if (data && Array.isArray(data.slots))
+      return data.slots
+    return []
+  }
+
+  function faceSlot() {
+    const items = root.slotList()
+    for (let i = 0; i < items.length; i++) {
+      if (items[i] && items[i].face)
+        return items[i]
+    }
+    return items.length ? items[0] : null
+  }
+
+  function faceSlotLabel() {
+    const face = root.faceSlot()
+    return face && face.label ? String(face.label) : "desk"
+  }
+
+  function faceSlotDetail() {
+    const face = root.faceSlot()
+    return face && face.detail ? String(face.detail) : ""
+  }
+
+  function complicationLine() {
+    const face = root.faceSlot()
+    const items = root.slotList()
+    const parts = []
+    for (let i = 0; i < items.length; i++) {
+      const slot = items[i]
+      if (!slot || (face && slot.id === face.id))
+        continue
+      const label = String(slot.label || "")
+      if (label)
+        parts.push(label)
+    }
+    return parts.join(" · ")
+  }
+
+  function slotActions() {
+    const items = root.slotList()
+    const out = []
+    for (let i = 0; i < items.length; i++) {
+      const actions = items[i] && items[i].actions
+      if (!Array.isArray(actions))
+        continue
+      for (let j = 0; j < actions.length; j++) {
+        const action = actions[j] || {}
+        const argv = action.argv
+        if (!Array.isArray(argv) || !argv.length)
+          continue
+        out.push({
+          label: String(action.label || argv[0]),
+          args: argv.map(function(part) { return String(part) }).join(" ")
+        })
+      }
+    }
+    return out
+  }
+
   function statusSummary() {
     const raw = String(root.lastStatus || "").trim()
     if (raw.charAt(0) === "{") {
@@ -153,6 +218,49 @@ Panel {
           font.pixelSize: Style.font.subtitle
         }
 
+        Rectangle {
+          visible: root.slots && root.slots.length
+          width: 176
+          height: 176
+          radius: 88
+          anchors.horizontalCenter: parent.horizontalCenter
+          color: Qt.rgba(1, 1, 1, 0.06)
+          border.color: Qt.rgba(1, 1, 1, 0.10)
+          border.width: 8
+
+          Column {
+            anchors.centerIn: parent
+            spacing: 4
+            width: 140
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: root.faceSlotLabel()
+              color: root.barForeground
+              font.pixelSize: 28
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: root.faceSlotDetail()
+              color: root.barForeground
+              opacity: 0.7
+              wrapMode: Text.WordWrap
+              font.pixelSize: Style.font.subtitle
+            }
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: root.complicationLine()
+              color: root.barForeground
+              opacity: 0.75
+              font.pixelSize: Style.font.subtitle
+            }
+          }
+        }
+
         Flow {
           width: parent.width
           spacing: Style.space(6)
@@ -161,6 +269,28 @@ Panel {
           StatusChip { chipLabel: "MX"; chipValue: root.mouseChip(); chipOk: root.mouseChannel != null }
           StatusChip { chipLabel: "DU"; chipValue: root.dualChip(); chipOk: root.dualupMode === "pbp" || root.dualupMode === "full" }
           StatusChip { visible: root.peerChip() !== ""; chipLabel: "PEER"; chipValue: root.peerChip(); chipOk: root.peerChip().indexOf("unreachable") === -1 }
+        }
+
+        Flow {
+          visible: root.slots && root.slots.length
+          width: parent.width
+          spacing: Style.space(6)
+          Repeater {
+            model: root.slots || []
+            delegate: StatusChip {
+              chipLabel: String(modelData.glyph || "")
+              chipValue: String(modelData.label || "") + (modelData.detail ? " · " + modelData.detail : "")
+              chipOk: modelData.hot === true || !!modelData.label
+            }
+          }
+        }
+
+        Repeater {
+          model: root.slotActions()
+          delegate: DeskButton {
+            label: modelData.label
+            onClicked: root.actionRequested(modelData.args)
+          }
         }
 
         Text {

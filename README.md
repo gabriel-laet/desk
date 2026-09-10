@@ -14,7 +14,8 @@ Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 
 **In this repo:** `desk-switch` CLI (core), reference adapters under
 `adapters/mxswitch`, `adapters/lgdualup`, `adapters/hhkb`, `adapters/alexa`,
-Omarchy bar plugin, macOS menu bar app, LaunchAgent / systemd units.
+`adapters/kettle`, `adapters/weather`, Omarchy bar plugin, macOS menu bar
+app, LaunchAgent / systemd units.
 
 Shells stay at `macos/DeskSwitchBar/` and the git-root QML (Omarchy plugin
 layout requires `BarWidget.qml` at the checkout root). A later phase can
@@ -22,7 +23,7 @@ group them under `shells/`.
 
 **RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
 (phase 1 in-tree) · [0002 — desk product, kettle, shared tray/HUD](docs/rfc/0002-desk-product-kettle-shared-tray.md)
-(draft — architecture only; product name **desk**, no repo rename yet).
+(product name **desk**; phase B fold in-tree — no repo rename yet).
 
 The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
 (`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS
@@ -76,6 +77,8 @@ Adapters (roles are capabilities; ids are what you drop on disk):
 | **hosts** | config only | — | `config.json` |
 | **display** | `display.input` / `pbp` / `full` + `layout.apply` | `lgdualup` | `adapters/lgdualup/` |
 | **smarthome** | `smarthome.list` / `smarthome.status` / `light.on` / `light.off` | `alexa` | `adapters/alexa/` |
+| **kettle** | `appliance.status` / `appliance.heat` / `appliance.off` | `kettle` | `adapters/kettle/` |
+| **weather** | `weather.status` | `weather` | `adapters/weather/` |
 
 `adapters.dualup` is a legacy alias of `adapters.display`. Pin with
 `adapters.<role>.backend` / `path`, or drop a binary + manifest in
@@ -84,14 +87,15 @@ ship `desk-switch-<id>` on PATH. See [Plug another adapter](#plug-another-adapte
 
 `status --json` exposes `adapters.mouse` / `adapters.keyboard` /
 `adapters.hosts` / `adapters.display` (and legacy `adapters.dualup`),
-`adapters.smarthome`, `adapters.discovered`, and the shared bar fields
+`adapters.smarthome`, `adapters.kettle`, `adapters.weather`,
+`adapters.discovered`, additive `slots`, and the shared bar fields
 (`target_hint`, `bar_label`, additive `bar_strip`, `hhkb_transport`,
 `hhkb_usb`, `hhkb_bluetooth`, `mouse_channel`, `mouse_online`,
 `dualup_mode`). Omarchy QML and macOS DeskSwitchBar parse the same keys.
-The strip paints `bar_strip` (`focus` + optional `display`); chips stay
-in the click panel. Lights stay out of the strip unless
-`ui.tray.lights` is true. `ui.tray.density: "chips"` restores the dense
-`bar_label` title.
+New shells paint `slots` (Mac composites one `NSImage`; Omarchy lays
+out the same array). `bar_strip` (`focus` + optional `display`) stays.
+Lights stay out of the strip unless `ui.tray.lights` is true.
+`ui.tray.density: "chips"` restores the dense `bar_label` title.
 
 **Lock screen / greeter:** keep the HHKB **USB cable in the machine you are
 unlocking**. Omarchy’s password screen often fails to use Bluetooth; USB is
@@ -144,9 +148,12 @@ install` updates. Put `~/.local/bin` on `PATH`.
 ~/.local/lib/desk-switch/dualup-layout   # display OS layout (displayplacer / hyprctl)
 ~/.local/lib/desk-switch/hhkb            # keyboard.presence reference
 ~/.local/lib/desk-switch/alexa           # smarthome reference (wraps alexacli)
+~/.local/lib/desk-switch/kettle          # Fellow Stagg LAN appliance
+~/.local/lib/desk-switch/weather         # Open-Meteo ambient ° + altitude
 ~/.local/lib/desk-switch/*.manifest.json # api_version: 1
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
+~/.local/bin/kettle                      # compat shim → lib/ (optional; prefer desk-switch)
 ~/.config/desk-switch/config.json        # first install only
 ```
 
@@ -511,6 +518,39 @@ the Echo.
 Light state in `status --json` is last commanded (`on` / `off`) or
 `unknown` until `smarthome list` can read entities. Bars do not show it
 unless `ui.tray.lights` is on.
+
+## Kettle + weather (shared tray slots)
+
+Fellow Stagg LAN HTTP lives in [`adapters/kettle/`](adapters/kettle/).
+Open-Meteo ambient ° + altitude lives in
+[`adapters/weather/`](adapters/weather/). Weather is **not** a kettle
+side-feed — it keeps working when the kettle host is down.
+
+```bash
+desk-switch kettle status --json
+desk-switch kettle heat 93
+desk-switch kettle off
+desk-switch weather status --json
+desk-switch status --json   # adapters.kettle + adapters.weather + slots[]
+```
+
+Typical kettle host on this desk: `192.168.3.36` (`adapters.kettle.host`).
+The Stagg CLI has **no auth** on port 80 — keep it on the LAN.
+
+`slots` is additive on `status --json`. `bar_label`, `bar_strip`, and
+existing `adapters.*` keys stay. DeskSwitchBar composites slot
+glyph+label pairs into **one** `NSImage` (nested SwiftUI `Image+Text`
+is flattened to a single symbol). The click panel is a generic
+Watch-style HUD from the same array. Omarchy paints the same `slots`.
+
+Optional `kettle` on PATH is a shim to `~/.local/lib/desk-switch/kettle`.
+Prefer `desk-switch kettle …`.
+
+**Migrate (not this install):** after Gabriel confirms the Mac extra,
+rename GitHub `desk-switch` → `desk`, then **hard-delete**
+[gabriel-laet/kettle](https://github.com/gabriel-laet/kettle). Until
+then, quit standalone `Kettle.app` / `glaet.fellow` so you do not run
+two extras. Do not delete the kettle repo from this PR.
 
 ## Troubleshooting
 
