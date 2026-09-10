@@ -580,9 +580,14 @@ Do **not** say “acender a luz do escritório” / “apagar a luz do escritór
 — that hits the wrong device. The adapter refuses an utterance that names
 the Echo.
 
-Light state in `status --json` is last commanded (`on` / `off`) or
-`unknown` until `smarthome list` can read entities. Bars do not show it
-unless `ui.tray.lights` is on.
+Light state in `status --json` / `slots` prefers a readable entity power
+flag when `alexacli sh list` actually returns one. On this desk that API
+is still empty (`lights_readable: false`), so the adapter writes an
+**optimistic** last-commanded `on` / `off` before the speak and keeps it
+across the next `status --json` poll. Amazon cannot report an external
+Alexa-app toggle until the entity list works. Bars omit the lights slot
+unless `ui.tray.lights` is on or the `lights` tray pref is enabled; an
+unknown state still paints `?` so On/Off stay available.
 
 ## Kettle + weather (shared tray slots)
 

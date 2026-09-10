@@ -1997,6 +1997,32 @@ def _slot_prefs_from_cfg(cfg: dict | None) -> tuple[list[dict] | None, bool]:
     return None, False
 
 
+def lights_slot(mark: str) -> dict:
+    """Tray/HUD slot for the desk light. Always paint when the user opted in.
+
+    `on` / `off` come from the adapter (entity power when readable, else last
+    commanded). Anything else is unknown — still show the slot so HUD actions
+    exist and the bar can flip after an optimistic command.
+    """
+    state = str(mark or "unknown").strip().lower()
+    if state == "on":
+        glyph, label = "light.on", "ON"
+    elif state == "off":
+        glyph, label = "light.off", "OFF"
+    else:
+        glyph, label = "light.off", "?"
+    return {
+        "id": "lights",
+        "glyph": glyph,
+        "label": label,
+        "hot": state == "on",
+        "actions": [
+            {"label": "On", "argv": ["smarthome", "on"]},
+            {"label": "Off", "argv": ["smarthome", "off"]},
+        ],
+    }
+
+
 def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
     """Compose additive tray/HUD slots. Shells only paint. Missing adapter ⇒ omit.
 
@@ -2020,30 +2046,19 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
         ordered.append(display)
     prefs, exclusive = _slot_prefs_from_cfg(cfg)
     lights_opt_in = bool(cfg.get("_tray_lights") or state.get("_tray_lights"))
-    if prefs and not exclusive:
+    if prefs:
         lights_opt_in = lights_opt_in or any(
             item.get("id") == "lights" and item.get("enabled", True) for item in prefs
         )
     if lights_opt_in:
         home = adapters.get("smarthome") if isinstance(adapters.get("smarthome"), dict) else {}
         lights = home.get("lights") if isinstance(home.get("lights"), list) else []
-        mark = None
+        mark = "unknown"
         if lights and isinstance(lights[0], dict):
-            mark = str(lights[0].get("state") or "")
-        if mark in ("on", "off"):
-            light = normalize_slot(
-                {
-                    "id": "lights",
-                    "glyph": "light.on" if mark == "on" else "light.off",
-                    "label": mark.upper(),
-                    "actions": [
-                        {"label": "On", "argv": ["smarthome", "on"]},
-                        {"label": "Off", "argv": ["smarthome", "off"]},
-                    ],
-                }
-            )
-            if light:
-                ordered.append(light)
+            mark = str(lights[0].get("state") or "unknown")
+        light = normalize_slot(lights_slot(mark))
+        if light:
+            ordered.append(light)
     if prefs:
         ordered = apply_slot_prefs(ordered, prefs, exclusive=exclusive)
     return apply_hud_prefs(ordered, cfg)

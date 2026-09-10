@@ -47,6 +47,10 @@ there is a later TODO, not a second schema.
 
 - No `ui.tray.slots` → today’s quiet set: **weather → kettle → dualup**.
   Missing adapters are omitted. Lights stay out.
+- Lights opted in (`ui.tray.lights` or the `lights` pref) always emit a
+  slot (`ON` / `OFF` / `?`). Core prefers adapter entity power when
+  readable; otherwise last commanded. The Mac HUD flips the slot
+  immediately on On/Off, then the next `status --json` poll confirms.
 - Object list → that order. `enabled: false` hides a slot. A new
   adapter id that is not listed still appends (except `lights`).
 - String list → exclusive pin (RFC 0002). Only those ids, that order.

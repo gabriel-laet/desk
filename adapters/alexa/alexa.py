@@ -7,11 +7,14 @@ Out-of-process. Core never talks to Amazon or `alexacli`.
     alexa list                   # Echo devices via `alexacli devices` (refresh)
     alexa on | off               # desk light via a fixed spoken phrase
 
-Capabilities: smarthome.list / smarthome.status / light.on / light.off.
+    Capabilities: smarthome.list / smarthome.status / light.on / light.off.
 
-Today `alexacli smarthome list` (and `sh list`) often fail with empty JSON.
-`alexacli devices` and `alexacli command "…" -d <Echo>` work. List prefers
-devices and records a failed entity probe so it can grow later.
+    Today `alexacli smarthome list` (and `sh list`) often fail with empty JSON
+    and never expose light power. `alexacli devices` and
+    `alexacli command "…" -d <Echo>` work. List prefers devices and records a
+    failed entity probe so it can grow later. Light `state` is last commanded
+    (optimistic, written before the speak) unless a later entity probe returns
+    a readable power flag (`state_source=entity`).
 
 Desk light on the Escritório Echo: spoken text is ONLY `acender a luz` or
 `apagar a luz`. The room is selected with `-d Escritório` — never put
@@ -183,16 +186,123 @@ def utterance_for(verb: str, phrase: str, device: str) -> str:
     return text
 
 
-def default_light(device: str, on_phrase: str, off_phrase: str, state: str = "unknown") -> dict:
+def default_light(
+    device: str,
+    on_phrase: str,
+    off_phrase: str,
+    state: str = "unknown",
+    *,
+    state_source: str = "unknown",
+    updated_at: float | None = None,
+) -> dict:
     return {
         "id": LIGHT_ID,
         "name": "desk",
         "speaker": device,
         "state": state,
+        "state_source": state_source,
+        "updated_at": time.time() if updated_at is None else updated_at,
         "on_phrase": on_phrase,
         "off_phrase": off_phrase,
         "source": "command",
     }
+
+
+def stamp_light(light: dict, state: str, *, state_source: str) -> dict:
+    item = dict(light)
+    item["state"] = state
+    item["state_source"] = state_source
+    item["updated_at"] = time.time()
+    return item
+
+
+def lights_updated_at(payload: dict | None) -> float:
+    if not isinstance(payload, dict):
+        return 0.0
+    lights = payload.get("lights")
+    if isinstance(lights, list) and lights and isinstance(lights[0], dict):
+        try:
+            return float(lights[0].get("updated_at") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return float(payload.get("cached_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def normalize_lights(raw: object, device: str, on_phrase: str, off_phrase: str) -> list[dict]:
+    lights = [dict(item) for item in raw] if isinstance(raw, list) else []
+    lights = [item for item in lights if isinstance(item, dict)]
+    if not lights:
+        return [default_light(device, on_phrase, off_phrase, "unknown")]
+    lights[0]["speaker"] = device
+    lights[0]["on_phrase"] = on_phrase
+    lights[0]["off_phrase"] = off_phrase
+    state = str(lights[0].get("state") or "unknown").strip().lower()
+    lights[0]["state"] = state if state in ("on", "off") else "unknown"
+    if not lights[0].get("state_source"):
+        lights[0]["state_source"] = "command" if lights[0]["state"] in ("on", "off") else "unknown"
+    return lights
+
+
+def entity_power_state(raw: object) -> str | None:
+    """Best-effort on/off from a smarthome entity. None if Amazon did not say."""
+    if not isinstance(raw, dict):
+        return None
+    nested = raw.get("state") if isinstance(raw.get("state"), dict) else None
+    blob = dict(raw)
+    if nested:
+        blob.update(nested)
+    for key in ("powerState", "power", "on", "isOn", "state"):
+        val = blob.get(key)
+        if isinstance(val, bool):
+            return "on" if val else "off"
+        if val is None or isinstance(val, dict):
+            continue
+        text = str(val).strip().lower()
+        if text in ("on", "off"):
+            return text
+        if text in ("true", "1"):
+            return "on"
+        if text in ("false", "0"):
+            return "off"
+    return None
+
+
+def entity_looks_like_light(raw: dict) -> bool:
+    name = fold_text(str(raw.get("name") or raw.get("friendlyName") or ""))
+    kind = fold_text(str(raw.get("kind") or raw.get("type") or raw.get("deviceType") or ""))
+    if any(token in kind for token in ("light", "luz", "bulb", "lamp")):
+        return True
+    if any(token in name for token in ("light", "luz", "lamp", "desk")):
+        return True
+    return raw.get("id") == LIGHT_ID or name == LIGHT_ID
+
+
+def apply_entity_light_state(lights: list[dict], entities: object) -> bool:
+    """Prefer a readable entity power state when alexacli actually returns one."""
+    if not isinstance(entities, list) or not lights:
+        return False
+    chosen: str | None = None
+    for raw in entities:
+        if not isinstance(raw, dict) or not entity_looks_like_light(raw):
+            continue
+        state = entity_power_state(raw)
+        if state in ("on", "off"):
+            chosen = state
+            break
+    if chosen is None:
+        return False
+    lights[0] = stamp_light(lights[0], chosen, state_source="entity")
+    return True
+
+
+def remember_lights(cached: dict, lights: list[dict]) -> None:
+    payload = dict(cached) if isinstance(cached, dict) else {}
+    payload["lights"] = lights
+    payload["devices"] = payload.get("devices") or []
+    save_cache(payload)
 
 
 def load_cache() -> dict:
@@ -289,8 +399,9 @@ def snapshot(
     cli = cli_probe(cli_name)
     auth = auth_configured()
     cached = load_cache()
+    started = time.time()
     devices = list(cached.get("devices") or []) if isinstance(cached.get("devices"), list) else []
-    lights = list(cached.get("lights") or []) if isinstance(cached.get("lights"), list) else []
+    lights = normalize_lights(cached.get("lights"), device, on_phrase, off_phrase)
     smarthome_list = cached.get("smarthome_list") if isinstance(cached.get("smarthome_list"), dict) else {
         "ok": False,
         "source": None,
@@ -308,16 +419,21 @@ def snapshot(
             list_source = "devices"
             if smarthome_list.get("ok") and smarthome_list.get("entities"):
                 list_source = "devices+smarthome"
-    if not lights:
-        state = "unknown"
-        if isinstance(cached.get("lights"), list) and cached["lights"]:
-            state = str(cached["lights"][0].get("state") or "unknown")
-        lights = [default_light(device, on_phrase, off_phrase, state)]
-    else:
-        lights = [dict(item) for item in lights]
-        lights[0]["speaker"] = device
-        lights[0]["on_phrase"] = on_phrase
-        lights[0]["off_phrase"] = off_phrase
+            # A HUD on/off can land while devices/entities refresh. Re-read so
+            # we do not clobber a newer optimistic command with the stale start
+            # snapshot. Entity power wins only when Amazon actually returned it
+            # and no command arrived during the probe.
+            latest = load_cache()
+            latest_lights = normalize_lights(latest.get("lights"), device, on_phrase, off_phrase)
+            if lights_updated_at(latest) >= started:
+                lights = latest_lights
+            else:
+                lights = latest_lights
+                apply_entity_light_state(lights, smarthome_list.get("entities") or [])
+    lights_readable = any(
+        isinstance(item, dict) and item.get("state_source") == "entity" and item.get("state") in ("on", "off")
+        for item in lights
+    )
     out = {
         "id": ADAPTER_ID,
         "cli": cli,
@@ -330,10 +446,18 @@ def snapshot(
         },
         "devices": devices,
         "lights": lights,
+        "lights_readable": lights_readable,
     }
     if error:
         out["error"] = error
     if refresh and error is None:
+        latest = load_cache()
+        if lights_updated_at(latest) > lights_updated_at(out):
+            out["lights"] = normalize_lights(latest.get("lights"), device, on_phrase, off_phrase)
+            out["lights_readable"] = any(
+                isinstance(item, dict) and item.get("state_source") == "entity" and item.get("state") in ("on", "off")
+                for item in out["lights"]
+            )
         save_cache(out)
     elif cached.get("cached_at") is not None:
         out["cached_at"] = cached.get("cached_at")
@@ -347,11 +471,27 @@ def command_light(cli_name: str, verb: str, phrase: str, device: str) -> dict:
     if cli is None:
         raise SystemExit(f"{cli_name} not on PATH — install alexacli and run `alexacli auth`")
     argv = [str(cli), "command", safe, "-d", device]
+    state = "on" if verb == "on" else "off"
+    cached = load_cache()
+    previous_lights = list(cached.get("lights") or []) if isinstance(cached.get("lights"), list) else []
+    on_phrase = safe if verb == "on" else str(
+        (previous_lights[0].get("on_phrase") if previous_lights and isinstance(previous_lights[0], dict) else None)
+        or DEFAULT_ON_PHRASE
+    )
+    off_phrase = safe if verb == "off" else str(
+        (previous_lights[0].get("off_phrase") if previous_lights and isinstance(previous_lights[0], dict) else None)
+        or DEFAULT_OFF_PHRASE
+    )
+    # Optimistic write first so a concurrent `status --json` poll (and the
+    # tray) see the intended state while alexacli speaks. Revert on failure.
+    # alexacli cannot read entity power on this desk today (`sh list` is WIP).
+    lights = [default_light(device, on_phrase, off_phrase, state, state_source="command")]
+    remember_lights(cached, lights)
     try:
         proc = run(argv, timeout=25.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
+        remember_lights(cached, previous_lights)
         raise SystemExit(f"alexacli command failed: {exc}") from exc
-    state = "on" if verb == "on" else "off"
     result = {
         "ok": proc.returncode == 0,
         "verb": verb,
@@ -361,18 +501,13 @@ def command_light(cli_name: str, verb: str, phrase: str, device: str) -> dict:
         "cli": str(cli),
         "stdout": (proc.stdout or "").rstrip(),
         "stderr": (proc.stderr or "").rstrip(),
+        "lights": lights,
     }
     if proc.returncode != 0:
+        remember_lights(cached, previous_lights)
         result["error"] = result["stderr"] or result["stdout"] or f"exit {proc.returncode}"
+        result["lights"] = normalize_lights(previous_lights, device, on_phrase, off_phrase)
         return result
-    cached = load_cache()
-    on_phrase = safe if verb == "on" else DEFAULT_ON_PHRASE
-    off_phrase = safe if verb == "off" else DEFAULT_OFF_PHRASE
-    lights = [default_light(device, on_phrase, off_phrase, state)]
-    cached["lights"] = lights
-    cached["devices"] = cached.get("devices") or []
-    save_cache(cached)
-    result["lights"] = lights
     return result
 
 
