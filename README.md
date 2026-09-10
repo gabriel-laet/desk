@@ -21,7 +21,8 @@ layout requires `BarWidget.qml` at the checkout root). A later phase can
 group them under `shells/`.
 
 **RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
-(draft — architecture only, no code yet).
+(phase 1 in-tree) · [0002 — desk product, kettle, shared tray/HUD](docs/rfc/0002-desk-product-kettle-shared-tray.md)
+(draft — architecture only; product name **desk**, no repo rename yet).
 
 The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
 (`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS

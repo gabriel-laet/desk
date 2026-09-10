@@ -1,6 +1,8 @@
 # RFC 0001 — Rust core, adapter contract, thinner trays
 
-**Status:** draft (review first, no implementation in this PR)
+**Status:** draft (phase 1 landed in-tree; Rust core is a later series)
+**See also:** [RFC 0002](0002-desk-product-kettle-shared-tray.md) —
+product name **desk**, kettle fold, shared `slots` tray / HUD.
 **Desk (reference, not a core assumption):** Mac Studio ↔ Omarchy/Linux,
 MX Master + optional LG DualUp + HHKB follow
 
@@ -26,6 +28,7 @@ references. Core still hops, watches, and paints the same strip.
 ```
 core     = config · status · watch · to/full/pbp · adapter registry
 adapters = mouse / keyboard.presence / display (input · pbp · full · layout)
+           · smarthome (alexa) · appliance (kettle — RFC 0002)
 shells   = paint `bar_strip` + panel; never speak HID or hyprctl
 ```
 
@@ -181,7 +184,8 @@ This is the map. If a file is hardware-shaped, it lives under
 | `lgdualup` + `dualup-layout` | `macos/lgdualup.c`, `linux/lgdualup.sh`, `macos/` + `linux/dualup-layout`, udev rules | **`adapters/lgdualup/`** — reference **display** adapter (`display.input` / `pbp` / `full` + `layout.apply`). One adapter **id**; may still be two binaries under the hood (TCC / udev). Extractable later. |
 | HHKB probe | in-process `desk-switch.py` (`04FE:0016`, USB-ghost rules) | **`adapters/hhkb/`** — reference **`keyboard.presence`** adapter. Core must not keep VID/PID / ghost rules long-term. In-core probe is a **temporary fallback** until this adapter exists, not the end state. |
 | host map, `watch`, `to`, status, config | `desk-switch.py` | **core** (Python → Rust). Orchestration + contract only. |
-| DeskSwitchBar / Omarchy QML | `macos/DeskSwitchBar/`, `BarWidget.qml`, `Panel.qml` | **`shells/`** — paint only. No HID, no hyprctl, no vendor names in logic. |
+| DeskSwitchBar / Omarchy QML | `macos/DeskSwitchBar/`, `BarWidget.qml`, `Panel.qml` | **`shells/`** — paint only. No HID, no hyprctl, no vendor names in logic. Shared extra + generic HUD: [RFC 0002](0002-desk-product-kettle-shared-tray.md). |
+| Fellow kettle (other repo) | [gabriel-laet/kettle](https://github.com/gabriel-laet/kettle) | **`adapters/kettle/`** — RFC 0002. Not in this tree yet. Do not delete that repo from this PR. |
 
 North star reminder: Logitech / LG / HHKB **source** lives under
 `adapters/<id>/`, never assumed in core. Third parties drop another
@@ -195,6 +199,7 @@ adapters/
   lgdualup/          # display reference: lgdualup + dualup-layout + udev
   hhkb/              # keyboard.presence reference (new; replaces in-core probe)
   alexa/             # smarthome reference (devices + light on/off via alexacli)
+  kettle/            # appliance reference — fold from gabriel-laet/kettle (RFC 0002; not this file)
 crates/              # or core/ — Rust workspace once phase 2 starts
   desk-switch-core/
   desk-switch/       # CLI bin
@@ -355,6 +360,7 @@ live *inside* core as the client API; the wire is argv + JSON.
 | `keyboard` | `keyboard.presence` (and follow policy in core) | `hhkb` | in-process today |
 | `display` | `display.input` / `pbp` / `full`, `layout.apply` | `lgdualup` | `adapters.dualup` |
 | `smarthome` | `smarthome.list` / `smarthome.status` / `light.on` / `light.off` | `alexa` | `adapters.smarthome` |
+| `appliance` | `appliance.status` / `heat` / `off` (RFC 0002) | `kettle` | `adapters.kettle` (proposed; not in-tree yet) |
 | `hosts` | config only — no binary | — | `adapters.hosts` |
 
 Swap DualUp for another PBP/KVM by dropping a different display adapter
@@ -606,6 +612,10 @@ not a DualUp-shaped field list that QML special-cases.
   "display": "pbp"
 }
 ```
+
+RFC 0002 adds an additive `slots` array on the same `status --json`
+object so one extra can paint weather + kettle + display without
+teaching shells those adapters. `bar_strip` stays.
 
 Slots appear when that role has an adapter and something worth showing.
 Default painted strip stays quiet (focus + optional display). Extra
