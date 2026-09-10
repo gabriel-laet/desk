@@ -23,8 +23,9 @@ BarWidget {
   property string dualupMode: "unknown"
   property var slots: []
   // Shared HUD/tray prefs from ~/.config/desk-switch/config.json (status.ui).
-  // Core already applies slot order / visibility / altitude. Mac writes this file.
-  // TODO: Omarchy drag-reorder settings UI — read the same schema, do not fork it.
+  // Core already applies slot order / visibility / kind / per-slot altitude.
+  // Mac writes this file. TODO: Omarchy drag-reorder settings UI — read
+  // the same schema, do not fork it. Modular kind HUD is macOS-first.
   property var uiConfig: ({})
 
   readonly property bool opened: panelLoader.item

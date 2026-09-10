@@ -305,10 +305,11 @@ Linux, DualUp Full / PBP (DualUp rows hide when the helper is missing).
 
 Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `slots`
 (composite `NSImage`) or quiet `bar_strip` (`MAC`/`LNX` plus a DualUp
-mark). Click for a generic Watch-style HUD + refresh / to mac / to
-linux / DualUp full+PBP. **Configure tray** drag-reorders slots and
-writes `ui` in `~/.config/desk-switch/config.json` (Omarchy will share
-it). `ui.tray.density: "chips"` restores the dense `bar_label` title.
+mark). Click for a modular HUD: host strip first, then each enabled
+slot once by `kind` (face / chip / toggle / mode) with actions scoped
+under that widget. **Configure tray** drag-reorders slots and writes
+`ui` in `~/.config/desk-switch/config.json` (Omarchy will share it).
+`ui.tray.density: "chips"` restores the dense `bar_label` title.
 Calls `desk-switch` only (PATH, then `~/.local/bin`).
 macOS 13+. Ad-hoc signed, not App Store.
 
@@ -439,12 +440,12 @@ Edit [`config.example.json`](config.example.json) →
     "tray": {
       "density": "strip",
       "slots": [
-        { "id": "weather", "enabled": true },
-        { "id": "kettle", "enabled": true },
-        { "id": "dualup", "enabled": true }
+        { "id": "weather", "enabled": true, "kind": "chip", "show_altitude": true },
+        { "id": "kettle", "enabled": true, "kind": "face" },
+        { "id": "dualup", "enabled": true, "kind": "mode" }
       ]
     },
-    "hud": { "show_altitude": true, "show_faces": true, "density": "regular" }
+    "hud": { "show_faces": true, "density": "regular" }
   }
 }
 ```
@@ -459,9 +460,10 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.weather` | Open-Meteo ambient. Optional `latitude` / `longitude` / `timezone` / `label`. See [`adapters/weather/`](adapters/weather/) |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
 | `ui.tray.lights` | If true, `bar_strip` may include a `lights` on/off mark. Default omit — bars stay quiet |
-| `ui.tray.slots` | Order + show/hide. Objects `{id, enabled}` or a string pin list. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
-| `ui.hud.show_altitude` | If false, weather altitude (`780m`) is stripped from the slot detail |
-| `ui.hud.show_faces` | If false, shells skip the Watch-style face |
+| `ui.tray.slots` | Order + show/hide + flavor. Objects `{id, enabled, kind?, show_altitude?}`. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
+| `ui.tray.slots[].kind` | Widget flavor (`face` / `chip` / `toggle` / `mode`). Adapters publish this; shells keep a small fallback registry |
+| `ui.tray.slots[].show_altitude` | Chip-slot pref (weather owns altitude). If false, core strips `780m` from that slot’s detail |
+| `ui.hud.show_faces` | If false, face-kind widgets skip the circular gauge |
 | `ui.hud.density` | `regular` (default) or `compact` |
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
@@ -612,8 +614,8 @@ existing `adapters.*` keys stay. Default extra order is weather →
 kettle → DualUp; `ui.tray.slots` reorders and hides (see
 [docs/ui-config.md](docs/ui-config.md)). DeskSwitchBar composites slot
 glyph+label pairs into **one** `NSImage` (nested SwiftUI `Image+Text`
-is flattened to a single symbol). The click panel is a generic
-Watch-style HUD from the same array. Omarchy paints the same `slots`.
+is flattened to a single symbol). The click panel paints each slot
+once by `kind`. Omarchy reads the same `slots` (modular QML later).
 
 Optional `kettle` on PATH is a shim to `~/.local/lib/desk-switch/kettle`.
 Prefer `desk-switch kettle …`.

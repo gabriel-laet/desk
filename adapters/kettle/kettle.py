@@ -446,6 +446,7 @@ def slot_from_snapshot(snap: dict, *, host: str) -> dict | None:
             progress = 0.35
     return {
         "id": "kettle",
+        "kind": "face",
         "glyph": "flame" if hot else "mug",
         "label": label,
         "detail": detail,

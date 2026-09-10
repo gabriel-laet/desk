@@ -179,6 +179,7 @@ def slot_from_weather(parsed: dict, *, altitude_m: int | None) -> dict:
         detail_parts.append(f"{altitude_m}m")
     return {
         "id": "weather",
+        "kind": "chip",
         "glyph": weather_glyph(int(parsed["weather_code"]), bool(parsed.get("is_day", True))),
         "label": f"{temp}°",
         "detail": " · ".join(part for part in detail_parts if part),

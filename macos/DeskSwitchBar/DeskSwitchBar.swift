@@ -5,7 +5,8 @@ import SwiftUI
 /// Menu-bar companion for desk (`desk-switch` CLI).
 /// Strip: quiet `bar_strip`, or a composite NSImage of `slots`
 /// (MenuBarExtra flattens nested Image+Text to one symbol — draw one image).
-/// HUD: generic Watch-style face from the same slots. No adapter-named chrome.
+/// HUD: modular widget flavors from `slots[].kind` (face / chip / toggle /
+/// mode) plus a host strip. Actions stay scoped under their widget.
 
 @main
 struct DeskSwitchBarApp: App {
@@ -148,25 +149,17 @@ final class DeskSwitchModel: ObservableObject {
     }
 
     var slotSetID: String {
-        visibleSlots.map { "\($0.id):\($0.glyph):\($0.label)" }.joined(separator: "|")
+        visibleSlots.map { "\($0.id):\($0.kind):\($0.glyph):\($0.label)" }.joined(separator: "|")
     }
 
     var slotAccessibility: String {
         visibleSlots.map { "\($0.label)" }.joined(separator: ", ")
     }
 
-    var faceSlot: TraySlot? {
-        guard ui.showFaces else { return visibleSlots.first }
-        return visibleSlots.first(where: { $0.face }) ?? visibleSlots.first
-    }
-
-    var complicationSlots: [TraySlot] {
-        guard ui.showFaces, let face = faceSlot else { return [] }
-        return visibleSlots.filter { $0.id != face.id }
-    }
-
-    var slotActions: [SlotAction] {
-        visibleSlots.flatMap(\.actions)
+    var focusLabel: String {
+        if !hint.isEmpty { return hint }
+        if !barLabel.isEmpty { return barLabel }
+        return "desk"
     }
 
     private var timer: Timer?
@@ -230,6 +223,7 @@ final class DeskSwitchModel: ObservableObject {
             SlotAction(label: "Off", argv: ["smarthome", "off"]),
         ]
         if let index = slots.firstIndex(where: { $0.id == "lights" }) {
+            slots[index].kind = WidgetKind.toggle.rawValue
             slots[index].glyph = glyph
             slots[index].label = label
             slots[index].hot = on
@@ -240,6 +234,7 @@ final class DeskSwitchModel: ObservableObject {
             slots.append(
                 TraySlot(
                     id: "lights",
+                    kind: WidgetKind.toggle.rawValue,
                     glyph: glyph,
                     label: label,
                     detail: nil,
@@ -323,96 +318,193 @@ struct DeskPanel: View {
 
     @ViewBuilder
     private var deskHome: some View {
-        if !model.visibleSlots.isEmpty {
-            SlotHUD(model: model)
-        }
-        Text("Desk → \(model.hint.isEmpty ? model.barLabel : model.hint)")
-            .font(.system(size: 13, weight: .semibold))
-        Text(model.barLabel)
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(.secondary)
-        DeskChip(title: model.hhkbLine)
-        DeskChip(title: model.mouseLine)
-        DeskChip(title: model.dualLine)
-        if !model.peerLine.isEmpty {
-            DeskChip(title: model.peerLine)
-        }
+        HostWidget(model: model)
         ForEach(model.visibleSlots) { slot in
-            DeskChip(title: slot.chipTitle)
+            SlotHUD(model: model, slot: slot)
         }
-        Text(model.summary)
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
         if !model.lastLine.isEmpty {
             Text(model.lastLine)
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
         }
-        if !model.slotActions.isEmpty {
-            HStack(spacing: 8) {
-                ForEach(Array(model.slotActions.enumerated()), id: \.offset) { _, action in
-                    Button {
-                        model.run(action.argv)
-                    } label: {
-                        Text(action.label)
-                            .font(.system(size: 11, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 36)
-                    }
-                    .buttonStyle(WatchOrbStyle(accent: Color.primary, filled: false, shape: .capsule))
-                }
-            }
-        }
-        DeskRow(title: "Refresh status") { model.refresh() }
-        DeskRow(title: "Switch to Mac") { model.run(["to", "mac"]) }
-        DeskRow(title: "Switch to Linux") { model.run(["to", "linux"]) }
-        if model.dualUpAvailable {
-            DeskRow(title: "DualUp Full    ⌘⌥⇧F") { model.run(["full"]) }
-            DeskRow(title: "DualUp PBP    ⌘⌥⇧P") { model.run(["pbp"]) }
-            DeskRow(title: "Auto layout    ⌘⌥U") { model.run(["layout"]) }
-        }
         Divider()
+        DeskRow(title: "Refresh status") { model.refresh() }
         DeskRow(title: "Configure tray") { model.showingSettings = true }
         DeskRow(title: "Quit") { NSApplication.shared.terminate(nil) }
     }
 }
 
+/// v1 flavor registry. Adapters publish `kind`; this only maps the token
+/// to a SwiftUI view. Unknown kinds fall back to a chip.
+enum WidgetKind: String {
+    case face
+    case chip
+    case toggle
+    case mode
+    case host
+
+    /// v1 id→kind map when an older snapshot omits `kind`. Prefer the
+    /// published token so a new adapter does not need a shell change.
+    private static let fallback: [String: WidgetKind] = [
+        "weather": .chip,
+        "kettle": .face,
+        "dualup": .mode,
+        "lights": .toggle,
+        "host": .host,
+    ]
+
+    static func resolve(kind: String, id: String = "", face: Bool = false) -> WidgetKind {
+        if let known = WidgetKind(rawValue: kind) {
+            return known
+        }
+        if let mapped = fallback[id] {
+            return mapped
+        }
+        return face ? .face : .chip
+    }
+
+    static func resolve(_ slot: TraySlot) -> WidgetKind {
+        resolve(kind: slot.kind, id: slot.id, face: slot.face)
+    }
+}
+
+enum ActionShortcut {
+    static func label(for argv: [String]) -> String {
+        switch argv {
+        case ["full"]: return "⌘⌥⇧F"
+        case ["pbp"]: return "⌘⌥⇧P"
+        case ["layout"]: return "⌘⌥U"
+        default: return ""
+        }
+    }
+}
+
+struct WidgetCard<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+            content()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct HostWidget: View {
+    @ObservedObject var model: DeskSwitchModel
+
+    var body: some View {
+        WidgetCard(title: "Focus") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Desk → \(model.focusLabel)")
+                    .font(.system(size: 14, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.hhkbLine)
+                    Text(model.mouseLine)
+                    if !model.peerLine.isEmpty {
+                        Text(model.peerLine)
+                    }
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    DeskActionButton(title: "Switch to Mac", filled: model.hint == "MAC") {
+                        model.run(["to", "mac"])
+                    }
+                    DeskActionButton(title: "Switch to Linux", filled: model.hint == "LNX") {
+                        model.run(["to", "linux"])
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct SlotHUD: View {
     @ObservedObject var model: DeskSwitchModel
+    let slot: TraySlot
+
+    var body: some View {
+        WidgetCard(title: DeskUIConfig.title(for: slot.id)) {
+            switch WidgetKind.resolve(slot) {
+            case .face:
+                FaceFlavor(model: model, slot: slot)
+            case .toggle:
+                ToggleFlavor(model: model, slot: slot)
+            case .mode:
+                ModeFlavor(model: model, slot: slot)
+            case .host:
+                ChipFlavor(slot: slot)
+            case .chip:
+                ChipFlavor(slot: slot)
+            }
+        }
+        .accessibilityLabel(slot.chipTitle)
+    }
+}
+
+struct ChipFlavor: View {
+    let slot: TraySlot
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: SlotGlyphMap.symbolName(for: slot.glyph))
+                .font(.system(size: 14, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+            Text(slot.label)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+            if let detail = slot.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+struct FaceFlavor: View {
+    @ObservedObject var model: DeskSwitchModel
+    let slot: TraySlot
 
     private var hudSize: CGFloat { model.ui.compact ? 140 : 176 }
     private var faceFont: CGFloat { model.ui.compact ? 28 : 36 }
 
     var body: some View {
-        Button {
-            model.refresh()
-        } label: {
+        VStack(spacing: 10) {
             if model.ui.showFaces {
-                watchFace
+                gauge
             } else {
-                slotStack
+                ChipFlavor(slot: slot)
             }
+            SlotActionRow(model: model, slot: slot)
         }
-        .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
-        .accessibilityLabel(model.slotAccessibility)
     }
 
-    private var watchFace: some View {
+    private var gauge: some View {
         ZStack {
             Circle()
                 .fill(Color.primary.opacity(0.06))
             Circle()
                 .stroke(Color.primary.opacity(0.08), lineWidth: 9)
             Circle()
-                .trim(from: 0, to: CGFloat(model.faceSlot?.progress ?? 0))
+                .trim(from: 0, to: CGFloat(slot.progress))
                 .stroke(
                     AngularGradient(
                         colors: [
-                            Color.orange.opacity(0.35),
-                            Color.orange,
+                            (slot.hot ? Color.orange : Color.primary).opacity(0.35),
+                            slot.hot ? Color.orange : Color.primary,
                         ],
                         center: .center
                     ),
@@ -420,64 +512,97 @@ struct SlotHUD: View {
                 )
                 .rotationEffect(.degrees(-90))
             VStack(spacing: 3) {
-                if let face = model.faceSlot {
-                    Image(systemName: SlotGlyphMap.symbolName(for: face.glyph))
-                        .font(.system(size: 15, weight: .semibold))
-                        .symbolRenderingMode(.hierarchical)
-                    Text(face.label)
-                        .font(.system(size: faceFont, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .minimumScaleFactor(0.7)
-                        .lineLimit(1)
-                    if let detail = face.detail, !detail.isEmpty {
-                        Text(detail)
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                if !model.complicationSlots.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(model.complicationSlots) { slot in
-                            HStack(spacing: 3) {
-                                Image(systemName: SlotGlyphMap.symbolName(for: slot.glyph))
-                                    .symbolRenderingMode(.hierarchical)
-                                Text(slot.label)
-                                    .monospacedDigit()
-                            }
-                        }
-                    }
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                Image(systemName: SlotGlyphMap.symbolName(for: slot.glyph))
+                    .font(.system(size: 15, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                Text(slot.label)
+                    .font(.system(size: faceFont, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.7)
+                    .lineLimit(1)
+                if let detail = slot.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
                 }
             }
         }
         .frame(width: hudSize, height: hudSize)
+        .frame(maxWidth: .infinity)
         .contentShape(Circle())
+        .onTapGesture { model.refresh() }
     }
+}
 
-    private var slotStack: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(model.visibleSlots) { slot in
-                HStack(spacing: 6) {
-                    Image(systemName: SlotGlyphMap.symbolName(for: slot.glyph))
-                        .symbolRenderingMode(.hierarchical)
-                    Text(slot.label)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    if let detail = slot.detail, !detail.isEmpty {
-                        Text(detail)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+struct ToggleFlavor: View {
+    @ObservedObject var model: DeskSwitchModel
+    let slot: TraySlot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ChipFlavor(slot: slot)
+            SlotActionRow(model: model, slot: slot, highlightCurrent: true)
+        }
+    }
+}
+
+struct ModeFlavor: View {
+    @ObservedObject var model: DeskSwitchModel
+    let slot: TraySlot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ChipFlavor(slot: slot)
+            SlotActionRow(model: model, slot: slot, highlightCurrent: true, shortcuts: true)
+        }
+    }
+}
+
+struct SlotActionRow: View {
+    @ObservedObject var model: DeskSwitchModel
+    let slot: TraySlot
+    var highlightCurrent: Bool = false
+    var shortcuts: Bool = false
+
+    var body: some View {
+        if !slot.actions.isEmpty {
+            HStack(spacing: 8) {
+                ForEach(Array(slot.actions.enumerated()), id: \.offset) { _, action in
+                    let mark = ActionShortcut.label(for: action.argv)
+                    let title = shortcuts && !mark.isEmpty ? "\(action.label)    \(mark)" : action.label
+                    DeskActionButton(
+                        title: title,
+                        filled: highlightCurrent && actionMatchesCurrent(action)
+                    ) {
+                        model.run(action.argv)
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func actionMatchesCurrent(_ action: SlotAction) -> Bool {
+        let current = slot.label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let label = action.label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !current.isEmpty && (label == current || label.hasPrefix(current))
+    }
+}
+
+struct DeskActionButton: View {
+    let title: String
+    var filled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 32)
+        }
+        .buttonStyle(WatchOrbStyle(accent: Color.primary, filled: filled, shape: .capsule))
     }
 }
 
@@ -505,19 +630,6 @@ struct WatchOrbStyle: ButtonStyle {
                     }
                 }
             }
-    }
-}
-
-struct DeskChip: View {
-    let title: String
-
-    var body: some View {
-        Text(title)
-            .font(.system(size: 11, design: .monospaced))
-            .padding(.vertical, 4)
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 4))
     }
 }
 
@@ -569,8 +681,10 @@ struct TraySettingsPanel: View {
             .frame(height: CGFloat(max(model.ui.slots.count, 1)) * 34)
             Text("HUD")
                 .font(.system(size: 13, weight: .semibold))
-            Toggle("Show altitude", isOn: hudBinding(\.showAltitude))
-                .font(.system(size: 12))
+            if model.ui.slots.contains(where: { WidgetKind(rawValue: $0.kind) == .chip }) {
+                Toggle("Show altitude", isOn: chipAltitudeBinding)
+                    .font(.system(size: 12))
+            }
             Toggle("Watch faces", isOn: hudBinding(\.showFaces))
                 .font(.system(size: 12))
             Toggle("Compact size", isOn: compactBinding)
@@ -623,6 +737,26 @@ struct TraySettingsPanel: View {
             get: { model.ui.trayDensity },
             set: { value in
                 model.ui.trayDensity = value
+                model.persistUI()
+            }
+        )
+    }
+
+    /// Altitude is a chip-slot pref (weather owns the number). The toggle
+    /// writes every chip slot rather than a global HUD flag.
+    private var chipAltitudeBinding: Binding<Bool> {
+        Binding(
+            get: {
+                if let pref = model.ui.slots.first(where: { WidgetKind(rawValue: $0.kind) == .chip }) {
+                    return pref.showAltitude ?? model.ui.showAltitude
+                }
+                return model.ui.showAltitude
+            },
+            set: { value in
+                for index in model.ui.slots.indices where WidgetKind(rawValue: model.ui.slots[index].kind) == .chip {
+                    model.ui.slots[index].showAltitude = value
+                }
+                model.ui.showAltitude = value
                 model.persistUI()
             }
         )
@@ -736,6 +870,7 @@ struct SlotAction: Equatable {
 
 struct TraySlot: Identifiable, Equatable {
     var id: String
+    var kind: String
     var glyph: String
     var label: String
     var detail: String?
@@ -771,8 +906,14 @@ struct TraySlot: Identifiable, Equatable {
         } else if let n = obj["progress"] as? NSNumber {
             progress = n.doubleValue
         }
+        let kind = WidgetKind.resolve(
+            kind: (obj["kind"] as? String ?? "").lowercased(),
+            id: id,
+            face: obj["face"] as? Bool ?? false
+        ).rawValue
         return TraySlot(
             id: id,
+            kind: kind,
             glyph: glyph,
             label: label.isEmpty ? id : label,
             detail: obj["detail"] as? String,
@@ -954,6 +1095,15 @@ struct StatusSnapshot {
 struct UISlotPref: Identifiable, Equatable {
     var id: String
     var enabled: Bool
+    var kind: String
+    var showAltitude: Bool?
+
+    init(id: String, enabled: Bool, kind: String? = nil, showAltitude: Bool? = nil) {
+        self.id = id
+        self.enabled = enabled
+        self.kind = WidgetKind.resolve(kind: kind ?? "", id: id).rawValue
+        self.showAltitude = showAltitude
+    }
 }
 
 struct DeskUIConfig: Equatable {
@@ -967,10 +1117,10 @@ struct DeskUIConfig: Equatable {
     var compact: Bool { hudDensity == "compact" }
 
     static let defaultSlots: [UISlotPref] = [
-        UISlotPref(id: "weather", enabled: true),
-        UISlotPref(id: "kettle", enabled: true),
-        UISlotPref(id: "dualup", enabled: true),
-        UISlotPref(id: "lights", enabled: false),
+        UISlotPref(id: "weather", enabled: true, kind: "chip", showAltitude: true),
+        UISlotPref(id: "kettle", enabled: true, kind: "face"),
+        UISlotPref(id: "dualup", enabled: true, kind: "mode"),
+        UISlotPref(id: "lights", enabled: false, kind: "toggle"),
     ]
 
     static let defaults = DeskUIConfig(
@@ -1010,7 +1160,14 @@ struct DeskUIConfig: Equatable {
                     parsed.append(UISlotPref(id: id, enabled: true))
                     seen.insert(id)
                 } else if let obj = item as? [String: Any], let id = obj["id"] as? String, !id.isEmpty, !seen.contains(id) {
-                    parsed.append(UISlotPref(id: id, enabled: obj["enabled"] as? Bool ?? true))
+                    parsed.append(
+                        UISlotPref(
+                            id: id,
+                            enabled: obj["enabled"] as? Bool ?? true,
+                            kind: obj["kind"] as? String,
+                            showAltitude: obj["show_altitude"] as? Bool
+                        )
+                    )
                     seen.insert(id)
                 }
             }
@@ -1034,6 +1191,9 @@ struct DeskUIConfig: Equatable {
         if let value = hud["show_altitude"] as? Bool {
             cfg.showAltitude = value
         }
+        if let chip = cfg.slots.first(where: { WidgetKind(rawValue: $0.kind) == .chip && $0.showAltitude != nil }) {
+            cfg.showAltitude = chip.showAltitude ?? cfg.showAltitude
+        }
         if let value = hud["show_faces"] as? Bool {
             cfg.showFaces = value
         }
@@ -1047,7 +1207,7 @@ struct DeskUIConfig: Equatable {
         var next = self
         var seen = Set(next.slots.map(\.id))
         for slot in slots where !seen.contains(slot.id) {
-            next.slots.append(UISlotPref(id: slot.id, enabled: true))
+            next.slots.append(UISlotPref(id: slot.id, enabled: true, kind: slot.kind))
             seen.insert(slot.id)
         }
         return next
@@ -1059,7 +1219,19 @@ struct DeskUIConfig: Equatable {
             "tray": [
                 "density": trayDensity,
                 "lights": lightsOn,
-                "slots": slots.map { ["id": $0.id, "enabled": $0.enabled] as [String: Any] },
+                "slots": slots.map { pref -> [String: Any] in
+                    var obj: [String: Any] = [
+                        "id": pref.id,
+                        "enabled": pref.enabled,
+                        "kind": pref.kind,
+                    ]
+                    if let altitude = pref.showAltitude {
+                        obj["show_altitude"] = altitude
+                    } else if WidgetKind(rawValue: pref.kind) == .chip {
+                        obj["show_altitude"] = showAltitude
+                    }
+                    return obj
+                },
             ],
             "hud": [
                 "show_altitude": showAltitude,
@@ -1073,6 +1245,7 @@ struct DeskUIConfig: Equatable {
         let on = state == "on"
         return TraySlot(
             id: "lights",
+            kind: WidgetKind.toggle.rawValue,
             glyph: on ? "light.on" : "light.off",
             label: on ? "ON" : (state == "off" ? "OFF" : "?"),
             detail: nil,
@@ -1109,7 +1282,10 @@ struct DeskUIConfig: Equatable {
 
     private static func decorate(_ slot: TraySlot, ui: DeskUIConfig) -> TraySlot {
         var next = slot
-        if !ui.showAltitude && next.id == "weather" {
+        let kind = WidgetKind.resolve(next)
+        next.kind = kind.rawValue
+        let showAlt = ui.slots.first(where: { $0.id == next.id })?.showAltitude ?? ui.showAltitude
+        if !showAlt && kind == .chip {
             next.detail = stripAltitude(next.detail)
         }
         if !ui.showFaces {
