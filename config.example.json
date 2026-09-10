@@ -61,7 +61,18 @@
   "ui": {
     "tray": {
       "density": "strip",
-      "lights": false
+      "lights": false,
+      "slots": [
+        { "id": "weather", "enabled": true },
+        { "id": "kettle", "enabled": true },
+        { "id": "dualup", "enabled": true },
+        { "id": "lights", "enabled": false }
+      ]
+    },
+    "hud": {
+      "show_altitude": true,
+      "show_faces": true,
+      "density": "regular"
     }
   }
 }

@@ -54,7 +54,7 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
@@ -245,6 +245,252 @@ def tray_density(cfg: dict) -> str:
     return "chips" if raw == "chips" else "strip"
 
 
+def hud_density(cfg: dict) -> str:
+    raw = str(cfg.get("_hud_density") or "regular").strip().lower()
+    return "compact" if raw == "compact" else "regular"
+
+
+def _as_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    raw = str(value).strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+# Quiet default extra: weather → kettle → DualUp. Lights stay off until opted in.
+DEFAULT_TRAY_SLOT_IDS = ("weather", "kettle", "dualup")
+KNOWN_TRAY_SLOT_IDS = ("weather", "kettle", "dualup", "lights")
+ALTITUDE_DETAIL_RE = re.compile(r"^\d+m$")
+
+
+def default_tray_slot_prefs(*, lights: bool = False) -> list[dict]:
+    return [
+        {"id": "weather", "enabled": True},
+        {"id": "kettle", "enabled": True},
+        {"id": "dualup", "enabled": True},
+        {"id": "lights", "enabled": bool(lights)},
+    ]
+
+
+def parse_slot_pref(raw: object) -> dict | None:
+    """Accept a pin string (`\"kettle\"`) or `{id, enabled}` object."""
+    if isinstance(raw, str):
+        slot_id = raw.strip()
+        return {"id": slot_id, "enabled": True} if slot_id else None
+    if not isinstance(raw, dict):
+        return None
+    slot_id = str(raw.get("id") or "").strip()
+    if not slot_id:
+        return None
+    return {"id": slot_id, "enabled": _as_bool(raw.get("enabled"), True)}
+
+
+def parse_tray_slot_list(raw: object) -> tuple[list[dict] | None, bool, bool]:
+    """Return (prefs, exclusive, from_user).
+
+    A string pin list is exclusive (only those ids). An object list is
+    order + visibility; unknown available slots append after it.
+    Missing / empty → defaults at compose time.
+    """
+    if not isinstance(raw, list) or not raw:
+        return None, False, False
+    prefs: list[dict] = []
+    exclusive = True
+    for item in raw:
+        if isinstance(item, dict):
+            exclusive = False
+        pref = parse_slot_pref(item)
+        if pref:
+            prefs.append(pref)
+    if not prefs:
+        return None, False, False
+    return prefs, exclusive, True
+
+
+def parse_ui_section(ui: object) -> dict:
+    """Normalize `ui` from config.json. Shared by core, Mac, and Omarchy."""
+    raw = _as_dict(ui)
+    tray = _as_dict(raw.get("tray"))
+    hud = _as_dict(raw.get("hud"))
+    slots, exclusive, from_user = parse_tray_slot_list(tray.get("slots"))
+    lights = _as_bool(tray.get("lights"), False)
+    if slots and not exclusive:
+        for pref in slots:
+            if pref["id"] == "lights" and pref["enabled"]:
+                lights = True
+    density = str(tray.get("density") or "strip").strip().lower()
+    hud_raw = str(hud.get("density") or "regular").strip().lower()
+    return {
+        "tray_density": "chips" if density == "chips" else "strip",
+        "tray_lights": lights,
+        "slots": slots,
+        "slots_exclusive": exclusive,
+        "slots_from_user": from_user,
+        "hud_show_altitude": _as_bool(hud.get("show_altitude"), True),
+        "hud_show_faces": _as_bool(hud.get("show_faces"), True),
+        "hud_density": "compact" if hud_raw == "compact" else "regular",
+    }
+
+
+def apply_ui_section(cfg: dict, ui: object) -> dict:
+    parsed = parse_ui_section(ui)
+    cfg["_tray_density"] = parsed["tray_density"]
+    cfg["_tray_lights"] = parsed["tray_lights"]
+    cfg["_hud_show_altitude"] = parsed["hud_show_altitude"]
+    cfg["_hud_show_faces"] = parsed["hud_show_faces"]
+    cfg["_hud_density"] = parsed["hud_density"]
+    if parsed["slots_from_user"] and parsed["slots"]:
+        cfg["_ui_slots"] = parsed["slots"]
+        cfg["_ui_slots_exclusive"] = parsed["slots_exclusive"]
+        cfg["_tray_slots"] = [item["id"] for item in parsed["slots"] if item["enabled"]]
+    return cfg
+
+
+def public_slot_prefs(cfg: dict) -> list[dict]:
+    """Catalog the settings UI / status.ui.tray.slots persist and paint from."""
+    lights = bool(cfg.get("_tray_lights"))
+    catalog = default_tray_slot_prefs(lights=lights)
+    prefs = cfg.get("_ui_slots")
+    exclusive = bool(cfg.get("_ui_slots_exclusive"))
+    if not isinstance(prefs, list) or not prefs:
+        wanted = cfg.get("_tray_slots")
+        if isinstance(wanted, list) and wanted:
+            prefs = [{"id": str(item), "enabled": True} for item in wanted if str(item).strip()]
+            exclusive = True
+        else:
+            return catalog
+    out = [{"id": item["id"], "enabled": bool(item.get("enabled", True))} for item in prefs]
+    seen = {item["id"] for item in out}
+    if exclusive:
+        for item in catalog:
+            if item["id"] not in seen:
+                out.append({"id": item["id"], "enabled": False})
+        return out
+    for item in catalog:
+        if item["id"] not in seen:
+            out.append(item)
+    return out
+
+
+def format_public_ui(cfg: dict) -> dict:
+    slots = public_slot_prefs(cfg)
+    lights = bool(cfg.get("_tray_lights")) or any(
+        item["id"] == "lights" and item["enabled"] for item in slots
+    )
+    return {
+        "tray": {
+            "density": tray_density(cfg),
+            "lights": lights,
+            "slots": slots,
+        },
+        "hud": {
+            "show_altitude": _as_bool(cfg.get("_hud_show_altitude"), True),
+            "show_faces": _as_bool(cfg.get("_hud_show_faces"), True),
+            "density": hud_density(cfg),
+        },
+    }
+
+
+def preferred_config_path(existing: str | None = None) -> Path:
+    if existing and existing not in ("(defaults)",):
+        return Path(existing)
+    return Path(CONFIG_CANDIDATES[0])
+
+
+def write_ui_config(ui: object, path: Path | None = None) -> Path:
+    """Merge `ui` into the shared desk-switch config. Leaves adapters alone."""
+    dest = Path(path) if path else preferred_config_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {}
+    if dest.is_file():
+        try:
+            loaded = json.loads(dest.read_text())
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict):
+            data = loaded
+    parsed = parse_ui_section(ui)
+    shadow = {
+        "_tray_density": parsed["tray_density"],
+        "_tray_lights": parsed["tray_lights"],
+        "_hud_show_altitude": parsed["hud_show_altitude"],
+        "_hud_show_faces": parsed["hud_show_faces"],
+        "_hud_density": parsed["hud_density"],
+    }
+    if parsed["slots_from_user"] and parsed["slots"]:
+        shadow["_ui_slots"] = parsed["slots"]
+        shadow["_ui_slots_exclusive"] = parsed["slots_exclusive"]
+        shadow["_tray_slots"] = [item["id"] for item in parsed["slots"] if item["enabled"]]
+    data["ui"] = format_public_ui(shadow)
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(dest)
+    return dest
+
+
+def apply_slot_prefs(available: list[dict], prefs: list[dict] | None, *, exclusive: bool) -> list[dict]:
+    """Order + visibility. Exclusive string pins hide anything not listed."""
+    by_id: dict[str, dict] = {}
+    for slot in available:
+        slot_id = str(slot.get("id") or "")
+        if slot_id and slot_id not in by_id:
+            by_id[slot_id] = slot
+    if not prefs:
+        return list(available)
+    out: list[dict] = []
+    used: set[str] = set()
+    for pref in prefs:
+        slot_id = str(pref.get("id") or "")
+        if not slot_id:
+            continue
+        used.add(slot_id)
+        if not pref.get("enabled", True):
+            continue
+        if slot_id in by_id:
+            out.append(by_id[slot_id])
+    if exclusive:
+        return out
+    for slot in available:
+        slot_id = str(slot.get("id") or "")
+        if slot_id in used or slot_id == "lights":
+            continue
+        out.append(slot)
+    return out
+
+
+def strip_altitude_from_detail(detail: str) -> str:
+    parts = [part.strip() for part in str(detail).split("·")]
+    kept = [part for part in parts if part and not ALTITUDE_DETAIL_RE.match(part)]
+    return " · ".join(kept)
+
+
+def apply_hud_prefs(slots: list[dict], cfg: dict | None = None) -> list[dict]:
+    cfg = cfg or {}
+    show_altitude = _as_bool(cfg.get("_hud_show_altitude"), True)
+    show_faces = _as_bool(cfg.get("_hud_show_faces"), True)
+    out: list[dict] = []
+    for slot in slots:
+        item = dict(slot)
+        if not show_altitude and item.get("id") == "weather":
+            detail = strip_altitude_from_detail(str(item.get("detail") or ""))
+            if detail:
+                item["detail"] = detail
+            else:
+                item.pop("detail", None)
+        if not show_faces:
+            item.pop("face", None)
+        out.append(item)
+    return out
+
+
 def apply_adapter_config(cfg: dict, user: dict) -> dict:
     """Map adapters.* onto the internal config. Legacy keys still win if set.
 
@@ -259,7 +505,6 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     weather = _as_dict(adapters.get("weather"))
     dual = display_adapter_cfg(user)
     ui = _as_dict(user.get("ui"))
-    tray = _as_dict(ui.get("tray"))
 
     cfg["_mouse_enabled"] = bool(mouse.get("enabled", True))
     if mouse.get("backend"):
@@ -354,11 +599,7 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     cfg["_dualup_layout_settle_s"] = float(
         LAYOUT_DEFAULT_SETTLE_S if raw_settle is None else raw_settle
     )
-    if tray.get("density"):
-        cfg["_tray_density"] = str(tray["density"])
-    cfg["_tray_lights"] = bool(tray.get("lights"))
-    if isinstance(tray.get("slots"), list):
-        cfg["_tray_slots"] = [str(item) for item in tray["slots"] if str(item).strip()]
+    apply_ui_section(cfg, ui)
     return cfg
 
 
@@ -1742,11 +1983,32 @@ def display_slot(state: dict) -> dict | None:
     }
 
 
+def _slot_prefs_from_cfg(cfg: dict | None) -> tuple[list[dict] | None, bool]:
+    cfg = cfg or {}
+    prefs = cfg.get("_ui_slots")
+    if isinstance(prefs, list) and prefs:
+        return prefs, bool(cfg.get("_ui_slots_exclusive"))
+    wanted = cfg.get("_tray_slots")
+    if isinstance(wanted, list) and wanted:
+        return (
+            [{"id": str(item), "enabled": True} for item in wanted if str(item).strip()],
+            True,
+        )
+    return None, False
+
+
 def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
-    """Compose additive tray/HUD slots. Shells only paint. Missing adapter ⇒ omit."""
+    """Compose additive tray/HUD slots. Shells only paint. Missing adapter ⇒ omit.
+
+    Default order is weather → kettle → dualup. `ui.tray.slots` reorders and
+    hides. Lights stay out unless `ui.tray.lights` or the lights pref is on.
+    """
+    cfg = cfg or {}
     adapters = state.get("adapters") or {}
     ordered: list[dict] = []
-    for role in ("weather", "kettle"):
+    for role in DEFAULT_TRAY_SLOT_IDS:
+        if role == "dualup":
+            continue
         snap = adapters.get(role) if isinstance(adapters.get(role), dict) else {}
         if snap.get("enabled") is False:
             continue
@@ -1756,7 +2018,13 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
     display = normalize_slot(display_slot(state))
     if display:
         ordered.append(display)
-    if (cfg or {}).get("_tray_lights") or state.get("_tray_lights"):
+    prefs, exclusive = _slot_prefs_from_cfg(cfg)
+    lights_opt_in = bool(cfg.get("_tray_lights") or state.get("_tray_lights"))
+    if prefs and not exclusive:
+        lights_opt_in = lights_opt_in or any(
+            item.get("id") == "lights" and item.get("enabled", True) for item in prefs
+        )
+    if lights_opt_in:
         home = adapters.get("smarthome") if isinstance(adapters.get("smarthome"), dict) else {}
         lights = home.get("lights") if isinstance(home.get("lights"), list) else []
         mark = None
@@ -1776,11 +2044,9 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
             )
             if light:
                 ordered.append(light)
-    wanted = (cfg or {}).get("_tray_slots")
-    if isinstance(wanted, list) and wanted:
-        allow = {str(item) for item in wanted}
-        ordered = [slot for slot in ordered if slot["id"] in allow]
-    return ordered
+    if prefs:
+        ordered = apply_slot_prefs(ordered, prefs, exclusive=exclusive)
+    return apply_hud_prefs(ordered, cfg)
 
 
 def format_strip_title(strip: dict) -> str:
@@ -2067,7 +2333,7 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "dualup_inputs": inputs,
         "peer": peer,
         "adapters": adapters,
-        "ui": {"tray": {"density": tray_density(cfg)}},
+        "ui": format_public_ui(cfg),
     }
     state["_tray_lights"] = bool(cfg.get("_tray_lights"))
     state["bar_label"] = format_bar_label(state)

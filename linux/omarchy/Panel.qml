@@ -23,6 +23,7 @@ Panel {
   property string mouseHost: ""
   property string dualupMode: "unknown"
   property var slots: []
+  property var uiConfig: ({})
 
   signal actionRequested(string args)
   signal refreshRequested()
@@ -95,6 +96,21 @@ Panel {
       return "unreachable"
     const kb = peer.hhkb_usb ? "USB" : (peer.hhkb_bluetooth ? "BT" : (peer.hhkb_transport || "?"))
     return String(peer.this_host || peer.peer || "peer") + " · HHKB " + kb + " · mx " + (peer.mouse_channel != null ? peer.mouse_channel : "?")
+  }
+
+  function hudPrefs() {
+    const fromProp = root.uiConfig && root.uiConfig.hud ? root.uiConfig.hud : null
+    const data = root.parsedStatus()
+    const fromStatus = data && data.ui && data.ui.hud ? data.ui.hud : null
+    return fromProp || fromStatus || {}
+  }
+
+  function showFaces() {
+    return root.hudPrefs().show_faces !== false
+  }
+
+  function hudSize() {
+    return root.hudPrefs().density === "compact" ? 140 : 176
   }
 
   function slotList() {
@@ -219,10 +235,10 @@ Panel {
         }
 
         Rectangle {
-          visible: root.slots && root.slots.length
-          width: 176
-          height: 176
-          radius: 88
+          visible: root.slots && root.slots.length && root.showFaces()
+          width: root.hudSize()
+          height: root.hudSize()
+          radius: root.hudSize() / 2
           anchors.horizontalCenter: parent.horizontalCenter
           color: Qt.rgba(1, 1, 1, 0.06)
           border.color: Qt.rgba(1, 1, 1, 0.10)

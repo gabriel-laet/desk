@@ -26,11 +26,11 @@ struct MenuBarLabel: View {
 
     var body: some View {
         Group {
-            if model.slots.isEmpty {
+            if model.visibleSlots.isEmpty {
                 Text(model.stripTitle)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
             } else {
-                Image(nsImage: MenuBarStatusItemRenderer.image(for: model.slots))
+                Image(nsImage: MenuBarStatusItemRenderer.image(for: model.visibleSlots, compact: model.ui.compact))
                     .renderingMode(.original)
                     .help(model.summary)
                     .accessibilityLabel(model.slotAccessibility)
@@ -62,26 +62,27 @@ enum SlotGlyphMap {
 }
 
 enum MenuBarStatusItemRenderer {
-    private static var cache: ([TraySlot], NSImage)?
+    private static var cache: ([TraySlot], Bool, NSImage)?
 
-    static func image(for slots: [TraySlot]) -> NSImage {
-        if let cache, cache.0 == slots {
-            return cache.1
+    static func image(for slots: [TraySlot], compact: Bool = false) -> NSImage {
+        if let cache, cache.0 == slots, cache.1 == compact {
+            return cache.2
         }
-        let image = draw(slots)
-        cache = (slots, image)
+        let image = draw(slots, compact: compact)
+        cache = (slots, compact, image)
         return image
     }
 
-    private static func draw(_ slots: [TraySlot]) -> NSImage {
-        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
-        let textFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+    private static func draw(_ slots: [TraySlot], compact: Bool) -> NSImage {
+        let point: CGFloat = compact ? 12 : 13
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: point, weight: .semibold)
+        let textFont = NSFont.monospacedDigitSystemFont(ofSize: point, weight: .semibold)
         let textAttrs: [NSAttributedString.Key: Any] = [
             .font: textFont,
             .foregroundColor: NSColor.labelColor,
         ]
         let glyphTemp: CGFloat = 3
-        let pairGap: CGFloat = 8
+        let pairGap: CGFloat = compact ? 6 : 8
 
         var measured: [(icon: NSImage, text: NSAttributedString)] = []
         var width: CGFloat = 0
@@ -138,26 +139,34 @@ final class DeskSwitchModel: ObservableObject {
     @Published var dualUpAvailable = false
     @Published var lastLine = ""
     @Published var slots: [TraySlot] = []
+    @Published var ui = DeskUIConfig.defaults
+    @Published var configPath = ""
+    @Published var showingSettings = false
+
+    var visibleSlots: [TraySlot] {
+        DeskUIConfig.apply(slots, ui: ui)
+    }
 
     var slotSetID: String {
-        slots.map { "\($0.id):\($0.glyph):\($0.label)" }.joined(separator: "|")
+        visibleSlots.map { "\($0.id):\($0.glyph):\($0.label)" }.joined(separator: "|")
     }
 
     var slotAccessibility: String {
-        slots.map { "\($0.label)" }.joined(separator: ", ")
+        visibleSlots.map { "\($0.label)" }.joined(separator: ", ")
     }
 
     var faceSlot: TraySlot? {
-        slots.first(where: { $0.face }) ?? slots.first
+        guard ui.showFaces else { return visibleSlots.first }
+        return visibleSlots.first(where: { $0.face }) ?? visibleSlots.first
     }
 
     var complicationSlots: [TraySlot] {
-        guard let face = faceSlot else { return [] }
-        return slots.filter { $0.id != face.id }
+        guard ui.showFaces, let face = faceSlot else { return [] }
+        return visibleSlots.filter { $0.id != face.id }
     }
 
     var slotActions: [SlotAction] {
-        slots.flatMap(\.actions)
+        visibleSlots.flatMap(\.actions)
     }
 
     private var timer: Timer?
@@ -190,6 +199,8 @@ final class DeskSwitchModel: ObservableObject {
                     self.peerLine = parsed.peerLine
                     self.dualUpAvailable = parsed.dualUpAvailable
                     self.slots = parsed.slots
+                    self.ui = parsed.ui.merging(live: parsed.slots)
+                    self.configPath = parsed.configPath
                     self.lastLine = ""
                 }
             } catch {
@@ -204,6 +215,8 @@ final class DeskSwitchModel: ObservableObject {
                     self.peerLine = ""
                     self.dualUpAvailable = false
                     self.slots = []
+                    self.ui = DeskUIConfig.defaults
+                    self.configPath = ""
                 }
             }
         }
@@ -226,6 +239,30 @@ final class DeskSwitchModel: ObservableObject {
             }
         }
     }
+
+    func persistUI() {
+        do {
+            try DeskUIConfigStore.save(ui, to: configPath)
+            refresh()
+        } catch {
+            lastLine = error.localizedDescription
+        }
+    }
+
+    func moveSlots(from source: IndexSet, to destination: Int) {
+        ui.slots.move(fromOffsets: source, toOffset: destination)
+        persistUI()
+    }
+
+    func setSlotEnabled(id: String, enabled: Bool) {
+        if let index = ui.slots.firstIndex(where: { $0.id == id }) {
+            ui.slots[index].enabled = enabled
+        }
+        if id == "lights" {
+            ui.lights = enabled
+        }
+        persistUI()
+    }
 }
 
 struct DeskPanel: View {
@@ -233,130 +270,174 @@ struct DeskPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if !model.slots.isEmpty {
-                SlotHUD(model: model)
+            if model.showingSettings {
+                TraySettingsPanel(model: model)
+            } else {
+                deskHome
             }
-            Text("Desk → \(model.hint.isEmpty ? model.barLabel : model.hint)")
-                .font(.system(size: 13, weight: .semibold))
-            Text(model.barLabel)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-            DeskChip(title: model.hhkbLine)
-            DeskChip(title: model.mouseLine)
-            DeskChip(title: model.dualLine)
-            if !model.peerLine.isEmpty {
-                DeskChip(title: model.peerLine)
-            }
-            ForEach(model.slots) { slot in
-                DeskChip(title: slot.chipTitle)
-            }
-            Text(model.summary)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if !model.lastLine.isEmpty {
-                Text(model.lastLine)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-            }
-            if !model.slotActions.isEmpty {
-                HStack(spacing: 8) {
-                    ForEach(Array(model.slotActions.enumerated()), id: \.offset) { _, action in
-                        Button {
-                            model.run(action.argv)
-                        } label: {
-                            Text(action.label)
-                                .font(.system(size: 11, weight: .semibold))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 36)
-                        }
-                        .buttonStyle(WatchOrbStyle(accent: Color.primary, filled: false, shape: .capsule))
-                    }
-                }
-            }
-            DeskRow(title: "Refresh status") { model.refresh() }
-            DeskRow(title: "Switch to Mac") { model.run(["to", "mac"]) }
-            DeskRow(title: "Switch to Linux") { model.run(["to", "linux"]) }
-            if model.dualUpAvailable {
-                DeskRow(title: "DualUp Full    ⌘⌥⇧F") { model.run(["full"]) }
-                DeskRow(title: "DualUp PBP    ⌘⌥⇧P") { model.run(["pbp"]) }
-                DeskRow(title: "Auto layout    ⌘⌥U") { model.run(["layout"]) }
-            }
-            Divider()
-            DeskRow(title: "Quit") { NSApplication.shared.terminate(nil) }
         }
         .padding(12)
         .frame(width: 300)
         .onAppear { model.refresh() }
+    }
+
+    @ViewBuilder
+    private var deskHome: some View {
+        if !model.visibleSlots.isEmpty {
+            SlotHUD(model: model)
+        }
+        Text("Desk → \(model.hint.isEmpty ? model.barLabel : model.hint)")
+            .font(.system(size: 13, weight: .semibold))
+        Text(model.barLabel)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(.secondary)
+        DeskChip(title: model.hhkbLine)
+        DeskChip(title: model.mouseLine)
+        DeskChip(title: model.dualLine)
+        if !model.peerLine.isEmpty {
+            DeskChip(title: model.peerLine)
+        }
+        ForEach(model.visibleSlots) { slot in
+            DeskChip(title: slot.chipTitle)
+        }
+        Text(model.summary)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if !model.lastLine.isEmpty {
+            Text(model.lastLine)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+        }
+        if !model.slotActions.isEmpty {
+            HStack(spacing: 8) {
+                ForEach(Array(model.slotActions.enumerated()), id: \.offset) { _, action in
+                    Button {
+                        model.run(action.argv)
+                    } label: {
+                        Text(action.label)
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 36)
+                    }
+                    .buttonStyle(WatchOrbStyle(accent: Color.primary, filled: false, shape: .capsule))
+                }
+            }
+        }
+        DeskRow(title: "Refresh status") { model.refresh() }
+        DeskRow(title: "Switch to Mac") { model.run(["to", "mac"]) }
+        DeskRow(title: "Switch to Linux") { model.run(["to", "linux"]) }
+        if model.dualUpAvailable {
+            DeskRow(title: "DualUp Full    ⌘⌥⇧F") { model.run(["full"]) }
+            DeskRow(title: "DualUp PBP    ⌘⌥⇧P") { model.run(["pbp"]) }
+            DeskRow(title: "Auto layout    ⌘⌥U") { model.run(["layout"]) }
+        }
+        Divider()
+        DeskRow(title: "Configure tray") { model.showingSettings = true }
+        DeskRow(title: "Quit") { NSApplication.shared.terminate(nil) }
     }
 }
 
 struct SlotHUD: View {
     @ObservedObject var model: DeskSwitchModel
 
+    private var hudSize: CGFloat { model.ui.compact ? 140 : 176 }
+    private var faceFont: CGFloat { model.ui.compact ? 28 : 36 }
+
     var body: some View {
         Button {
             model.refresh()
         } label: {
-            ZStack {
-                Circle()
-                    .fill(Color.primary.opacity(0.06))
-                Circle()
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 9)
-                Circle()
-                    .trim(from: 0, to: CGFloat(model.faceSlot?.progress ?? 0))
-                    .stroke(
-                        AngularGradient(
-                            colors: [
-                                Color.orange.opacity(0.35),
-                                Color.orange,
-                            ],
-                            center: .center
-                        ),
-                        style: StrokeStyle(lineWidth: 9, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-                VStack(spacing: 3) {
-                    if let face = model.faceSlot {
-                        Image(systemName: SlotGlyphMap.symbolName(for: face.glyph))
-                            .font(.system(size: 15, weight: .semibold))
-                            .symbolRenderingMode(.hierarchical)
-                        Text(face.label)
-                            .font(.system(size: 36, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .minimumScaleFactor(0.7)
-                            .lineLimit(1)
-                        if let detail = face.detail, !detail.isEmpty {
-                            Text(detail)
-                                .font(.system(size: 11, weight: .medium, design: .rounded))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.center)
-                        }
-                    }
-                    if !model.complicationSlots.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach(model.complicationSlots) { slot in
-                                HStack(spacing: 3) {
-                                    Image(systemName: SlotGlyphMap.symbolName(for: slot.glyph))
-                                        .symbolRenderingMode(.hierarchical)
-                                    Text(slot.label)
-                                        .monospacedDigit()
-                                }
-                            }
-                        }
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                    }
-                }
+            if model.ui.showFaces {
+                watchFace
+            } else {
+                slotStack
             }
-            .frame(width: 176, height: 176)
-            .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
         .accessibilityLabel(model.slotAccessibility)
+    }
+
+    private var watchFace: some View {
+        ZStack {
+            Circle()
+                .fill(Color.primary.opacity(0.06))
+            Circle()
+                .stroke(Color.primary.opacity(0.08), lineWidth: 9)
+            Circle()
+                .trim(from: 0, to: CGFloat(model.faceSlot?.progress ?? 0))
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            Color.orange.opacity(0.35),
+                            Color.orange,
+                        ],
+                        center: .center
+                    ),
+                    style: StrokeStyle(lineWidth: 9, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+            VStack(spacing: 3) {
+                if let face = model.faceSlot {
+                    Image(systemName: SlotGlyphMap.symbolName(for: face.glyph))
+                        .font(.system(size: 15, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                    Text(face.label)
+                        .font(.system(size: faceFont, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .minimumScaleFactor(0.7)
+                        .lineLimit(1)
+                    if let detail = face.detail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                if !model.complicationSlots.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(model.complicationSlots) { slot in
+                            HStack(spacing: 3) {
+                                Image(systemName: SlotGlyphMap.symbolName(for: slot.glyph))
+                                    .symbolRenderingMode(.hierarchical)
+                                Text(slot.label)
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(width: hudSize, height: hudSize)
+        .contentShape(Circle())
+    }
+
+    private var slotStack: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(model.visibleSlots) { slot in
+                HStack(spacing: 6) {
+                    Image(systemName: SlotGlyphMap.symbolName(for: slot.glyph))
+                        .symbolRenderingMode(.hierarchical)
+                    Text(slot.label)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                    if let detail = slot.detail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -413,6 +494,98 @@ struct DeskRow: View {
         .padding(.vertical, 5)
         .padding(.horizontal, 8)
         .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+struct TraySettingsPanel: View {
+    @ObservedObject var model: DeskSwitchModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Tray slots")
+                .font(.system(size: 13, weight: .semibold))
+            Text("Drag to reorder. Same file Omarchy will read.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            List {
+                ForEach(model.ui.slots) { slot in
+                    HStack(spacing: 8) {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(DeskUIConfig.title(for: slot.id))
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Toggle("", isOn: enabledBinding(slot.id))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+                    }
+                    .listRowInsets(EdgeInsets(top: 3, leading: 2, bottom: 3, trailing: 2))
+                }
+                .onMove(perform: model.moveSlots)
+            }
+            .listStyle(.plain)
+            .frame(height: CGFloat(max(model.ui.slots.count, 1)) * 34)
+            Text("HUD")
+                .font(.system(size: 13, weight: .semibold))
+            Toggle("Show altitude", isOn: hudBinding(\.showAltitude))
+                .font(.system(size: 12))
+            Toggle("Watch faces", isOn: hudBinding(\.showFaces))
+                .font(.system(size: 12))
+            Toggle("Compact size", isOn: compactBinding)
+                .font(.system(size: 12))
+            Picker("Bar title", selection: densityBinding) {
+                Text("Quiet").tag("strip")
+                Text("Chips").tag("chips")
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            if !model.lastLine.isEmpty {
+                Text(model.lastLine)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            DeskRow(title: "Done") { model.showingSettings = false }
+        }
+    }
+
+    private func enabledBinding(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { model.ui.slots.first(where: { $0.id == id })?.enabled ?? false },
+            set: { model.setSlotEnabled(id: id, enabled: $0) }
+        )
+    }
+
+    private func hudBinding(_ keyPath: WritableKeyPath<DeskUIConfig, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { model.ui[keyPath: keyPath] },
+            set: { value in
+                model.ui[keyPath: keyPath] = value
+                model.persistUI()
+            }
+        )
+    }
+
+    private var compactBinding: Binding<Bool> {
+        Binding(
+            get: { model.ui.compact },
+            set: { value in
+                model.ui.hudDensity = value ? "compact" : "regular"
+                model.persistUI()
+            }
+        )
+    }
+
+    private var densityBinding: Binding<String> {
+        Binding(
+            get: { model.ui.trayDensity },
+            set: { value in
+                model.ui.trayDensity = value
+                model.persistUI()
+            }
+        )
     }
 }
 
@@ -582,6 +755,8 @@ struct StatusSnapshot {
     var peerLine = ""
     var dualUpAvailable = false
     var slots: [TraySlot] = []
+    var ui = DeskUIConfig.defaults
+    var configPath = ""
 
     static func intValue(_ obj: [String: Any], _ key: String) -> Int? {
         if let n = obj[key] as? Int { return n }
@@ -716,6 +891,8 @@ struct StatusSnapshot {
         if let rawSlots = obj["slots"] as? [Any] {
             slots = rawSlots.compactMap(TraySlot.parse)
         }
+        let ui = DeskUIConfig.parse(obj["ui"]).merging(live: slots)
+        let configPath = obj["config"] as? String ?? ""
 
         return StatusSnapshot(
             hint: hint,
@@ -727,7 +904,198 @@ struct StatusSnapshot {
             dualLine: "DU  \(modeLabel) · mac=\(macIn) linux=\(lnxIn)",
             peerLine: peerLine,
             dualUpAvailable: dual,
-            slots: slots
+            slots: slots,
+            ui: ui,
+            configPath: configPath
         )
+    }
+}
+
+struct UISlotPref: Identifiable, Equatable {
+    var id: String
+    var enabled: Bool
+}
+
+struct DeskUIConfig: Equatable {
+    var slots: [UISlotPref]
+    var lights: Bool
+    var trayDensity: String
+    var showAltitude: Bool
+    var showFaces: Bool
+    var hudDensity: String
+
+    var compact: Bool { hudDensity == "compact" }
+
+    static let defaultSlots: [UISlotPref] = [
+        UISlotPref(id: "weather", enabled: true),
+        UISlotPref(id: "kettle", enabled: true),
+        UISlotPref(id: "dualup", enabled: true),
+        UISlotPref(id: "lights", enabled: false),
+    ]
+
+    static let defaults = DeskUIConfig(
+        slots: defaultSlots,
+        lights: false,
+        trayDensity: "strip",
+        showAltitude: true,
+        showFaces: true,
+        hudDensity: "regular"
+    )
+
+    static func title(for id: String) -> String {
+        switch id {
+        case "weather": return "Weather"
+        case "kettle": return "Kettle"
+        case "dualup": return "Display"
+        case "lights": return "Lights"
+        default:
+            return id.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    static func parse(_ raw: Any?) -> DeskUIConfig {
+        var cfg = DeskUIConfig.defaults
+        guard let ui = raw as? [String: Any] else { return cfg }
+        let tray = ui["tray"] as? [String: Any] ?? [:]
+        let hud = ui["hud"] as? [String: Any] ?? [:]
+        if let density = tray["density"] as? String, !density.isEmpty {
+            cfg.trayDensity = density.lowercased() == "chips" ? "chips" : "strip"
+        }
+        cfg.lights = tray["lights"] as? Bool ?? false
+        if let rawSlots = tray["slots"] as? [Any] {
+            var parsed: [UISlotPref] = []
+            var seen = Set<String>()
+            for item in rawSlots {
+                if let id = item as? String, !id.isEmpty, !seen.contains(id) {
+                    parsed.append(UISlotPref(id: id, enabled: true))
+                    seen.insert(id)
+                } else if let obj = item as? [String: Any], let id = obj["id"] as? String, !id.isEmpty, !seen.contains(id) {
+                    parsed.append(UISlotPref(id: id, enabled: obj["enabled"] as? Bool ?? true))
+                    seen.insert(id)
+                }
+            }
+            if !parsed.isEmpty {
+                for item in defaultSlots where !seen.contains(item.id) {
+                    var extra = item
+                    if extra.id == "lights" {
+                        extra.enabled = cfg.lights
+                    }
+                    parsed.append(extra)
+                }
+                cfg.slots = parsed
+            }
+        } else if cfg.lights {
+            cfg.slots = defaultSlots.map { slot in
+                var next = slot
+                if next.id == "lights" { next.enabled = true }
+                return next
+            }
+        }
+        if let value = hud["show_altitude"] as? Bool {
+            cfg.showAltitude = value
+        }
+        if let value = hud["show_faces"] as? Bool {
+            cfg.showFaces = value
+        }
+        if let density = hud["density"] as? String {
+            cfg.hudDensity = density.lowercased() == "compact" ? "compact" : "regular"
+        }
+        return cfg
+    }
+
+    func merging(live slots: [TraySlot]) -> DeskUIConfig {
+        var next = self
+        var seen = Set(next.slots.map(\.id))
+        for slot in slots where !seen.contains(slot.id) {
+            next.slots.append(UISlotPref(id: slot.id, enabled: true))
+            seen.insert(slot.id)
+        }
+        return next
+    }
+
+    func jsonObject() -> [String: Any] {
+        let lightsOn = lights || slots.contains(where: { $0.id == "lights" && $0.enabled })
+        return [
+            "tray": [
+                "density": trayDensity,
+                "lights": lightsOn,
+                "slots": slots.map { ["id": $0.id, "enabled": $0.enabled] as [String: Any] },
+            ],
+            "hud": [
+                "show_altitude": showAltitude,
+                "show_faces": showFaces,
+                "density": hudDensity,
+            ],
+        ]
+    }
+
+    static func apply(_ slots: [TraySlot], ui: DeskUIConfig) -> [TraySlot] {
+        let byID = Dictionary(slots.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var out: [TraySlot] = []
+        var used = Set<String>()
+        for pref in ui.slots {
+            used.insert(pref.id)
+            guard pref.enabled, var slot = byID[pref.id] else { continue }
+            slot = decorate(slot, ui: ui)
+            out.append(slot)
+        }
+        for slot in slots where !used.contains(slot.id) && slot.id != "lights" {
+            out.append(decorate(slot, ui: ui))
+        }
+        return out
+    }
+
+    private static func decorate(_ slot: TraySlot, ui: DeskUIConfig) -> TraySlot {
+        var next = slot
+        if !ui.showAltitude && next.id == "weather" {
+            next.detail = stripAltitude(next.detail)
+        }
+        if !ui.showFaces {
+            next.face = false
+        }
+        return next
+    }
+
+    private static func stripAltitude(_ detail: String?) -> String? {
+        guard let detail, !detail.isEmpty else { return nil }
+        let kept = detail.split(separator: "·").map { $0.trimmingCharacters(in: .whitespaces) }.filter { part in
+            let digits = part.dropLast()
+            return !(part.hasSuffix("m") && !digits.isEmpty && digits.allSatisfy(\.isNumber))
+        }
+        return kept.isEmpty ? nil : kept.joined(separator: " · ")
+    }
+}
+
+enum DeskUIConfigStore {
+    static func resolvePath(statusPath: String?) -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let preferred = home.appendingPathComponent(".config/desk-switch/config.json")
+        if let statusPath, !statusPath.isEmpty, statusPath != "(defaults)" {
+            return URL(fileURLWithPath: statusPath)
+        }
+        let legacy = home.appendingPathComponent(".config/hhkb-mx-follow/config.json")
+        if FileManager.default.isReadableFile(atPath: legacy.path),
+           !FileManager.default.isReadableFile(atPath: preferred.path)
+        {
+            return legacy
+        }
+        return preferred
+    }
+
+    static func save(_ ui: DeskUIConfig, to statusPath: String?) throws {
+        let dest = resolvePath(statusPath: statusPath)
+        try FileManager.default.createDirectory(
+            at: dest.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        var root: [String: Any] = [:]
+        if let data = try? Data(contentsOf: dest),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            root = obj
+        }
+        root["ui"] = ui.jsonObject()
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted])
+        try data.write(to: dest, options: .atomic)
     }
 }

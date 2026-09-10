@@ -339,6 +339,14 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("NSImage", src)
         self.assertIn("SlotGlyphMap", src)
         self.assertIn("SlotHUD", src)
+        self.assertIn("TraySettingsPanel", src)
+        self.assertIn("DeskUIConfig", src)
+        self.assertIn("DeskUIConfigStore", src)
+        self.assertIn("Configure tray", src)
+        self.assertIn("onMove", src)
+        self.assertIn(".config/desk-switch", src)
+        self.assertIn("show_altitude", src)
+        self.assertIn("show_faces", src)
         self.assertNotIn('slot.id == "kettle"', src)
         self.assertNotIn('slot.id == "weather"', src)
         self.assertNotIn("Fellow", src)
@@ -361,6 +369,9 @@ class BarWidgetSourceTests(unittest.TestCase):
         self.assertIn("slots", bar)
         self.assertIn("slotsTitle", bar)
         self.assertIn("slots", panel)
+        self.assertIn("uiConfig", bar)
+        self.assertIn("uiConfig", panel)
+        self.assertIn("TODO: Omarchy drag-reorder", bar)
         self.assertIn("faceSlotLabel", panel)
         self.assertIn("slotActions", panel)
         self.assertIn("hhkb_usb", bar)
@@ -625,6 +636,11 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertEqual(example["adapters"]["kettle"]["host"], "192.168.3.36")
         self.assertEqual(example["adapters"]["weather"]["backend"], "weather")
         self.assertFalse(example["ui"]["tray"]["lights"])
+        ids = [item["id"] for item in example["ui"]["tray"]["slots"]]
+        self.assertEqual(ids, ["weather", "kettle", "dualup", "lights"])
+        self.assertTrue(example["ui"]["hud"]["show_altitude"])
+        self.assertTrue(example["ui"]["hud"]["show_faces"])
+        self.assertEqual(example["ui"]["hud"]["density"], "regular")
 
     def test_display_id_from_adapter_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1955,6 +1971,199 @@ class WeatherAdapterTests(unittest.TestCase):
         self.assertEqual(data["slot"]["glyph"], "sun.max")
 
 
+class UIConfigTests(unittest.TestCase):
+    def test_parse_defaults_when_missing(self) -> None:
+        parsed = ds.parse_ui_section({})
+        self.assertEqual(parsed["tray_density"], "strip")
+        self.assertFalse(parsed["tray_lights"])
+        self.assertIsNone(parsed["slots"])
+        self.assertTrue(parsed["hud_show_altitude"])
+        self.assertTrue(parsed["hud_show_faces"])
+        self.assertEqual(parsed["hud_density"], "regular")
+        self.assertEqual(
+            [item["id"] for item in ds.default_tray_slot_prefs()],
+            ["weather", "kettle", "dualup", "lights"],
+        )
+        self.assertFalse(ds.default_tray_slot_prefs()[-1]["enabled"])
+
+    def test_parse_string_pin_is_exclusive(self) -> None:
+        parsed = ds.parse_ui_section({"tray": {"slots": ["kettle", "weather"]}})
+        self.assertTrue(parsed["slots_from_user"])
+        self.assertTrue(parsed["slots_exclusive"])
+        self.assertEqual(
+            [(item["id"], item["enabled"]) for item in parsed["slots"]],
+            [("kettle", True), ("weather", True)],
+        )
+
+    def test_parse_object_slots_and_hud(self) -> None:
+        parsed = ds.parse_ui_section(
+            {
+                "tray": {
+                    "density": "chips",
+                    "slots": [
+                        {"id": "dualup", "enabled": True},
+                        {"id": "weather", "enabled": False},
+                        {"id": "lights", "enabled": True},
+                    ],
+                },
+                "hud": {"show_altitude": False, "show_faces": "off", "density": "compact"},
+            }
+        )
+        self.assertEqual(parsed["tray_density"], "chips")
+        self.assertTrue(parsed["tray_lights"])
+        self.assertFalse(parsed["slots_exclusive"])
+        self.assertEqual(parsed["slots"][0]["id"], "dualup")
+        self.assertFalse(parsed["slots"][1]["enabled"])
+        self.assertFalse(parsed["hud_show_altitude"])
+        self.assertFalse(parsed["hud_show_faces"])
+        self.assertEqual(parsed["hud_density"], "compact")
+
+    def test_apply_slot_prefs_exclusive_and_object(self) -> None:
+        available = [
+            {"id": "weather", "label": "22°"},
+            {"id": "kettle", "label": "65°"},
+            {"id": "dualup", "label": "PBP"},
+        ]
+        exclusive = ds.apply_slot_prefs(
+            available,
+            [{"id": "kettle", "enabled": True}],
+            exclusive=True,
+        )
+        self.assertEqual([item["id"] for item in exclusive], ["kettle"])
+        ordered = ds.apply_slot_prefs(
+            available,
+            [
+                {"id": "dualup", "enabled": True},
+                {"id": "weather", "enabled": False},
+                {"id": "kettle", "enabled": True},
+            ],
+            exclusive=False,
+        )
+        self.assertEqual([item["id"] for item in ordered], ["dualup", "kettle"])
+
+    def test_apply_slot_prefs_appends_unknown_adapters(self) -> None:
+        available = [
+            {"id": "weather", "label": "22°"},
+            {"id": "espresso", "label": "90°"},
+        ]
+        out = ds.apply_slot_prefs(
+            available,
+            [{"id": "weather", "enabled": True}],
+            exclusive=False,
+        )
+        self.assertEqual([item["id"] for item in out], ["weather", "espresso"])
+
+    def test_apply_hud_prefs(self) -> None:
+        slots = [
+            {"id": "weather", "glyph": "cloud", "label": "19°", "detail": "Fog · 12m"},
+            {"id": "kettle", "glyph": "mug", "label": "40°", "face": True},
+        ]
+        out = ds.apply_hud_prefs(
+            slots, {"_hud_show_altitude": False, "_hud_show_faces": False}
+        )
+        self.assertEqual(out[0]["detail"], "Fog")
+        self.assertNotIn("face", out[1])
+
+    def test_load_config_object_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "ui": {
+                            "tray": {
+                                "slots": [
+                                    {"id": "kettle", "enabled": True},
+                                    {"id": "weather", "enabled": False},
+                                ]
+                            },
+                            "hud": {"density": "compact", "show_altitude": False},
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)):
+                cfg = ds.load_config()
+        self.assertEqual(cfg["_ui_slots"][0]["id"], "kettle")
+        self.assertFalse(cfg["_ui_slots"][1]["enabled"])
+        self.assertFalse(cfg["_ui_slots_exclusive"])
+        self.assertFalse(cfg["_hud_show_altitude"])
+        self.assertEqual(ds.hud_density(cfg), "compact")
+        public = ds.format_public_ui(cfg)
+        self.assertEqual(public["hud"]["density"], "compact")
+        self.assertEqual(public["tray"]["slots"][0]["id"], "kettle")
+
+    def test_write_ui_config_merges_without_clobbering_adapters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "desk-switch" / "config.json"
+            dest.parent.mkdir()
+            dest.write_text(
+                json.dumps(
+                    {
+                        "adapters": {"kettle": {"host": "10.0.0.8"}},
+                        "ui": {"tray": {"density": "strip"}},
+                    }
+                )
+            )
+            ds.write_ui_config(
+                {
+                    "tray": {
+                        "density": "chips",
+                        "slots": [
+                            {"id": "dualup", "enabled": True},
+                            {"id": "weather", "enabled": True},
+                            {"id": "kettle", "enabled": False},
+                        ],
+                    },
+                    "hud": {"show_faces": False, "density": "compact"},
+                },
+                dest,
+            )
+            data = json.loads(dest.read_text())
+        self.assertEqual(data["adapters"]["kettle"]["host"], "10.0.0.8")
+        self.assertEqual(data["ui"]["tray"]["density"], "chips")
+        self.assertEqual(data["ui"]["tray"]["slots"][0]["id"], "dualup")
+        self.assertFalse(data["ui"]["hud"]["show_faces"])
+        self.assertEqual(data["ui"]["hud"]["density"], "compact")
+
+    def test_status_json_echoes_normalized_ui(self) -> None:
+        env = os.environ.copy()
+        env["PATH"] = "/usr/bin:/bin"
+        env["DESK_SWITCH_WEATHER_URL"] = ""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env["HOME"] = str(home)
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "this_host": "linux",
+                        "mxswitch": "/no/such/mxswitch",
+                        "lgdualup": "lgdualup-missing",
+                        "ui": {
+                            "tray": {"slots": ["weather"]},
+                            "hud": {"show_altitude": False},
+                        },
+                    }
+                )
+            )
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertIn("slots", data["ui"]["tray"])
+        self.assertEqual(data["ui"]["tray"]["slots"][0]["id"], "weather")
+        self.assertTrue(data["ui"]["tray"]["slots"][0]["enabled"])
+        hidden = {item["id"]: item["enabled"] for item in data["ui"]["tray"]["slots"]}
+        self.assertFalse(hidden["kettle"])
+        self.assertFalse(data["ui"]["hud"]["show_altitude"])
+
+
 class SlotComposeTests(unittest.TestCase):
     def test_collect_slots_weather_kettle_display(self) -> None:
         state = {
@@ -2012,6 +2221,46 @@ class SlotComposeTests(unittest.TestCase):
         }
         slots = ds.collect_slots(state, {"_tray_slots": ["kettle"]})
         self.assertEqual([item["id"] for item in slots], ["kettle"])
+
+    def test_tray_slots_object_order_and_hide(self) -> None:
+        state = {
+            "dualup_mode": "pbp",
+            "adapters": {
+                "weather": {"slot": {"id": "weather", "glyph": "cloud", "label": "19°", "detail": "Cloudy · 780m"}},
+                "kettle": {"slot": {"id": "kettle", "glyph": "mug", "label": "40°", "face": True}},
+            },
+        }
+        prefs = [
+            {"id": "dualup", "enabled": True},
+            {"id": "weather", "enabled": True},
+            {"id": "kettle", "enabled": False},
+        ]
+        slots = ds.collect_slots(state, {"_ui_slots": prefs, "_ui_slots_exclusive": False})
+        self.assertEqual([item["id"] for item in slots], ["dualup", "weather"])
+
+    def test_hud_prefs_strip_altitude_and_faces(self) -> None:
+        state = {
+            "dualup_mode": "unknown",
+            "adapters": {
+                "weather": {
+                    "slot": {
+                        "id": "weather",
+                        "glyph": "cloud",
+                        "label": "19°",
+                        "detail": "Cloudy · 780m",
+                    }
+                },
+                "kettle": {
+                    "slot": {"id": "kettle", "glyph": "mug", "label": "40°", "face": True}
+                },
+            },
+        }
+        slots = ds.collect_slots(
+            state, {"_hud_show_altitude": False, "_hud_show_faces": False}
+        )
+        self.assertEqual([item["id"] for item in slots], ["weather", "kettle"])
+        self.assertEqual(slots[0]["detail"], "Cloudy")
+        self.assertNotIn("face", slots[1])
 
     def test_status_json_includes_slots_and_legacy_keys(self) -> None:
         env = os.environ.copy()
