@@ -15,6 +15,9 @@ Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 `lgdualup` (DualUp USB HID — `macos/lgdualup.c`, `linux/lgdualup.sh`, udev
 rule), Omarchy bar plugin, macOS menu bar app, LaunchAgent / systemd units.
 
+**RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
+(draft — architecture only, no code yet).
+
 The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
 (`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS
 resolution/rotation (`dualup-layout` via displayplacer on macOS, hyprctl on
