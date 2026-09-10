@@ -194,6 +194,7 @@ adapters/
   mxswitch/          # mouse reference (C + Python, as now)
   lgdualup/          # display reference: lgdualup + dualup-layout + udev
   hhkb/              # keyboard.presence reference (new; replaces in-core probe)
+  alexa/             # smarthome reference (devices + light on/off via alexacli)
 crates/              # or core/ — Rust workspace once phase 2 starts
   desk-switch-core/
   desk-switch/       # CLI bin
@@ -353,6 +354,7 @@ live *inside* core as the client API; the wire is argv + JSON.
 | `mouse` | `mouse.host_switch` | `mxswitch` | `adapters.mouse` |
 | `keyboard` | `keyboard.presence` (and follow policy in core) | `hhkb` | in-process today |
 | `display` | `display.input` / `pbp` / `full`, `layout.apply` | `lgdualup` | `adapters.dualup` |
+| `smarthome` | `smarthome.list` / `smarthome.status` / `light.on` / `light.off` | `alexa` | `adapters.smarthome` |
 | `hosts` | config only — no binary | — | `adapters.hosts` |
 
 Swap DualUp for another PBP/KVM by dropping a different display adapter
@@ -370,6 +372,9 @@ find it). Core does not change.
 | `display.pbp` | Split / assign Main+Sub | `lgdualup pbp` + `pbp-assign` |
 | `display.full` | One input, full panel | `lgdualup pbp full` |
 | `layout.apply` | OS resolution / rotation for a named profile | owned by the **display** adapter (`dualup-layout` binary today) |
+| `smarthome.list` | List speakers / entities the adapter can address | `alexa` `list` (`alexacli devices` today; entity list when it works) |
+| `smarthome.status` | Light-oriented snapshot (last command or entity state) | `alexa` `info` / `status` |
+| `light.on` / `light.off` | Turn a configured light on or off | `alexa` `on` / `off` (fixed spoken phrases + Echo `-d`) |
 
 Core orchestration (`to`, `full`, `pbp`, `watch`) asks the registry for
 capabilities, not for "the DualUp code path". A KVM that only hops USB
@@ -479,7 +484,7 @@ Scan `$DESK_SWITCH_LIB` for manifests in phase 1. A third-party-shaped
 adapter (binary + `*.manifest.json`) that lists a role's capabilities
 must be findable without a core patch.
 
-For each *role* (`mouse`, `display` / legacy `dualup`, `keyboard`):
+For each *role* (`mouse`, `display` / legacy `dualup`, `keyboard`, `smarthome`):
 
 1. `adapters.<role>.enabled == false` → skip
 2. `adapters.<role>.path` if executable → use it (still read its

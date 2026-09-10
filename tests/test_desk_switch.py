@@ -94,6 +94,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("to mac", proc.stdout)
         self.assertIn("watch", proc.stdout)
+        self.assertIn("smarthome", proc.stdout)
 
     def test_legacy_wrapper_help(self) -> None:
         proc = subprocess.run(
@@ -183,7 +184,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data["adapters"]["dualup"]["backend"], "lgdualup")
         self.assertEqual(data["adapters"]["display"]["backend"], "lgdualup")
         self.assertIn("keyboard", data["adapters"])
+        self.assertIn("smarthome", data["adapters"])
         self.assertIn("discovered", data["adapters"])
+        self.assertEqual(data["adapters"]["smarthome"]["backend"], "alexa")
+        self.assertNotIn("lights", data["bar_strip"])
         self.assertIn("bar_strip", data)
         self.assertIn("focus", data["bar_strip"])
         self.assertEqual(data["ui"]["tray"]["density"], "strip")
@@ -593,6 +597,9 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertEqual(inputs["mac"], "hdmi1")
         self.assertEqual(inputs["linux"], "dp")
         self.assertNotEqual(inputs["mac"], "usbc")
+        self.assertEqual(example["adapters"]["smarthome"]["backend"], "alexa")
+        self.assertEqual(example["adapters"]["smarthome"]["device"], "Escritório")
+        self.assertFalse(example["ui"]["tray"]["lights"])
 
     def test_display_id_from_adapter_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1495,18 +1502,278 @@ class AdapterDiscoveryTests(unittest.TestCase):
                 self.assertEqual(ds.resolve_backend_id("unifying"), helper)
 
     def test_reference_manifests_exist(self) -> None:
-        for name in ("mxswitch", "lgdualup", "hhkb"):
+        for name in ("mxswitch", "lgdualup", "hhkb", "alexa"):
             raw = json.loads((ROOT / "adapters" / name / "manifest.json").read_text())
             self.assertEqual(raw["api_version"], 1)
             self.assertEqual(raw["id"], name)
+        alexa = json.loads((ROOT / "adapters" / "alexa" / "manifest.json").read_text())
+        for cap in ("smarthome.list", "smarthome.status", "light.on", "light.off"):
+            self.assertIn(cap, alexa["capabilities"])
 
     def test_makefile_installs_from_adapters_tree(self) -> None:
         text = (ROOT / "Makefile").read_text()
         self.assertIn("adapters/mxswitch/macos/mxswitch.c", text)
         self.assertIn("adapters/lgdualup/macos/lgdualup.c", text)
         self.assertIn("adapters/hhkb/hhkb.py", text)
+        self.assertIn("adapters/alexa/alexa.py", text)
         self.assertIn("$(LIBDIR)/mxswitch.manifest.json", text)
+        self.assertIn("$(LIBDIR)/alexa.manifest.json", text)
         self.assertIn("$(LIBDIR)/mxswitch", text)
+
+
+class AlexaAdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "alexa_adapter", ROOT / "adapters" / "alexa" / "alexa.py"
+        )
+        cls.alexa = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.alexa)
+
+    def test_parse_devices_json_array(self) -> None:
+        raw = json.dumps([{"name": "Sala"}, {"name": "Escritório"}])
+        names = [item["name"] for item in self.alexa.parse_devices_payload(raw)]
+        self.assertEqual(names, ["Sala", "Escritório"])
+
+    def test_empty_smarthome_json_raises(self) -> None:
+        with self.assertRaises(json.JSONDecodeError):
+            self.alexa.parse_devices_payload("{}")
+        with self.assertRaises(json.JSONDecodeError):
+            self.alexa.parse_devices_payload("")
+
+    def test_utterance_rejects_device_name(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.alexa.utterance_for("on", "acender a luz do escritório", "Escritório")
+        self.assertEqual(
+            self.alexa.utterance_for("on", "acender a luz", "Escritório"),
+            "acender a luz",
+        )
+        self.assertEqual(
+            self.alexa.utterance_for("off", "apagar a luz", "Escritório"),
+            "apagar a luz",
+        )
+
+    def test_on_off_argv_is_safe_phrase_plus_device_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bindir = home / "bin"
+            bindir.mkdir()
+            log = home / "alexacli.log"
+            cli = bindir / "alexacli"
+            cli.write_text(
+                "#!/bin/sh\n"
+                f'printf "%s\\n" "$@" > {shlex.quote(str(log))}\n'
+                "exit 0\n"
+            )
+            cli.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bindir}:/usr/bin:/bin"
+            env["HOME"] = str(home)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            env["ALEXA_CLI_CONFIG"] = str(home / "missing-alexa-config.json")
+            for verb, phrase in (("on", "acender a luz"), ("off", "apagar a luz")):
+                proc = subprocess.run(
+                    [sys.executable, str(ROOT / "adapters" / "alexa" / "alexa.py"), verb],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                data = json.loads(proc.stdout)
+                self.assertEqual(data["phrase"], phrase)
+                self.assertEqual(data["device"], "Escritório")
+                self.assertEqual(data["argv"], ["command", phrase, "-d", "Escritório"])
+                recorded = log.read_text().split()
+                self.assertEqual(recorded, ["command", *phrase.split(), "-d", "Escritório"])
+                self.assertNotIn("escritório", phrase.lower())
+                self.assertNotIn("escritorio", self.alexa.fold_text(phrase))
+
+    def test_list_prefers_devices_when_smarthome_json_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bindir = home / "bin"
+            bindir.mkdir()
+            cli = bindir / "alexacli"
+            cli.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = devices ]; then\n'
+                '  echo \'[{"name":"Sala"},{"name":"Escritório"}]\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "echo '{}'\n"
+                "exit 0\n"
+            )
+            cli.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bindir}:/usr/bin:/bin"
+            env["HOME"] = str(home)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "adapters" / "alexa" / "alexa.py"), "list"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            data = json.loads(proc.stdout)
+            self.assertEqual([item["name"] for item in data["devices"]], ["Sala", "Escritório"])
+            self.assertEqual(data["list_source"], "devices")
+            self.assertFalse(data["smarthome_list"]["ok"])
+
+    def test_core_forwards_smarthome_verbs_without_amazon_utterances(self) -> None:
+        src = (ROOT / "desk-switch.py").read_text()
+        self.assertNotIn("acender a luz", src)
+        self.assertNotIn("apagar a luz", src)
+        self.assertNotIn("amazon.com", src)
+        self.assertNotIn("alexacli command", src)
+        parser = ds.build_parser()
+        args = parser.parse_args(["smarthome", "on"])
+        self.assertEqual(args.cmd, "smarthome")
+        self.assertEqual(args.verb, "on")
+        args = parser.parse_args(["smarthome", "list", "--json"])
+        self.assertTrue(args.json)
+
+    def test_status_json_includes_smarthome_role(self) -> None:
+        env = os.environ.copy()
+        env["PATH"] = "/usr/bin:/bin"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            lib = home / "lib"
+            lib.mkdir()
+            helper = lib / "alexa"
+            helper.write_bytes((ROOT / "adapters" / "alexa" / "alexa.py").read_bytes())
+            helper.chmod(0o755)
+            (lib / "alexa.manifest.json").write_text(
+                (ROOT / "adapters" / "alexa" / "manifest.json").read_text()
+            )
+            env["HOME"] = str(home)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            env["DESK_SWITCH_LIB"] = str(lib)
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "this_host": "mac",
+                        "adapters": {
+                            "smarthome": {"enabled": True, "backend": "alexa"},
+                            "dualup": {"enabled": False},
+                        },
+                    }
+                )
+            )
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        home_ad = data["adapters"]["smarthome"]
+        self.assertEqual(home_ad["backend"], "alexa")
+        self.assertTrue(home_ad["available"])
+        self.assertIn("smarthome.list", home_ad["capabilities"])
+        self.assertTrue(any(item["id"] == "alexa" for item in data["adapters"]["discovered"]))
+        self.assertNotIn("lights", data["bar_strip"])
+        lights = home_ad.get("lights") or []
+        self.assertTrue(lights)
+        self.assertEqual(lights[0]["speaker"], "Escritório")
+        self.assertEqual(lights[0]["on_phrase"], "acender a luz")
+
+    def test_smarthome_cli_on_invokes_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            lib = Path(tmp) / "lib"
+            lib.mkdir()
+            helper = lib / "alexa"
+            state = home / "invoked.json"
+            helper.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                f"json.dump(sys.argv[1:], open({state.as_posix()!r}, 'w'))\n"
+                "print(json.dumps({'ok': True, 'verb': sys.argv[1], "
+                "'phrase': 'acender a luz', 'device': 'Escritório'}))\n"
+            )
+            helper.chmod(0o755)
+            (lib / "alexa.manifest.json").write_text(
+                (ROOT / "adapters" / "alexa" / "manifest.json").read_text()
+            )
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "this_host": "mac",
+                        "adapters": {
+                            "smarthome": {"enabled": True, "backend": "alexa"},
+                            "dualup": {"enabled": False},
+                        },
+                    }
+                )
+            )
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["PATH"] = "/usr/bin:/bin"
+            env["DESK_SWITCH_LIB"] = str(lib)
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "smarthome", "on"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("acender a luz", proc.stdout)
+            self.assertEqual(json.loads(state.read_text())[0], "on")
+
+    def test_smarthome_disabled_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps({"adapters": {"smarthome": {"enabled": False}}})
+            )
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["PATH"] = "/usr/bin:/bin"
+            env["DESK_SWITCH_LIB"] = str(home / "empty-lib")
+            (home / "empty-lib").mkdir()
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "smarthome", "list"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("smarthome adapter not found", proc.stdout)
+
+    def test_bar_strip_lights_opt_in_only(self) -> None:
+        state = {
+            "target_hint": "MAC",
+            "dualup_mode": "unknown",
+            "adapters": {"smarthome": {"lights": [{"state": "on"}]}},
+        }
+        self.assertNotIn("lights", ds.format_bar_strip(state))
+        state["_tray_lights"] = True
+        self.assertEqual(ds.format_bar_strip(state)["lights"], "on")
+
+    def test_bind_smarthome_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Path(tmp) / "lib"
+            lib.mkdir()
+            helper = lib / "alexa"
+            helper.write_text("#!/bin/sh\n")
+            helper.chmod(0o755)
+            (lib / "alexa.manifest.json").write_text(
+                (ROOT / "adapters" / "alexa" / "manifest.json").read_text()
+            )
+            cfg = {"_smarthome_enabled": True, "_smarthome_backend": "alexa"}
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                bound = ds.bind_role(cfg, "smarthome")
+        self.assertEqual(bound["id"], "alexa")
+        self.assertEqual(bound["source"], "backend")
+        self.assertIn("light.on", bound["capabilities"])
 
 
 if __name__ == "__main__":

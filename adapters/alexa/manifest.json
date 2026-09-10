@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "alexa",
+  "name": "Alexa smart home",
+  "capabilities": ["smarthome.list", "smarthome.status", "light.on", "light.off"]
+}

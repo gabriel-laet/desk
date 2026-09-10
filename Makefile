@@ -46,9 +46,11 @@ else
 	install -m 755 adapters/lgdualup/linux/dualup-layout $(LIBDIR)/dualup-layout
 endif
 	install -m 755 adapters/hhkb/hhkb.py $(LIBDIR)/hhkb
+	install -m 755 adapters/alexa/alexa.py $(LIBDIR)/alexa
 	install -m 644 adapters/mxswitch/manifest.json $(LIBDIR)/mxswitch.manifest.json
 	install -m 644 adapters/lgdualup/manifest.json $(LIBDIR)/lgdualup.manifest.json
 	install -m 644 adapters/hhkb/manifest.json $(LIBDIR)/hhkb.manifest.json
+	install -m 644 adapters/alexa/manifest.json $(LIBDIR)/alexa.manifest.json
 	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/mxswitch
 	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/lgdualup
 	@if [ ! -f $(CONFDIR)/config.json ] && [ ! -f $(CONFDIR_NEW)/config.json ]; then \
@@ -65,7 +67,7 @@ endif
 		echo "wrote $(CONFDIR_NEW)/config.json — set adapters.dualup.inputs from desk-switch status / DualUp --list"; \
 	fi
 	@echo "installed $(BINDIR)/desk-switch"
-	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb"
+	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb  $(LIBDIR)/alexa"
 	@echo "  manifests: $(LIBDIR)/*.manifest.json"
 	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/hhkb-mx-follow"
 	@echo "Linux mouse hidraw: sudo cp adapters/mxswitch/linux/42-logitech-hidpp.rules /etc/udev/rules.d/"
@@ -76,8 +78,8 @@ endif
 
 uninstall:
 	rm -f $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow $(BINDIR)/mxswitch $(BINDIR)/lgdualup
-	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout $(LIBDIR)/hhkb
-	rm -f $(LIBDIR)/mxswitch.manifest.json $(LIBDIR)/lgdualup.manifest.json $(LIBDIR)/hhkb.manifest.json
+	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout $(LIBDIR)/hhkb $(LIBDIR)/alexa
+	rm -f $(LIBDIR)/mxswitch.manifest.json $(LIBDIR)/lgdualup.manifest.json $(LIBDIR)/hhkb.manifest.json $(LIBDIR)/alexa.manifest.json
 
 menubar:
 ifeq ($(UNAME),Darwin)
