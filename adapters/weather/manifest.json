@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "weather",
+  "name": "Open-Meteo ambient",
+  "capabilities": ["weather.status"]
+}

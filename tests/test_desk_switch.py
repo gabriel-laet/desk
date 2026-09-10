@@ -94,6 +94,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("to mac", proc.stdout)
         self.assertIn("watch", proc.stdout)
+        self.assertIn("kettle", proc.stdout)
+        self.assertIn("weather", proc.stdout)
         self.assertIn("smarthome", proc.stdout)
 
     def test_legacy_wrapper_help(self) -> None:
@@ -144,6 +146,7 @@ class CliTests(unittest.TestCase):
     def test_status_json_and_hint(self) -> None:
         env = os.environ.copy()
         env["PATH"] = "/usr/bin:/bin"
+        env["DESK_SWITCH_WEATHER_URL"] = ""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             env["HOME"] = str(home)
@@ -190,6 +193,10 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("lights", data["bar_strip"])
         self.assertIn("bar_strip", data)
         self.assertIn("focus", data["bar_strip"])
+        self.assertIn("slots", data)
+        self.assertIsInstance(data["slots"], list)
+        self.assertIn("kettle", data["adapters"])
+        self.assertIn("weather", data["adapters"])
         self.assertEqual(data["ui"]["tray"]["density"], "strip")
 
     def test_switch_rejects_bad_channel(self) -> None:
@@ -327,6 +334,14 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("bar_strip", src)
         self.assertIn("stripTitle", src)
         self.assertIn("density", src)
+        self.assertIn("slots", src)
+        self.assertIn("MenuBarStatusItemRenderer", src)
+        self.assertIn("NSImage", src)
+        self.assertIn("SlotGlyphMap", src)
+        self.assertIn("SlotHUD", src)
+        self.assertNotIn('slot.id == "kettle"', src)
+        self.assertNotIn('slot.id == "weather"', src)
+        self.assertNotIn("Fellow", src)
         self.assertIn("hhkb_usb", src)
         self.assertIn("hhkb_transport", src)
         self.assertIn("USB on this host", src)
@@ -341,6 +356,11 @@ class BarWidgetSourceTests(unittest.TestCase):
         self.assertIn("bar_label", bar)
         self.assertIn("bar_strip", bar)
         self.assertIn("stripTitle", bar)
+        self.assertIn("slots", bar)
+        self.assertIn("slotsTitle", bar)
+        self.assertIn("slots", panel)
+        self.assertIn("faceSlotLabel", panel)
+        self.assertIn("slotActions", panel)
         self.assertIn("hhkb_usb", bar)
         self.assertIn("status --json", bar)
         self.assertIn("USB on this host", panel)
@@ -599,6 +619,9 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertNotEqual(inputs["mac"], "usbc")
         self.assertEqual(example["adapters"]["smarthome"]["backend"], "alexa")
         self.assertEqual(example["adapters"]["smarthome"]["device"], "Escritório")
+        self.assertEqual(example["adapters"]["kettle"]["backend"], "kettle")
+        self.assertEqual(example["adapters"]["kettle"]["host"], "192.168.3.36")
+        self.assertEqual(example["adapters"]["weather"]["backend"], "weather")
         self.assertFalse(example["ui"]["tray"]["lights"])
 
     def test_display_id_from_adapter_config(self) -> None:
@@ -1300,6 +1323,7 @@ class DualupModeDetectTests(unittest.TestCase):
     def test_status_json_exports_transport_fields(self) -> None:
         env = os.environ.copy()
         env["PATH"] = "/usr/bin:/bin"
+        env["DESK_SWITCH_WEATHER_URL"] = ""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             env["HOME"] = str(home)
@@ -1432,6 +1456,7 @@ class AdapterDiscoveryTests(unittest.TestCase):
             env["DESK_SWITCH_LIB"] = str(lib)
             env["DUMMY_MOUSE_STATE"] = str(state)
             env["XDG_CACHE_HOME"] = str(home / "cache")
+            env["DESK_SWITCH_WEATHER_URL"] = ""
             proc = subprocess.run(
                 [sys.executable, str(ROOT / "desk-switch.py"), "to", "linux", "--mouse-only"],
                 capture_output=True,
@@ -1502,13 +1527,18 @@ class AdapterDiscoveryTests(unittest.TestCase):
                 self.assertEqual(ds.resolve_backend_id("unifying"), helper)
 
     def test_reference_manifests_exist(self) -> None:
-        for name in ("mxswitch", "lgdualup", "hhkb", "alexa"):
+        for name in ("mxswitch", "lgdualup", "hhkb", "alexa", "kettle", "weather"):
             raw = json.loads((ROOT / "adapters" / name / "manifest.json").read_text())
             self.assertEqual(raw["api_version"], 1)
             self.assertEqual(raw["id"], name)
         alexa = json.loads((ROOT / "adapters" / "alexa" / "manifest.json").read_text())
         for cap in ("smarthome.list", "smarthome.status", "light.on", "light.off"):
             self.assertIn(cap, alexa["capabilities"])
+        kettle = json.loads((ROOT / "adapters" / "kettle" / "manifest.json").read_text())
+        for cap in ("appliance.status", "appliance.heat", "appliance.off"):
+            self.assertIn(cap, kettle["capabilities"])
+        weather = json.loads((ROOT / "adapters" / "weather" / "manifest.json").read_text())
+        self.assertIn("weather.status", weather["capabilities"])
 
     def test_makefile_installs_from_adapters_tree(self) -> None:
         text = (ROOT / "Makefile").read_text()
@@ -1516,8 +1546,12 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("adapters/lgdualup/macos/lgdualup.c", text)
         self.assertIn("adapters/hhkb/hhkb.py", text)
         self.assertIn("adapters/alexa/alexa.py", text)
+        self.assertIn("adapters/kettle/kettle.py", text)
+        self.assertIn("adapters/weather/weather.py", text)
         self.assertIn("$(LIBDIR)/mxswitch.manifest.json", text)
         self.assertIn("$(LIBDIR)/alexa.manifest.json", text)
+        self.assertIn("$(LIBDIR)/kettle.manifest.json", text)
+        self.assertIn("$(LIBDIR)/weather.manifest.json", text)
         self.assertIn("$(LIBDIR)/mxswitch", text)
 
 
@@ -1649,6 +1683,7 @@ class AlexaAdapterTests(unittest.TestCase):
             env["HOME"] = str(home)
             env["XDG_CACHE_HOME"] = str(home / "cache")
             env["DESK_SWITCH_LIB"] = str(lib)
+            env["DESK_SWITCH_WEATHER_URL"] = ""
             cfg_dir = home / ".config" / "desk-switch"
             cfg_dir.mkdir(parents=True)
             (cfg_dir / "config.json").write_text(
@@ -1776,6 +1811,297 @@ class AlexaAdapterTests(unittest.TestCase):
         self.assertIn("light.on", bound["capabilities"])
 
 
+class KettleAdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "kettle_adapter", ROOT / "adapters" / "kettle" / "kettle.py"
+        )
+        cls.kettle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.kettle)
+
+    def test_parse_state_body(self) -> None:
+        body = (
+            "<html><form></form></html>\n"
+            "mode=S_Heat\n"
+            "tempr=45.2 C\n"
+            "temprT=96 C\n"
+            "I (35106409) Cli: command 'state' ret 0\n"
+        )
+        parsed = self.kettle.parse_kettle_body(body)
+        self.assertEqual(parsed["field_map"]["mode"], "S_Heat")
+        self.assertEqual(parsed["field_map"]["tempr"], "45.2 C")
+        self.assertEqual(parsed["ret"], 0)
+        snap = self.kettle.snapshot_from(parsed)
+        self.assertEqual(snap["mode"], "heating")
+        self.assertTrue(snap["is_active"])
+        self.assertEqual(self.kettle.temperature_display(snap["current"]), "45°C")
+        self.assertEqual(self.kettle.temperature_compact(snap["target"]), "96°")
+
+    def test_parse_settings_altitude(self) -> None:
+        body = "st: altitude=780 m\nst: units=C\nI (1) Cli: command 'prtsettings' ret 0\n"
+        settings = self.kettle.settings_from_body(body)
+        self.assertEqual(settings["altitude_meters"], 780)
+        self.assertEqual(settings["fields"]["units"], "C")
+
+    def test_commands_and_modes(self) -> None:
+        self.assertEqual(self.kettle.heat_commands("93"), ["setunitsc", "setsettingd settempr 93", "heaton"])
+        self.assertEqual(self.kettle.off_commands()[0], "heatoff")
+        self.assertEqual(self.kettle.kettle_mode_from("S_Hold"), "holding")
+        self.assertEqual(self.kettle.kettle_mode_from("S_Off"), "off")
+
+    def test_info_without_host_does_not_probe(self) -> None:
+        env = os.environ.copy()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env["HOME"] = str(home)
+            env["XDG_CONFIG_HOME"] = str(home / "cfg")
+            env.pop("KETTLE_HOST", None)
+            env.pop("FELLOW_HOST", None)
+            env.pop("STAGG_HOST", None)
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "adapters" / "kettle" / "kettle.py"), "info"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertFalse(data["reachable"])
+        self.assertIsNone(data["host"])
+        self.assertNotIn("slot", data)
+
+    def test_slot_from_heating_snapshot(self) -> None:
+        snap = {
+            "mode": "heating",
+            "mode_title": "Heating",
+            "is_active": True,
+            "current": {"value": 65.0, "unit": "C"},
+            "target": {"value": 96.0, "unit": "C"},
+        }
+        slot = self.kettle.slot_from_snapshot(snap, host="192.168.3.36")
+        self.assertEqual(slot["id"], "kettle")
+        self.assertEqual(slot["glyph"], "flame")
+        self.assertEqual(slot["label"], "65°")
+        self.assertTrue(slot["hot"])
+        self.assertTrue(slot["face"])
+        self.assertIn("heat", slot["actions"][0]["argv"])
+
+
+class WeatherAdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "weather_adapter", ROOT / "adapters" / "weather" / "weather.py"
+        )
+        cls.weather = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.weather)
+
+    def test_parse_open_meteo(self) -> None:
+        payload = {
+            "elevation": 780.4,
+            "current_units": {"temperature_2m": "°C"},
+            "current": {"temperature_2m": 22.2, "weather_code": 61, "is_day": 1},
+        }
+        parsed = self.weather.parse_open_meteo(payload)
+        self.assertEqual(parsed["mood_title"], "Rain")
+        self.assertEqual(parsed["altitude_m"], 780)
+        self.assertEqual(self.weather.weather_glyph(61, True), "cloud.rain")
+
+    def test_disabled_url_skips_network(self) -> None:
+        env = os.environ.copy()
+        with tempfile.TemporaryDirectory() as tmp:
+            env["HOME"] = str(tmp)
+            env["DESK_SWITCH_WEATHER_URL"] = ""
+            env["DESK_SWITCH_WEATHER_CACHE"] = str(Path(tmp) / "wx.json")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "adapters" / "weather" / "weather.py"), "info"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        data = json.loads(proc.stdout)
+        self.assertFalse(data["reachable"])
+        self.assertNotIn("slot", data)
+
+    def test_slot_from_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "wx.json"
+            cache.write_text(
+                json.dumps(
+                    {
+                        "elevation": 760,
+                        "current": {"temperature_2m": 18, "weather_code": 0, "is_day": 1},
+                        "cached_at": 1e18,
+                    }
+                )
+            )
+            env = os.environ.copy()
+            env["HOME"] = str(tmp)
+            env["DESK_SWITCH_WEATHER_CACHE"] = str(cache)
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "adapters" / "weather" / "weather.py"), "info"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertTrue(data["reachable"])
+        self.assertEqual(data["slot"]["id"], "weather")
+        self.assertEqual(data["slot"]["label"], "18°")
+        self.assertEqual(data["slot"]["glyph"], "sun.max")
+
+
+class SlotComposeTests(unittest.TestCase):
+    def test_collect_slots_weather_kettle_display(self) -> None:
+        state = {
+            "dualup_mode": "pbp",
+            "adapters": {
+                "weather": {
+                    "enabled": True,
+                    "slot": {"id": "weather", "glyph": "cloud.rain", "label": "22°", "detail": "780m"},
+                },
+                "kettle": {
+                    "enabled": True,
+                    "slot": {
+                        "id": "kettle",
+                        "glyph": "mug",
+                        "label": "65°",
+                        "hot": False,
+                        "face": True,
+                        "actions": [{"label": "Heat", "argv": ["kettle", "heat", "93"]}],
+                    },
+                },
+            },
+        }
+        slots = ds.collect_slots(state, {})
+        self.assertEqual([item["id"] for item in slots], ["weather", "kettle", "dualup"])
+        self.assertEqual(slots[0]["label"], "22°")
+        self.assertEqual(slots[1]["glyph"], "mug")
+        self.assertEqual(slots[2]["label"], "PBP")
+        self.assertEqual(slots[1]["actions"][0]["argv"], ["kettle", "heat", "93"])
+
+    def test_weather_slot_survives_offline_kettle(self) -> None:
+        state = {
+            "dualup_mode": "unknown",
+            "adapters": {
+                "weather": {
+                    "enabled": True,
+                    "reachable": True,
+                    "slot": {"id": "weather", "glyph": "cloud", "label": "19°"},
+                },
+                "kettle": {"enabled": True, "reachable": False, "error": "unreachable"},
+            },
+        }
+        slots = ds.collect_slots(state, {})
+        self.assertEqual([item["id"] for item in slots], ["weather"])
+
+    def test_missing_adapters_omit_slots(self) -> None:
+        self.assertEqual(ds.collect_slots({"dualup_mode": "unknown", "adapters": {}}, {}), [])
+
+    def test_tray_slots_pin(self) -> None:
+        state = {
+            "dualup_mode": "full",
+            "adapters": {
+                "weather": {"slot": {"id": "weather", "glyph": "sun.max", "label": "20°"}},
+                "kettle": {"slot": {"id": "kettle", "glyph": "mug", "label": "40°"}},
+            },
+        }
+        slots = ds.collect_slots(state, {"_tray_slots": ["kettle"]})
+        self.assertEqual([item["id"] for item in slots], ["kettle"])
+
+    def test_status_json_includes_slots_and_legacy_keys(self) -> None:
+        env = os.environ.copy()
+        env["PATH"] = "/usr/bin:/bin"
+        env["DESK_SWITCH_WEATHER_URL"] = ""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env["HOME"] = str(home)
+            env["DESK_SWITCH_WEATHER_CACHE"] = str(home / "wx.json")
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            lib = home / "lib"
+            lib.mkdir()
+            kettle = lib / "kettle"
+            kettle.write_text(
+                "#!/bin/sh\n"
+                "python3 - <<'PY'\n"
+                "import json\n"
+                "print(json.dumps({\n"
+                '  "id": "kettle", "reachable": True, "host": "192.168.3.36",\n'
+                '  "temp_c": 65, "target_c": 96, "mode": "holding", "hot": True,\n'
+                '  "slot": {"id": "kettle", "glyph": "flame", "label": "65°", "hot": True, "face": True}\n'
+                "}))\n"
+                "PY\n"
+            )
+            kettle.chmod(0o755)
+            weather = lib / "weather"
+            weather.write_text(
+                "#!/bin/sh\n"
+                "python3 - <<'PY'\n"
+                "import json\n"
+                "print(json.dumps({\n"
+                '  "id": "weather", "reachable": True, "temp_c": 22, "altitude_m": 780,\n'
+                '  "slot": {"id": "weather", "glyph": "cloud.rain", "label": "22°", "detail": "780m"}\n'
+                "}))\n"
+                "PY\n"
+            )
+            weather.chmod(0o755)
+            (lib / "kettle.manifest.json").write_text(
+                (ROOT / "adapters" / "kettle" / "manifest.json").read_text()
+            )
+            (lib / "weather.manifest.json").write_text(
+                (ROOT / "adapters" / "weather" / "manifest.json").read_text()
+            )
+            (cfg_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "this_host": "linux",
+                        "mxswitch": "/no/such/mxswitch",
+                        "lgdualup": "lgdualup-missing",
+                        "adapters": {
+                            "kettle": {"enabled": True, "backend": "kettle", "host": "192.168.3.36"},
+                            "weather": {"enabled": True, "backend": "weather"},
+                        },
+                    }
+                )
+            )
+            env["DESK_SWITCH_LIB"] = str(lib)
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                proc = subprocess.run(
+                    [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertIn("bar_label", data)
+        self.assertIn("bar_strip", data)
+        self.assertIn("adapters", data)
+        self.assertIn("mouse", data["adapters"])
+        self.assertEqual(data["adapters"]["kettle"]["temp_c"], 65)
+        self.assertEqual(data["adapters"]["weather"]["temp_c"], 22)
+        ids = [item["id"] for item in data["slots"]]
+        self.assertIn("weather", ids)
+        self.assertIn("kettle", ids)
+
+    def test_core_forwards_kettle_verbs(self) -> None:
+        src = (ROOT / "desk-switch.py").read_text()
+        self.assertNotIn("GET /cli", src)
+        self.assertNotIn("192.168.3.36", src)
+        self.assertNotIn("api.open-meteo.com", src)
+        parser = ds.build_parser()
+        args = parser.parse_args(["kettle", "heat", "93"])
+        self.assertEqual(args.cmd, "kettle")
+        self.assertEqual(args.verb, "heat")
+        self.assertEqual(args.temp, "93")
+        args = parser.parse_args(["weather", "status", "--json"])
+        self.assertEqual(args.cmd, "weather")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

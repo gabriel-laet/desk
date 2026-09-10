@@ -21,6 +21,7 @@ BarWidget {
   property bool mouseOnline: false
   property string mouseHost: ""
   property string dualupMode: "unknown"
+  property var slots: []
 
   readonly property bool opened: panelLoader.item
     ? panelLoader.item.opened === true
@@ -64,6 +65,7 @@ BarWidget {
     panelLoader.item.mouseOnline = root.mouseOnline
     panelLoader.item.mouseHost = root.mouseHost
     panelLoader.item.dualupMode = root.dualupMode
+    panelLoader.item.slots = root.slots
   }
 
   function applyStatus(text) {
@@ -82,6 +84,7 @@ BarWidget {
     let online = false
     let host = ""
     let mode = "unknown"
+    let slots = []
     if (raw.charAt(0) === "{") {
       try {
         const data = JSON.parse(raw)
@@ -115,6 +118,8 @@ BarWidget {
         online = data.mouse_online === true
         host = String(data.mouse_host || "")
         mode = String(data.dualup_mode || "unknown")
+        if (Array.isArray(data.slots))
+          slots = data.slots
       } catch (err) {
         hint = ""
         label = "desk"
@@ -132,7 +137,10 @@ BarWidget {
     if (!label)
       label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")
     if (density !== "chips") {
-      if (!strip || strip === "?")
+      const slotTitle = root.slotsTitle(slots)
+      if (slotTitle)
+        strip = slotTitle
+      else if (!strip || strip === "?")
         strip = hint && hint !== "?" ? hint : (mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk"))
     } else if (!label || label === "?") {
       label = hint
@@ -150,7 +158,40 @@ BarWidget {
     root.mouseOnline = online
     root.mouseHost = host
     root.dualupMode = mode
+    root.slots = slots
     root.injectPanel()
+  }
+
+  function glyphMark(glyph) {
+    const map = {
+      "mug": "☕",
+      "flame": "🔥",
+      "cloud.rain": "🌧",
+      "cloud": "☁",
+      "sun.max": "☀",
+      "moon.stars": "🌙",
+      "cloud.fog": "🌫",
+      "cloud.bolt.rain": "⛈",
+      "display.split": "▣",
+      "display.full": "▭",
+      "light.on": "💡",
+      "light.off": "○"
+    }
+    return map[String(glyph || "")] || ""
+  }
+
+  function slotsTitle(items) {
+    const parts = []
+    const list = items || []
+    for (let i = 0; i < list.length; i++) {
+      const slot = list[i] || {}
+      const mark = root.glyphMark(slot.glyph)
+      const text = String(slot.label || "")
+      const piece = (mark ? mark + " " : "") + text
+      if (piece.trim())
+        parts.push(piece.trim())
+    }
+    return parts.join("  ")
   }
 
   function refresh() {
