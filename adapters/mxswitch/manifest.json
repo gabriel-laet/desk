@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "mxswitch",
+  "name": "MX Master Easy-Switch",
+  "capabilities": ["mouse.host_switch"]
+}

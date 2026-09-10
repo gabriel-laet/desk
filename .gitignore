@@ -1,9 +1,8 @@
 *.pyc
 .DS_Store
 /mxswitch
+/lgdualup
 __pycache__/
 config.json
-lgdualup
-mxswitch
 /build/
 .swiftpm/

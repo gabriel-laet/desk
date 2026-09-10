@@ -4,16 +4,21 @@ Hop a Logitech MX Master (and, if you want, an [LG DualUp](https://www.lg.com/us
 between a Mac Studio and an Omarchy/Linux desk. Optional: follow the
 [HHKB Studio](https://happyhackingkb.com/) when it leaves this host.
 
-One command: **`desk-switch`**. Mouse hop, host map, and DualUp are adapters
-the CLI plugs in. `mxswitch` / `lgdualup` are private helpers (in this repo),
-not tools you need to learn.
+One command: **`desk-switch`**. Core is orchestration + contract. MX / DualUp /
+HHKB are **reference adapters** under `adapters/` — not forever-in-core
+special cases. `mxswitch` / `lgdualup` on PATH are private shims, not tools
+you need to learn. Drop another mouse or display adapter beside them.
 
 Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 *away*. Install the watcher on every computer you leave from.
 
-**In this repo:** `desk-switch` CLI, `mxswitch` (HID++ Easy-Switch),
-`lgdualup` (DualUp USB HID — `macos/lgdualup.c`, `linux/lgdualup.sh`, udev
-rule), Omarchy bar plugin, macOS menu bar app, LaunchAgent / systemd units.
+**In this repo:** `desk-switch` CLI (core), reference adapters under
+`adapters/mxswitch`, `adapters/lgdualup`, `adapters/hhkb`, Omarchy bar
+plugin, macOS menu bar app, LaunchAgent / systemd units.
+
+Shells stay at `macos/DeskSwitchBar/` and the git-root QML (Omarchy plugin
+layout requires `BarWidget.qml` at the checkout root). A later phase can
+group them under `shells/`.
 
 **RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
 (draft — architecture only, no code yet).
@@ -61,18 +66,28 @@ desk-switch full
         └─ dualup-layout full     (Mac 2880x2560@270 / Linux 2560x2880 t3)
 ```
 
-Adapters (more can be added later without renaming the model):
+Adapters (roles are capabilities; ids are what you drop on disk):
 
-| Adapter | Role | Backend |
-|---|---|---|
-| **mouse** | HID++ Easy-Switch hop | `~/.local/lib/desk-switch/mxswitch` |
-| **hosts** | Mac vs Linux, channels, HHKB follow target | config |
-| **dualup** | DualUp USB input + PBP/full + OS layout | `lgdualup` + `dualup-layout` |
+| Role | Capability | Reference id | Source |
+|---|---|---|---|
+| **mouse** | `mouse.host_switch` | `mxswitch` | `adapters/mxswitch/` |
+| **keyboard** | `keyboard.presence` | `hhkb` | `adapters/hhkb/` |
+| **hosts** | config only | — | `config.json` |
+| **display** | `display.input` / `pbp` / `full` + `layout.apply` | `lgdualup` | `adapters/lgdualup/` |
 
-`status --json` exposes `adapters.mouse` / `adapters.hosts` / `adapters.dualup`
-and the shared bar fields (`target_hint`, `bar_label`, `hhkb_transport`,
-`hhkb_usb`, `hhkb_bluetooth`, `mouse_channel`, `mouse_online`, `dualup_mode`).
-Omarchy QML and macOS DeskSwitchBar parse the same keys.
+`adapters.dualup` is a legacy alias of `adapters.display`. Pin with
+`adapters.<role>.backend` / `path`, or drop a binary + manifest in
+`~/.local/lib/desk-switch/` (`$DESK_SWITCH_LIB`). Third parties can also
+ship `desk-switch-<id>` on PATH. See [Plug another adapter](#plug-another-adapter).
+
+`status --json` exposes `adapters.mouse` / `adapters.keyboard` /
+`adapters.hosts` / `adapters.display` (and legacy `adapters.dualup`),
+`adapters.discovered`, and the shared bar fields (`target_hint`,
+`bar_label`, additive `bar_strip`, `hhkb_transport`, `hhkb_usb`,
+`hhkb_bluetooth`, `mouse_channel`, `mouse_online`, `dualup_mode`).
+Omarchy QML and macOS DeskSwitchBar parse the same keys. The strip paints
+`bar_strip` (`focus` + optional `display`); chips stay in the click panel.
+`ui.tray.density: "chips"` restores the dense `bar_label` title.
 
 **Lock screen / greeter:** keep the HHKB **USB cable in the machine you are
 unlocking**. Omarchy’s password screen often fails to use Bluetooth; USB is
@@ -120,9 +135,11 @@ install` updates. Put `~/.local/bin` on `PATH`.
 ```
 ~/.local/bin/desk-switch                 # the CLI
 ~/.local/bin/hhkb-mx-follow              # same program (legacy name)
-~/.local/lib/desk-switch/mxswitch        # mouse adapter
-~/.local/lib/desk-switch/lgdualup        # dualup USB helper (in-tree)
-~/.local/lib/desk-switch/dualup-layout   # dualup OS layout (displayplacer / hyprctl)
+~/.local/lib/desk-switch/mxswitch        # mouse reference (TCC path — do not move)
+~/.local/lib/desk-switch/lgdualup        # display USB helper
+~/.local/lib/desk-switch/dualup-layout   # display OS layout (displayplacer / hyprctl)
+~/.local/lib/desk-switch/hhkb            # keyboard.presence reference
+~/.local/lib/desk-switch/*.manifest.json # api_version: 1
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
 ~/.config/desk-switch/config.json        # first install only
@@ -169,7 +186,7 @@ desk-switch status
 Mouse hidraw:
 
 ```bash
-sudo cp linux/42-logitech-hidpp.rules /etc/udev/rules.d/
+sudo cp adapters/mxswitch/linux/42-logitech-hidpp.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG input "$USER"   # then log out/in once
 ```
@@ -177,7 +194,7 @@ sudo usermod -aG input "$USER"   # then log out/in once
 DualUp USB on *this* box (skip if the DualUp cable is in the Mac):
 
 ```bash
-sudo cp linux/43-lg-dualup.rules /etc/udev/rules.d/
+sudo cp adapters/lgdualup/linux/43-lg-dualup.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
@@ -211,9 +228,12 @@ omarchy plugin add https://github.com/gabriel-laet/desk-switch.git --enable
 ```
 
 That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places a
-widget on the **right** section. Title is the shared `bar_label` (e.g. `LNX  kbU  mx2  PBP`) from
-`desk-switch status --json`. `target_hint` is desk focus from the mouse
-Easy-Switch channel (cached / peer if the local probe misses). Click for:
+widget on the **right** section. The strip title is quiet `bar_strip`
+(e.g. `LNX  PBP`) from `desk-switch status --json`. Dense `bar_label`
+(`LNX  kbU  mx2  PBP`) stays in JSON and in the click panel chips.
+`ui.tray.density: "chips"` paints `bar_label` in the strip. `target_hint`
+is desk focus from the mouse Easy-Switch channel (cached / peer if the
+local probe misses). Click for:
 
 | Button | Command |
 |---|---|
@@ -245,11 +265,11 @@ Linux, DualUp Full / PBP (DualUp rows hide when the helper is missing).
 
 ## macOS menu bar
 
-Native `MenuBarExtra`. Same job as the Omarchy panel: title is `bar_label`
-(`MAC`/`LNX` plus kb/mouse/DualUp chips), click for refresh / to mac / to
-linux / DualUp full+PBP. Calls
-`desk-switch` only (PATH, then `~/.local/bin`). macOS 13+. Ad-hoc signed,
-not App Store.
+Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `bar_strip`
+(`MAC`/`LNX` plus a DualUp mark), click for chips + refresh / to mac / to
+linux / DualUp full+PBP. `ui.tray.density: "chips"` restores the dense
+`bar_label` title. Calls `desk-switch` only (PATH, then `~/.local/bin`).
+macOS 13+. Ad-hoc signed, not App Store.
 
 ```bash
 make install                 # CLI first
@@ -330,7 +350,8 @@ Edit [`config.example.json`](config.example.json) →
 ```json
 {
   "adapters": {
-    "mouse": { "enabled": true },
+    "mouse": { "enabled": true, "backend": "mxswitch" },
+    "keyboard": { "enabled": true, "backend": "hhkb" },
     "hosts": {
       "this_host": "mac",
       "follow_channel": 2,
@@ -338,6 +359,7 @@ Edit [`config.example.json`](config.example.json) →
       "linux": { "channel": 2 },
       "follow_hhkb_usb": true
     },
+    "display": { "backend": "lgdualup" },
     "dualup": {
       "enabled": true,
       "pbp_mode": "50-50",
@@ -345,12 +367,17 @@ Edit [`config.example.json`](config.example.json) →
       "display_id": "9134432D-0196-4653-9712-EFCAF1980612",
       "inputs": { "mac": "hdmi1", "linux": "dp" }
     }
-  }
+  },
+  "ui": { "tray": { "density": "strip" } }
 }
 ```
 
 | Key | Meaning |
 |---|---|
+| `adapters.mouse.backend` / `path` | Mouse adapter id or executable. Pin wins over libdir scan |
+| `adapters.keyboard.backend` / `path` | Keyboard.presence adapter (`hhkb` is the reference) |
+| `adapters.display` | Same role as `adapters.dualup` (legacy alias). `backend` / `path` pin the display adapter |
+| `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
 | `adapters.hosts.*.channel` | Easy-Switch slot for `to mac` / `to linux` |
@@ -390,6 +417,50 @@ macOS needs
 
 Legacy keys (`mxswitch`, `lgdualup`, `this_host`, `hosts`, `target_channel`)
 still load. New installs write the adapters shape.
+
+## Plug another adapter
+
+Core discovers adapters from `$DESK_SWITCH_LIB` (default
+`~/.local/lib/desk-switch/`) and `desk-switch-<id>` on PATH. A drop-in is
+an executable plus a manifest (`api_version: 1`):
+
+```json
+{
+  "api_version": 1,
+  "id": "unifying",
+  "name": "Unifying",
+  "capabilities": ["mouse.host_switch"]
+}
+```
+
+Layout (first that works):
+
+```
+~/.local/lib/desk-switch/unifying
+~/.local/lib/desk-switch/unifying.manifest.json
+# or: ~/.local/lib/desk-switch/unifying/unifying
+#     ~/.local/lib/desk-switch/unifying/manifest.json
+# or: desk-switch-unifying on PATH
+```
+
+Pin if more than one mouse adapter is present (otherwise the reference
+`mxswitch` wins when installed; two non-reference ids need a pin):
+
+```json
+{
+  "adapters": {
+    "mouse": { "enabled": true, "backend": "unifying" }
+  }
+}
+```
+
+`desk-switch to linux` then calls `unifying 2` (the Easy-Switch slot for
+Linux). `--info` should print `currently on N` so status can cache the
+channel. A worked example lives at [`examples/dummy-mouse/`](examples/dummy-mouse/).
+
+Display adapters list `display.input` / `display.pbp` / `display.full` /
+`layout.apply`. Keyboard adapters list `keyboard.presence` and speak JSON
+from `info` (`present`, `usb`, `bluetooth`, `transport`).
 
 ## Troubleshooting
 
@@ -447,7 +518,7 @@ the CLI.
 ## Credits
 
 Mouse channel switching is [mxswitch](https://github.com/marcocosta97/mxswitch)
-(MIT), vendored in `macos/mxswitch.c` and `linux/mxswitch.py`. The follow
+(MIT), vendored in `adapters/mxswitch/`. The follow
 idea — poll for the keyboard, then `ChangeHost` — is the same pattern as
 [logi_mx_auto_switch](https://github.com/omar16100/logi_mx_auto_switch) and
 [CleverSwitch](https://github.com/MikalaiBarysevich/CleverSwitch), which only

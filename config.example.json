@@ -1,7 +1,15 @@
 {
   "adapters": {
     "mouse": {
-      "enabled": true
+      "enabled": true,
+      "backend": "mxswitch"
+    },
+    "keyboard": {
+      "enabled": true,
+      "backend": "hhkb"
+    },
+    "display": {
+      "backend": "lgdualup"
     },
     "hosts": {
       "this_host": "mac",
@@ -31,5 +39,10 @@
   "absent_polls_required": 4,
   "sleep_gap_s": 3.0,
   "switch_retries": 8,
-  "switch_retry_delay_s": 0.6
+  "switch_retry_delay_s": 0.6,
+  "ui": {
+    "tray": {
+      "density": "strip"
+    }
+  }
 }
