@@ -1,29 +1,48 @@
-# desk-switch
+# desk
 
-Hop a Logitech MX Master (and, if you want, an [LG DualUp](https://www.lg.com/us/monitors/lg-28mq780-b))
-between a Mac Studio and an Omarchy/Linux desk. Optional: follow the
-[HHKB Studio](https://happyhackingkb.com/) when it leaves this host.
+Orchestrate one desk: hop a Logitech MX Master (and, if you want, an
+[LG DualUp](https://www.lg.com/us/monitors/lg-28mq780-b)) between a Mac
+Studio and an Omarchy/Linux box. Optional: follow the
+[HHKB Studio](https://happyhackingkb.com/) when it leaves this host,
+toggle the Escritório Alexa light, heat a Fellow Stagg on the LAN, and
+show ambient weather. One Mac extra and one Omarchy tray paint the same
+`slots`.
 
-One command: **`desk-switch`**. Core is orchestration + contract. MX / DualUp /
-HHKB are **reference adapters** under `adapters/` — not forever-in-core
-special cases. `mxswitch` / `lgdualup` on PATH are private shims, not tools
-you need to learn. Drop another mouse or display adapter beside them.
+Taught command: **`desk-switch`**. `hhkb-mx-follow` is the same program
+(legacy name — already loaded in LaunchAgents / systemd). There is no
+`desk` CLI alias yet.
+
+Core is orchestration + contract. MX / DualUp / HHKB / Alexa / kettle /
+weather are **reference adapters** under `adapters/` — not forever-in-core
+special cases. `mxswitch` / `lgdualup` / `kettle` on PATH are private
+shims. Drop another adapter beside them.
 
 Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 *away*. Install the watcher on every computer you leave from.
 
-**In this repo:** `desk-switch` CLI (core), reference adapters under
-`adapters/mxswitch`, `adapters/lgdualup`, `adapters/hhkb`, `adapters/alexa`,
-`adapters/kettle`, `adapters/weather`, Omarchy bar plugin, macOS menu bar
-app, LaunchAgent / systemd units.
+GitHub: [`gabriel-laet/desk`](https://github.com/gabriel-laet/desk)
+(renamed from desk-switch). Typical checkout on this Mac: `~/src/desk`.
 
-Shells stay at `macos/DeskSwitchBar/` and the git-root QML (Omarchy plugin
-layout requires `BarWidget.qml` at the checkout root). A later phase can
-group them under `shells/`.
+**In this repo**
+
+```
+desk-switch.py                 # core CLI → ~/.local/bin/desk-switch
+adapters/                      # mxswitch, lgdualup, hhkb, alexa, kettle, weather
+macos/DeskSwitchBar/           # Mac tray (DeskSwitchBar.app)
+macos/local.*.plist.example    # LaunchAgents (existing unit names)
+linux/omarchy/                 # Omarchy QML tray (same slots JSON)
+linux/hhkb-mx-follow.service   # systemd user unit (existing unit name)
+manifest.json                  # Omarchy plugin — must stay at git root
+```
+
+Omarchy clones this repo as the plugin and requires `manifest.json` at
+the checkout root. QML lives under `linux/omarchy/` so `macos/` and
+`linux/` each hold that OS’s tray plus its install unit. Adapter
+HID / udev stays under `adapters/<id>/{macos,linux}/` — those are
+hardware helpers, not shells.
 
 **RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
-(phase 1 in-tree) · [0002 — desk product, kettle, shared tray/HUD](docs/rfc/0002-desk-product-kettle-shared-tray.md)
-(product name **desk**; phase B fold in-tree — no repo rename yet).
+· [0002 — desk product, kettle, shared tray/HUD](docs/rfc/0002-desk-product-kettle-shared-tray.md)
 
 The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
 (`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS
@@ -131,12 +150,13 @@ when you hop.
 ## Install
 
 ```bash
-git clone https://github.com/gabriel-laet/desk-switch.git
-cd desk-switch
+git clone https://github.com/gabriel-laet/desk.git
+cd desk
+# or: git clone git@github.com:gabriel-laet/desk.git
+# typical checkout: ~/src/desk
 ```
 
-Keep the clone at `~/.local/share/desk-switch` if you want `git pull && make
-install` updates. Put `~/.local/bin` on `PATH`.
+Put `~/.local/bin` on `PATH`. `git pull && make install` from the clone.
 
 `make install` writes:
 
@@ -227,16 +247,15 @@ journalctl --user -u hhkb-mx-follow -f
 
 ## Omarchy plugin
 
-The bar widget lives at the git root (`manifest.json`, id
-`glaet.desk-switch`), same layout as
-[omarchy-hey-plugin](https://github.com/basecamp/omarchy-hey-plugin). It only
+The plugin manifest stays at the git root (`manifest.json`, id
+`glaet.desk-switch`). The widget is `linux/omarchy/BarWidget.qml`. It only
 calls `desk-switch`. It does **not** run `make install`.
 
 On the Linux box:
 
 ```bash
 make install                          # CLI + adapters first
-omarchy plugin add https://github.com/gabriel-laet/desk-switch.git --enable
+omarchy plugin add https://github.com/gabriel-laet/desk.git --enable
 ```
 
 That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places a
@@ -272,13 +291,14 @@ make validate-plugin
 
 Merge the keys in [`extensions/omarchy-menu.jsonc`](extensions/omarchy-menu.jsonc)
 into `~/.config/omarchy/extensions/omarchy-menu.jsonc`. Do not replace the
-file. Rows land under **Trigger → Desk switch**: Status, Switch to Mac /
+file. Rows land under **Trigger → desk**: Status, Switch to Mac /
 Linux, DualUp Full / PBP (DualUp rows hide when the helper is missing).
 
 ## macOS menu bar
 
-Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `bar_strip`
-(`MAC`/`LNX` plus a DualUp mark), click for chips + refresh / to mac / to
+Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `slots`
+(composite `NSImage`) or quiet `bar_strip` (`MAC`/`LNX` plus a DualUp
+mark). Click for a generic Watch-style HUD + refresh / to mac / to
 linux / DualUp full+PBP. `ui.tray.density: "chips"` restores the dense
 `bar_label` title. Calls `desk-switch` only (PATH, then `~/.local/bin`).
 macOS 13+. Ad-hoc signed, not App Store.
@@ -326,6 +346,10 @@ desk-switch smarthome list      # Echo devices (and entities when that API works
 desk-switch smarthome status    # light-oriented snapshot
 desk-switch smarthome on        # desk light on (Escritório: "acender a luz")
 desk-switch smarthome off       # desk light off (Escritório: "apagar a luz")
+desk-switch kettle status --json
+desk-switch kettle heat 93
+desk-switch kettle off
+desk-switch weather status --json
 desk-switch --version
 ```
 
@@ -387,6 +411,19 @@ Edit [`config.example.json`](config.example.json) →
       "enabled": true,
       "backend": "alexa",
       "device": "Escritório"
+    },
+    "kettle": {
+      "enabled": true,
+      "backend": "kettle",
+      "host": "192.168.3.36"
+    },
+    "weather": {
+      "enabled": true,
+      "backend": "weather",
+      "latitude": -23.5505,
+      "longitude": -46.6333,
+      "timezone": "America/Sao_Paulo",
+      "label": "São Paulo"
     }
   },
   "ui": { "tray": { "density": "strip" } }
@@ -399,6 +436,8 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.keyboard.backend` / `path` | Keyboard.presence adapter (`hhkb` is the reference) |
 | `adapters.display` | Same role as `adapters.dualup` (legacy alias). `backend` / `path` pin the display adapter |
 | `adapters.smarthome` | Smart-home role. `backend` / `path` pin the adapter (`alexa` is the reference). Optional `device` is the Echo that hears light phrases |
+| `adapters.kettle` | Fellow Stagg LAN. Optional `host` (DHCP moves it). See [`adapters/kettle/`](adapters/kettle/) |
+| `adapters.weather` | Open-Meteo ambient. Optional `latitude` / `longitude` / `timezone` / `label`. See [`adapters/weather/`](adapters/weather/) |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
 | `ui.tray.lights` | If true, `bar_strip` may include a `lights` on/off mark. Default omit — bars stay quiet |
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
@@ -485,12 +524,15 @@ Display adapters list `display.input` / `display.pbp` / `display.full` /
 `layout.apply`. Keyboard adapters list `keyboard.presence` and speak JSON
 from `info` (`present`, `usb`, `bluetooth`, `transport`). Smart-home
 adapters list `smarthome.list` / `smarthome.status` / `light.on` /
-`light.off` and speak JSON from `info` / `list` / `on` / `off`.
+`light.off` and speak JSON from `info` / `list` / `on` / `off`. Kettle
+adapters list `appliance.status` / `appliance.heat` / `appliance.off`.
+Weather adapters list `weather.status`.
 
 ## Alexa / smart-home (Mac first)
 
 The `alexa` adapter is a thin wrapper around [`alexacli`](https://github.com/buddyh/alexa-cli).
-desk-switch never talks to Amazon itself.
+desk-switch never talks to Amazon itself. Detail:
+[`adapters/alexa/`](adapters/alexa/).
 
 1. Install `alexacli` on the Mac (`brew install buddyh/tap/alexacli`).
 2. Authenticate once: `alexacli auth` (this desk uses domain `amazon.com`).
@@ -546,11 +588,9 @@ Watch-style HUD from the same array. Omarchy paints the same `slots`.
 Optional `kettle` on PATH is a shim to `~/.local/lib/desk-switch/kettle`.
 Prefer `desk-switch kettle …`.
 
-**Migrate (not this install):** after Gabriel confirms the Mac extra,
-rename GitHub `desk-switch` → `desk`, then **hard-delete**
-[gabriel-laet/kettle](https://github.com/gabriel-laet/kettle). Until
-then, quit standalone `Kettle.app` / `glaet.fellow` so you do not run
-two extras. Do not delete the kettle repo from this PR.
+If a leftover standalone `Kettle.app` / `glaet.fellow` from the old
+kettle checkout is still installed, quit it — DeskSwitchBar already
+paints that slot.
 
 ## Troubleshooting
 

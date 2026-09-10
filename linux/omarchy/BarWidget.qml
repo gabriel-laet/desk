@@ -11,7 +11,7 @@ BarWidget {
   property string barLabel: "desk"
   property string stripTitle: "desk"
   property string trayDensity: "strip"
-  property string barTooltip: "Desk switch"
+  property string barTooltip: "desk"
   property bool dualUpAvailable: false
   property string lastStatus: ""
   property string hhkbTransport: "absent"
@@ -75,7 +75,7 @@ BarWidget {
     let label = "desk"
     let strip = "desk"
     let density = "strip"
-    let tooltip = "Desk switch"
+    let tooltip = "desk"
     let dual = false
     let transport = "absent"
     let usb = false
@@ -102,7 +102,7 @@ BarWidget {
         else if (display === "full")
           stripParts.push("FULL")
         strip = stripParts.length ? stripParts.join("  ") : (hint && hint !== "?" ? hint : "desk")
-        tooltip = String(data.bar_tooltip || ("Desk switch — " + hint))
+        tooltip = String(data.bar_tooltip || ("desk — " + hint))
         dual = data.lgdualup === true
         if (data.adapters && data.adapters.dualup && data.adapters.dualup.available === true)
           dual = true

@@ -1,6 +1,10 @@
 # RFC 0002 — desk product, kettle adapter, shared tray / HUD
 
-**Status:** accepted for phase B (weather role updated — see §3)
+**Status:** accepted; phase B in-tree. GitHub is
+[`gabriel-laet/desk`](https://github.com/gabriel-laet/desk). Fellow
+kettle lives at `adapters/kettle/`; weather at `adapters/weather/`.
+The former `gabriel-laet/kettle` repo was hard-deleted (historical
+links below are not live). CLI stays `desk-switch`.
 **Extends:** [RFC 0001](0001-rust-core-and-adapters.md) — same pluggability
 north star; this RFC adds the product name, the kettle fold, and a
 generic slot tray / HUD.
@@ -12,10 +16,11 @@ One product: **desk**. Core orchestrates. Hardware and services plug in
 under `adapters/`. One Mac extra and one Omarchy tray paint the same
 slots. They do not know kettle or Alexa.
 
-Phase B implements `adapters/kettle/`, first-class `adapters/weather/`,
-and additive `slots` on `status --json`. It does **not** rename the
-GitHub repo and does **not** delete
-[gabriel-laet/kettle](https://github.com/gabriel-laet/kettle).
+Phase B (`adapters/kettle/`, first-class `adapters/weather/`, additive
+`slots` on `status --json`) has landed. The GitHub rename
+`desk-switch` → `desk` and the kettle-repo hard-delete are done.
+Sections below that still say “not this PR” / “phase E” are the
+original migrate plan, not current repo state.
 
 ### Design principle — pluggability (unchanged)
 

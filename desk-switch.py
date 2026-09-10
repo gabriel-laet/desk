@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desk switch: one CLI for hopping a desk between machines.
+"""desk — orchestrate a desk between machines. Taught command: desk-switch.
 
 Core is orchestration + contract. Hardware plugs in as adapters:
 

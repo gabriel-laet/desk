@@ -5,7 +5,7 @@
   // IDs are object keys. Reuse an existing id to override that row.
   // `when` is a bash condition; DualUp rows hide when the dualup adapter is missing.
 
-  "trigger.desk-switch": {"icon": "󰍺", "label": "Desk switch"},
+  "trigger.desk-switch": {"icon": "󰍺", "label": "desk"},
   "trigger.desk-switch.status": {
     "icon": "󰋼",
     "label": "Status",
