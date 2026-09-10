@@ -280,7 +280,7 @@ RFC ends.
 |---|---|---|
 | **Strip / extra** (always visible) | Composite of selected `slots` (glyphs + short labels). Default set is quiet-ish: weather, kettle if bound, display mode if known. Focus can stay a slot or stay on `bar_strip`. | Nested SwiftUI `Image+Text` pairs; vendor HTTP; Echo phrases; chip-soup `bar_label` (unless `ui.tray.density: "chips"`) |
 | **HUD** (click the extra) | Generic Watch-style face driven by the same `slots` (+ optional per-slot `detail` / actions). Heat / Off / Full / PBP / light are **actions on a slot**, not hardcoded buttons named in the shell. | Kettle-only dial types, Alexa-only rows, DualUp geometry |
-| **Settings** (later, RFC 0001 phase 3) | Host, kettle host/discover, Echo device, tray which-slots | HID reports, raw `alexacli` |
+| **Settings** (Mac first) | Tray which-slots + HUD prefs in shared `ui` (`docs/ui-config.md`). Host / kettle / Echo still later (RFC 0001 phase 3) | HID reports, raw `alexacli` |
 
 `bar_label` and `bar_strip` stay in JSON. New shells prefer `slots`.
 Old widgets keep working.
@@ -289,8 +289,9 @@ Escape hatches (additive, names are a guess — discard freely):
 
 - `ui.tray.density: "strip" | "chips"` — already exists (`chips` =
   paint `bar_label`).
-- `ui.tray.slots: ["weather", "kettle", "dualup"]` — optional pin of
-  which slot ids paint in the extra. Default = core's quiet set.
+- `ui.tray.slots` — landed. Object `{id, enabled}` list (order +
+  visibility) or a string pin list. Default = weather → kettle → dualup.
+  Schema: [ui-config.md](../ui-config.md). Mac DeskSwitchBar writes it.
 - `ui.tray.lights` — already exists; Alexa stays out unless true.
 
 ### 6.2 Shells do not know kettle or Alexa

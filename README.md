@@ -33,6 +33,7 @@ macos/local.*.plist.example    # LaunchAgents (existing unit names)
 linux/omarchy/                 # Omarchy QML tray (same slots JSON)
 linux/hhkb-mx-follow.service   # systemd user unit (existing unit name)
 manifest.json                  # Omarchy plugin — must stay at git root
+docs/ui-config.md              # shared HUD/tray ui schema (Mac writes it)
 ```
 
 Omarchy clones this repo as the plugin and requires `manifest.json` at
@@ -43,6 +44,7 @@ hardware helpers, not shells.
 
 **RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
 · [0002 — desk product, kettle, shared tray/HUD](docs/rfc/0002-desk-product-kettle-shared-tray.md)
+· [HUD / tray UI config](docs/ui-config.md)
 
 The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
 (`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS
@@ -115,6 +117,9 @@ New shells paint `slots` (Mac composites one `NSImage`; Omarchy lays
 out the same array). `bar_strip` (`focus` + optional `display`) stays.
 Lights stay out of the strip unless `ui.tray.lights` is true.
 `ui.tray.density: "chips"` restores the dense `bar_label` title.
+Slot order and HUD prefs live in the same `ui` object — see
+[Shared HUD / tray UI config](docs/ui-config.md). DeskSwitchBar can
+drag-reorder them; Omarchy reads the same file later.
 
 **Lock screen / greeter:** keep the HHKB **USB cable in the machine you are
 unlocking**. Omarchy’s password screen often fails to use Bluetooth; USB is
@@ -262,7 +267,9 @@ That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places a
 widget on the **right** section. The strip title is quiet `bar_strip`
 (e.g. `LNX  PBP`) from `desk-switch status --json`. Dense `bar_label`
 (`LNX  kbU  mx2  PBP`) stays in JSON and in the click panel chips.
-`ui.tray.density: "chips"` paints `bar_label` in the strip. `target_hint`
+`ui.tray.density: "chips"` paints `bar_label` in the strip. Slot order
+comes from the shared `ui` object (Mac settings write it; no Omarchy
+drag UI yet). `target_hint`
 is desk focus from the mouse Easy-Switch channel (cached / peer if the
 local probe misses). Click for:
 
@@ -299,8 +306,10 @@ Linux, DualUp Full / PBP (DualUp rows hide when the helper is missing).
 Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `slots`
 (composite `NSImage`) or quiet `bar_strip` (`MAC`/`LNX` plus a DualUp
 mark). Click for a generic Watch-style HUD + refresh / to mac / to
-linux / DualUp full+PBP. `ui.tray.density: "chips"` restores the dense
-`bar_label` title. Calls `desk-switch` only (PATH, then `~/.local/bin`).
+linux / DualUp full+PBP. **Configure tray** drag-reorders slots and
+writes `ui` in `~/.config/desk-switch/config.json` (Omarchy will share
+it). `ui.tray.density: "chips"` restores the dense `bar_label` title.
+Calls `desk-switch` only (PATH, then `~/.local/bin`).
 macOS 13+. Ad-hoc signed, not App Store.
 
 ```bash
@@ -426,7 +435,17 @@ Edit [`config.example.json`](config.example.json) →
       "label": "São Paulo"
     }
   },
-  "ui": { "tray": { "density": "strip" } }
+  "ui": {
+    "tray": {
+      "density": "strip",
+      "slots": [
+        { "id": "weather", "enabled": true },
+        { "id": "kettle", "enabled": true },
+        { "id": "dualup", "enabled": true }
+      ]
+    },
+    "hud": { "show_altitude": true, "show_faces": true, "density": "regular" }
+  }
 }
 ```
 
@@ -440,6 +459,10 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.weather` | Open-Meteo ambient. Optional `latitude` / `longitude` / `timezone` / `label`. See [`adapters/weather/`](adapters/weather/) |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
 | `ui.tray.lights` | If true, `bar_strip` may include a `lights` on/off mark. Default omit — bars stay quiet |
+| `ui.tray.slots` | Order + show/hide. Objects `{id, enabled}` or a string pin list. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
+| `ui.hud.show_altitude` | If false, weather altitude (`780m`) is stripped from the slot detail |
+| `ui.hud.show_faces` | If false, shells skip the Watch-style face |
+| `ui.hud.density` | `regular` (default) or `compact` |
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
 | `adapters.hosts.*.channel` | Easy-Switch slot for `to mac` / `to linux` |
@@ -580,7 +603,9 @@ Typical kettle host on this desk: `192.168.3.36` (`adapters.kettle.host`).
 The Stagg CLI has **no auth** on port 80 — keep it on the LAN.
 
 `slots` is additive on `status --json`. `bar_label`, `bar_strip`, and
-existing `adapters.*` keys stay. DeskSwitchBar composites slot
+existing `adapters.*` keys stay. Default extra order is weather →
+kettle → DualUp; `ui.tray.slots` reorders and hides (see
+[docs/ui-config.md](docs/ui-config.md)). DeskSwitchBar composites slot
 glyph+label pairs into **one** `NSImage` (nested SwiftUI `Image+Text`
 is flattened to a single symbol). The click panel is a generic
 Watch-style HUD from the same array. Omarchy paints the same `slots`.

@@ -22,6 +22,10 @@ BarWidget {
   property string mouseHost: ""
   property string dualupMode: "unknown"
   property var slots: []
+  // Shared HUD/tray prefs from ~/.config/desk-switch/config.json (status.ui).
+  // Core already applies slot order / visibility / altitude. Mac writes this file.
+  // TODO: Omarchy drag-reorder settings UI — read the same schema, do not fork it.
+  property var uiConfig: ({})
 
   readonly property bool opened: panelLoader.item
     ? panelLoader.item.opened === true
@@ -66,6 +70,7 @@ BarWidget {
     panelLoader.item.mouseHost = root.mouseHost
     panelLoader.item.dualupMode = root.dualupMode
     panelLoader.item.slots = root.slots
+    panelLoader.item.uiConfig = root.uiConfig
   }
 
   function applyStatus(text) {
@@ -85,6 +90,7 @@ BarWidget {
     let host = ""
     let mode = "unknown"
     let slots = []
+    let uiConfig = {}
     if (raw.charAt(0) === "{") {
       try {
         const data = JSON.parse(raw)
@@ -120,6 +126,8 @@ BarWidget {
         mode = String(data.dualup_mode || "unknown")
         if (Array.isArray(data.slots))
           slots = data.slots
+        if (data.ui && typeof data.ui === "object")
+          uiConfig = data.ui
       } catch (err) {
         hint = ""
         label = "desk"
@@ -159,6 +167,7 @@ BarWidget {
     root.mouseHost = host
     root.dualupMode = mode
     root.slots = slots
+    root.uiConfig = uiConfig
     root.injectPanel()
   }
 
