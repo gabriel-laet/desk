@@ -101,8 +101,8 @@ Gabriel locked these. Argue only if they break the 0001 north star.
 | Decision | Locked as |
 |---|---|
 | Product / eventual GitHub name | **`desk`** (`gabriel-laet/desk`) |
-| When to rename the repo | **After** the kettle fold is green — not this PR |
-| Kettle | Fold into **`adapters/kettle/`**. After migrate + rename `desk-switch` → `desk` + confirmed Mac install: **hard-delete** `gabriel-laet/kettle` (do not archive) |
+| When to rename this repo | **After** migrate is green — not this PR. Then `desk-switch` → `desk` |
+| Kettle repo after that | **Hard-delete** `gabriel-laet/kettle` (remove the GitHub repo; do **not** archive). Only after migrate + rename + Gabriel confirms the Mac install. Not this PR |
 | Alexa | First-class **device** adapter (already `adapters/alexa`) |
 | Weather | Tray **side-feed**, not a device / not `adapters/weather` |
 | Tray / HUD | One Mac extra + one Omarchy tray/plugin + one Watch-style HUD. **No** kettle-specific or Alexa-specific chrome |
