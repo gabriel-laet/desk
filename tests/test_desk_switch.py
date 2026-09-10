@@ -351,8 +351,10 @@ class MenubarSourceTests(unittest.TestCase):
 
 class BarWidgetSourceTests(unittest.TestCase):
     def test_omarchy_uses_shared_bar_label(self) -> None:
-        bar = (ROOT / "BarWidget.qml").read_text()
-        panel = (ROOT / "Panel.qml").read_text()
+        bar = (ROOT / "linux" / "omarchy" / "BarWidget.qml").read_text()
+        panel = (ROOT / "linux" / "omarchy" / "Panel.qml").read_text()
+        manifest = json.loads((ROOT / "manifest.json").read_text())
+        self.assertEqual(manifest["entryPoints"]["barWidget"], "linux/omarchy/BarWidget.qml")
         self.assertIn("bar_label", bar)
         self.assertIn("bar_strip", bar)
         self.assertIn("stripTitle", bar)

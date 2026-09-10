@@ -22,6 +22,6 @@ SOFTWARE.
 
 ---
 
-macos/mxswitch.c and linux/mxswitch.sh are from
-https://github.com/marcocosta97/mxswitch (MIT License, Copyright (c) 2026
-marcocosta97) and are included here under that license.
+adapters/mxswitch/macos/mxswitch.c and adapters/mxswitch/linux/mxswitch.py
+are from https://github.com/marcocosta97/mxswitch (MIT License,
+Copyright (c) 2026 marcocosta97) and are included here under that license.

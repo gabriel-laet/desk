@@ -2,9 +2,9 @@ import AppKit
 import Foundation
 import SwiftUI
 
-/// Menu-bar companion for desk-switch.
-/// Strip: quiet `bar_strip`, or a composite NSImage of `slots` (kettle PR #14:
-/// MenuBarExtra flattens nested Image+Text to one symbol — draw one image).
+/// Menu-bar companion for desk (`desk-switch` CLI).
+/// Strip: quiet `bar_strip`, or a composite NSImage of `slots`
+/// (MenuBarExtra flattens nested Image+Text to one symbol — draw one image).
 /// HUD: generic Watch-style face from the same slots. No adapter-named chrome.
 
 @main

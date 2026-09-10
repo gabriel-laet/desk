@@ -5,7 +5,7 @@
   <key>CFBundleName</key>
   <string>DeskSwitchBar</string>
   <key>CFBundleDisplayName</key>
-  <string>Desk Switch</string>
+  <string>desk</string>
   <key>CFBundleIdentifier</key>
   <string>glaet.desk-switch.bar</string>
   <key>CFBundleVersion</key>

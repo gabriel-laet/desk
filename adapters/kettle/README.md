@@ -2,11 +2,10 @@
 
 Role: **`kettle`**. Id: **`kettle`**. Core never `GET`s the kettle.
 
-Ported from the LAN protocol in
-[gabriel-laet/kettle](https://github.com/gabriel-laet/kettle) (`GET /cli?cmd=…`).
-The kettle repo stays until Gabriel confirms the Mac install, the GitHub
-rename `desk-switch` → `desk`, and phase E hard-delete. Do not treat that
-repo as the extra anymore — DeskSwitchBar paints the kettle **slot**.
+Fellow Stagg LAN HTTP (`GET /cli?cmd=…`) lives here. The old
+`gabriel-laet/kettle` repo was hard-deleted; this adapter is the source
+of truth. DeskSwitchBar / the Omarchy tray paint the kettle **slot** —
+there is no standalone Kettle.app in this product.
 
 ```
 ~/.local/lib/desk-switch/kettle

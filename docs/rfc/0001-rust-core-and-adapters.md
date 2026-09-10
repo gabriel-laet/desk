@@ -2,7 +2,8 @@
 
 **Status:** draft (phase 1 landed in-tree; Rust core is a later series)
 **See also:** [RFC 0002](0002-desk-product-kettle-shared-tray.md) —
-product name **desk**, kettle fold, shared `slots` tray / HUD.
+product name **desk** (`gabriel-laet/desk`), kettle fold, shared
+`slots` tray / HUD.
 **Desk (reference, not a core assumption):** Mac Studio ↔ Omarchy/Linux,
 MX Master + optional LG DualUp + HHKB follow
 

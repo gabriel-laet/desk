@@ -30,8 +30,9 @@ lgdualup:
 	@echo "Linux display adapter uses adapters/lgdualup/linux/lgdualup.sh; nothing to compile."
 endif
 
-# desk-switch + adapter helpers. Menubar is a separate macOS target.
+# desk CLI + adapter helpers. Menubar is a separate macOS target.
 # Installed helper paths stay ~/.local/lib/desk-switch/<id> (TCC / shims).
+# Shells: macos/DeskSwitchBar + linux/omarchy (plugin manifest stays at git root).
 install: mxswitch lgdualup
 	install -d $(BINDIR) $(LIBDIR) $(CONFDIR) $(CONFDIR_NEW)
 	install -m 755 desk-switch.py $(BINDIR)/desk-switch
