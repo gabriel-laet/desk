@@ -185,7 +185,7 @@ This is the map. If a file is hardware-shaped, it lives under
 | HHKB probe | in-process `desk-switch.py` (`04FE:0016`, USB-ghost rules) | **`adapters/hhkb/`** — reference **`keyboard.presence`** adapter. Core must not keep VID/PID / ghost rules long-term. In-core probe is a **temporary fallback** until this adapter exists, not the end state. |
 | host map, `watch`, `to`, status, config | `desk-switch.py` | **core** (Python → Rust). Orchestration + contract only. |
 | DeskSwitchBar / Omarchy QML | `macos/DeskSwitchBar/`, `BarWidget.qml`, `Panel.qml` | **`shells/`** — paint only. No HID, no hyprctl, no vendor names in logic. Shared extra + generic HUD: [RFC 0002](0002-desk-product-kettle-shared-tray.md). |
-| Fellow kettle (other repo) | [gabriel-laet/kettle](https://github.com/gabriel-laet/kettle) | **`adapters/kettle/`** — RFC 0002. Not in this tree yet. Do not delete that repo from this PR. |
+| Fellow kettle (other repo) | [gabriel-laet/kettle](https://github.com/gabriel-laet/kettle) | **`adapters/kettle/`** — RFC 0002. After migrate + rename + confirmed Mac install: **hard-delete** that GitHub repo (do not archive). Do not delete it in this PR. |
 
 North star reminder: Logitech / LG / HHKB **source** lives under
 `adapters/<id>/`, never assumed in core. Third parties drop another
