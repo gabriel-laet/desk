@@ -46,7 +46,9 @@ shells   = paint slots (composite extra + generic HUD); never speak
   (`adapters/kettle/`). Source of truth today is
   [gabriel-laet/kettle](https://github.com/gabriel-laet/kettle)
   (Rust `kettle` CLI + Mac menu bar + Omarchy plugin). After the fold
-  works: archive or delete that repo. **Not in this PR.**
+  works, the GitHub rename, and Gabriel confirms the Mac install:
+  **hard-delete** that repo (remove it; do not archive). **Not in
+  this PR.**
 - **Alexa stays a first-class device adapter.** Already in-tree:
   `adapters/alexa/`, role `smarthome`, verbs
   `desk-switch smarthome list|status|on|off`. Core still does not
@@ -67,7 +69,8 @@ shells   = paint slots (composite extra + generic HUD); never speak
 - Any application code, adapter port, file move, or delete **in this
   PR**. Markdown only.
 - Renaming `gabriel-laet/desk-switch` on GitHub in this PR.
-- Deleting or archiving `gabriel-laet/kettle` in this PR.
+- Hard-deleting `gabriel-laet/kettle` in this PR. That delete is
+  phase E only, after migrate + rename + a confirmed Mac install.
 - Merging kettle PRs **into kettle** as a prerequisite. Pull usable
   bits *into desk* (see §10.4), including open app-icon work on
   kettle PR [#15](https://github.com/gabriel-laet/kettle/pull/15)
@@ -99,7 +102,7 @@ Gabriel locked these. Argue only if they break the 0001 north star.
 |---|---|
 | Product / eventual GitHub name | **`desk`** (`gabriel-laet/desk`) |
 | When to rename the repo | **After** the kettle fold is green — not this PR |
-| Kettle | Fold into **`adapters/kettle/`**, then archive/delete `gabriel-laet/kettle` |
+| Kettle | Fold into **`adapters/kettle/`**. After migrate + rename `desk-switch` → `desk` + confirmed Mac install: **hard-delete** `gabriel-laet/kettle` (do not archive) |
 | Alexa | First-class **device** adapter (already `adapters/alexa`) |
 | Weather | Tray **side-feed**, not a device / not `adapters/weather` |
 | Tray / HUD | One Mac extra + one Omarchy tray/plugin + one Watch-style HUD. **No** kettle-specific or Alexa-specific chrome |
@@ -566,15 +569,26 @@ still work.
 **Exit:** desk has the assets it will actually ship. Kettle repo is
 no longer the place you edit the extra.
 
-### Phase E — after green: rename + retire kettle
+### Phase E — after green: rename desk, then hard-delete kettle
 
+Order is locked. Do not skip ahead.
+
+1. Migrate is done (B–D green): kettle adapter + shared tray/HUD
+   work; Gabriel has confirmed the Mac install.
+2. Rename GitHub `gabriel-laet/desk-switch` → `gabriel-laet/desk`.
+3. **Hard-delete** `gabriel-laet/kettle` — remove the GitHub repo.
+   Do **not** archive it.
+
+- [ ] B–D green on this Mac and the Omarchy box; Gabriel confirms
+      the Mac install.
 - [ ] Rename GitHub `gabriel-laet/desk-switch` → `gabriel-laet/desk`.
-      **Not before** B–D are green on this Mac and the Omarchy box.
-- [ ] Archive or delete `gabriel-laet/kettle` (Gabriel's call which).
+- [ ] Hard-delete `https://github.com/gabriel-laet/kettle` (remove
+      the repo; not archive).
 - [ ] Update clone URLs, Omarchy plugin add, README. CLI name can
       stay `desk-switch`.
 
-**Exit:** one repo, one product name. This RFC does not perform E.
+**Exit:** one repo (`desk`), kettle GitHub repo gone. This RFC does
+not perform E and does not delete anything.
 
 ---
 
@@ -630,8 +644,9 @@ no longer the place you edit the extra.
 ## 13. Resolved for this RFC
 
 1. **Product name is `desk`.** Repo rename is phase E, not this PR.
-2. **Kettle folds here** as `adapters/kettle/`. Kettle repo is
-   retired only after the fold works.
+2. **Kettle folds here** as `adapters/kettle/`. After migrate +
+   rename + confirmed Mac install, **hard-delete**
+   `gabriel-laet/kettle` (do not archive). Not this PR.
 3. **Alexa is already the smarthome reference.** This RFC does not
    relocate it.
 4. **One tray + one generic HUD.** Shells paint `slots`. They do
@@ -655,7 +670,6 @@ no longer the place you edit the extra.
 - `desk` as a CLI alias after the GitHub rename.
 - App bundle display name (`Desk` vs `DeskSwitchBar`) — cosmetic,
   after the extra actually paints slots.
-- Archive vs delete on `gabriel-laet/kettle` at phase E.
 
 ---
 
@@ -667,7 +681,7 @@ Markdown only.
 - Points RFC 0001 and the README at it.
 
 No adapter code, no file moves, no tray restyle, no Cargo.toml, no
-GitHub rename, no kettle delete.
+GitHub rename, no kettle delete (hard-delete is phase E only).
 
 **Hold the fold** until this RFC is accepted.
 
