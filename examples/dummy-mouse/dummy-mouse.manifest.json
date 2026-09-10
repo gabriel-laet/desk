@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "dummy-mouse",
+  "name": "Dummy mouse adapter",
+  "capabilities": ["mouse.host_switch"]
+}

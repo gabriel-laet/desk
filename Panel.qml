@@ -12,6 +12,7 @@ Panel {
   property var hostWidget: null
   property string hint: ""
   property string barLabel: "desk"
+  property string stripTitle: "desk"
   property bool dualUpAvailable: false
   property string lastStatus: ""
   property string hhkbTransport: "absent"

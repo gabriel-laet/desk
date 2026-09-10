@@ -9,6 +9,8 @@ BarWidget {
 
   property string hint: ""
   property string barLabel: "desk"
+  property string stripTitle: "desk"
+  property string trayDensity: "strip"
   property string barTooltip: "Desk switch"
   property bool dualUpAvailable: false
   property string lastStatus: ""
@@ -52,6 +54,7 @@ BarWidget {
     panelLoader.item.hostWidget = root
     panelLoader.item.hint = root.hint
     panelLoader.item.barLabel = root.barLabel
+    panelLoader.item.stripTitle = root.stripTitle
     panelLoader.item.dualUpAvailable = root.dualUpAvailable
     panelLoader.item.lastStatus = root.lastStatus
     panelLoader.item.hhkbTransport = root.hhkbTransport
@@ -68,6 +71,8 @@ BarWidget {
     root.lastStatus = raw
     let hint = ""
     let label = "desk"
+    let strip = "desk"
+    let density = "strip"
     let tooltip = "Desk switch"
     let dual = false
     let transport = "absent"
@@ -82,6 +87,18 @@ BarWidget {
         const data = JSON.parse(raw)
         hint = String(data.target_hint || "?")
         label = String(data.bar_label || hint)
+        density = data.ui && data.ui.tray && data.ui.tray.density ? String(data.ui.tray.density) : "strip"
+        const stripObj = data.bar_strip || {}
+        const focus = String(stripObj.focus || hint)
+        const display = String(stripObj.display || "")
+        const stripParts = []
+        if (["MAC", "LNX"].indexOf(focus) !== -1)
+          stripParts.push(focus)
+        if (display === "pbp")
+          stripParts.push("PBP")
+        else if (display === "full")
+          stripParts.push("FULL")
+        strip = stripParts.length ? stripParts.join("  ") : (hint && hint !== "?" ? hint : "desk")
         tooltip = String(data.bar_tooltip || ("Desk switch — " + hint))
         dual = data.lgdualup === true
         if (data.adapters && data.adapters.dualup && data.adapters.dualup.available === true)
@@ -101,10 +118,12 @@ BarWidget {
       } catch (err) {
         hint = ""
         label = "desk"
+        strip = "desk"
       }
     } else if (raw.length > 0) {
       hint = raw.split(/\s+/)[0]
       label = raw
+      strip = raw
     }
     if (["MAC", "LNX"].indexOf(hint) === -1)
       hint = ""
@@ -112,8 +131,16 @@ BarWidget {
       label = hint
     if (!label)
       label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")
+    if (density !== "chips") {
+      if (!strip || strip === "?")
+        strip = hint && hint !== "?" ? hint : (mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk"))
+    } else if (!label || label === "?") {
+      label = hint
+    }
     root.hint = hint
     root.barLabel = label
+    root.stripTitle = density === "chips" ? (label || strip || "desk") : strip
+    root.trayDensity = density
     root.barTooltip = tooltip
     root.dualUpAvailable = dual
     root.hhkbTransport = transport
@@ -189,7 +216,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.barLabel
+    text: root.stripTitle
     tooltipText: root.barTooltip
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()

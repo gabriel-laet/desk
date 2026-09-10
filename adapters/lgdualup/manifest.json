@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "lgdualup",
+  "name": "LG DualUp",
+  "capabilities": ["display.input", "display.pbp", "display.full", "layout.apply"]
+}

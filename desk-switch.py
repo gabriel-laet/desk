@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Desk switch: one CLI for hopping a desk between machines.
 
-Core command is `desk-switch`. Pieces of the desk plug in as adapters:
+Core is orchestration + contract. Hardware plugs in as adapters:
 
-    mouse   — HID++ Easy-Switch hop (backend: mxswitch)
-    hosts   — which machine is Mac vs Linux, channels, HHKB follow target
-    dualup  — LG DualUp input + PBP/full USB + OS layout
-              (backends: lgdualup, dualup-layout)
+    mouse      — host hop (`mouse.host_switch`; reference: mxswitch)
+    keyboard   — presence / follow (`keyboard.presence`; reference: hhkb)
+    hosts      — which machine is Mac vs Linux, channels, follow target
+    display    — input + PBP/full + OS layout (reference: lgdualup)
+                 `adapters.dualup` is a legacy alias of `display`
 
-Helpers live under `~/.local/lib/desk-switch/` after `make install`.
-`mxswitch` / `lgdualup` on PATH are compatibility shims, not the product.
+Reference adapters live under `adapters/` in this repo and install to
+`~/.local/lib/desk-switch/` (`$DESK_SWITCH_LIB`). Third parties drop a
+binary + `*.manifest.json` (`api_version: 1`) in that libdir, or
+`desk-switch-<id>` on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
 
     desk-switch status
     desk-switch status --json
@@ -28,6 +31,7 @@ Helpers live under `~/.local/lib/desk-switch/` after `make install`.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import platform
@@ -40,7 +44,8 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.4.0"
+VERSION = "1.5.0"
+ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
 PBP_INPUT_ORDER = ("linux", "mac")  # secondary first, primary last
@@ -49,13 +54,8 @@ LAYOUT_DEFAULT_DELAY_S = 0.5
 LAYOUT_DEFAULT_SETTLE_S = 0.5
 HHKB_VID_DEFAULT = 0x04FE
 HHKB_PID_DEFAULT = 0x0016
-HHKB_NAME_RE = re.compile(r"HHKB", re.I)
-HID_BUS_USB = 0x0003
-HID_BUS_BLUETOOTH = 0x0005
 MOUSE_CACHE_TTL_S = 24 * 3600  # last-known channel until contradicted (wake lag / other host)
 PEER_CACHE_TTL_S = 20.0
-HID_DEVICES_DIR = Path("/sys/bus/hid/devices")
-USB_DEVICES_DIR = Path("/sys/bus/usb/devices")
 HOST_ALIASES = {
     "mac": "mac",
     "macos": "mac",
@@ -74,6 +74,43 @@ CONFIG_CANDIDATES = (
     Path.home() / ".config" / "hhkb-mx-follow" / "config.json",
     HERE / "config.json",
 )
+
+ROLE_CAPABILITIES = {
+    "mouse": ("mouse.host_switch",),
+    "display": ("display.input", "display.pbp", "display.full", "layout.apply"),
+    "keyboard": ("keyboard.presence",),
+}
+ROLE_REFERENCE_ID = {
+    "mouse": "mxswitch",
+    "display": "lgdualup",
+    "keyboard": "hhkb",
+}
+BUILTIN_MANIFESTS = {
+    "mxswitch": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "mxswitch",
+        "name": "MX Master Easy-Switch",
+        "capabilities": ["mouse.host_switch"],
+    },
+    "lgdualup": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "lgdualup",
+        "name": "LG DualUp",
+        "capabilities": ["display.input", "display.pbp", "display.full", "layout.apply"],
+    },
+    "dualup-layout": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "dualup-layout",
+        "name": "DualUp OS layout",
+        "capabilities": ["layout.apply"],
+    },
+    "hhkb": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "hhkb",
+        "name": "HHKB presence",
+        "capabilities": ["keyboard.presence"],
+    },
+}
 
 
 def log(msg: str) -> None:
@@ -163,6 +200,17 @@ def _user_set_follow_channel(user: dict) -> bool:
     return "follow_channel" in hosts_ad
 
 
+def display_adapter_cfg(container: dict) -> dict:
+    """`adapters.display` overlays legacy `adapters.dualup` (same role)."""
+    adapters = _as_dict(container.get("adapters"))
+    return {**_as_dict(adapters.get("dualup")), **_as_dict(adapters.get("display"))}
+
+
+def tray_density(cfg: dict) -> str:
+    raw = str(cfg.get("_tray_density") or "strip").strip().lower()
+    return "chips" if raw == "chips" else "strip"
+
+
 def apply_adapter_config(cfg: dict, user: dict) -> dict:
     """Map adapters.* onto the internal config. Legacy keys still win if set.
 
@@ -171,11 +219,17 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     adapters = _as_dict(user.get("adapters"))
     mouse = _as_dict(adapters.get("mouse"))
     hosts_ad = _as_dict(adapters.get("hosts"))
-    dual = _as_dict(adapters.get("dualup"))
+    keyboard = _as_dict(adapters.get("keyboard"))
+    dual = display_adapter_cfg(user)
+    ui = _as_dict(user.get("ui"))
+    tray = _as_dict(ui.get("tray"))
 
     cfg["_mouse_enabled"] = bool(mouse.get("enabled", True))
+    if mouse.get("backend"):
+        cfg["_mouse_backend"] = str(mouse["backend"])
     if mouse.get("path"):
         cfg["mxswitch"] = str(mouse["path"])
+        cfg["_mouse_path"] = str(mouse["path"])
 
     if hosts_ad.get("this_host"):
         cfg["this_host"] = hosts_ad["this_host"]
@@ -188,12 +242,21 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         follow_usb = hosts_ad.get("follow_hhkb_usb")
     cfg["follow_hhkb_usb"] = True if follow_usb is None else bool(follow_usb)
 
+    cfg["_keyboard_enabled"] = bool(keyboard.get("enabled", True))
+    if keyboard.get("backend"):
+        cfg["_keyboard_backend"] = str(keyboard["backend"])
+    if keyboard.get("path"):
+        cfg["_keyboard_path"] = str(keyboard["path"])
+
     cfg["_dualup_enabled"] = bool(dual.get("enabled", True))
     cfg["_dualup_layout"] = bool(dual.get("layout", True))
     if dual.get("enabled") is False:
         cfg["switch_monitor"] = False
+    if dual.get("backend"):
+        cfg["_display_backend"] = str(dual["backend"])
     if dual.get("path"):
         cfg["lgdualup"] = str(dual["path"])
+        cfg["_display_path"] = str(dual["path"])
     if dual.get("pbp_mode"):
         cfg["pbp_mode"] = str(dual["pbp_mode"])
     if "switch_pbp" in dual:
@@ -213,14 +276,16 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     cfg["_dualup_layout_settle_s"] = float(
         LAYOUT_DEFAULT_SETTLE_S if raw_settle is None else raw_settle
     )
+    if tray.get("density"):
+        cfg["_tray_density"] = str(tray["density"])
     return cfg
 
 
 def adapter_host_overrides(user: dict) -> dict:
-    """Host map entries from adapters.hosts and adapters.dualup.inputs."""
+    """Host map entries from adapters.hosts and display/dualup inputs."""
     adapters = _as_dict(user.get("adapters"))
     hosts_ad = _as_dict(adapters.get("hosts"))
-    dual = _as_dict(adapters.get("dualup"))
+    dual = display_adapter_cfg(user)
     out: dict = {}
     for name, raw in hosts_ad.items():
         if name in ("this_host", "follow_channel"):
@@ -379,266 +444,70 @@ def run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
     )
 
 
+_HHKB_MOD = None
+
+
+def hhkb_source_path() -> Path | None:
+    bundled = HERE / "adapters" / "hhkb" / "hhkb.py"
+    if bundled.is_file():
+        return bundled
+    installed = libexec_dir() / "hhkb"
+    if installed.is_file():
+        return installed
+    return None
+
+
+def load_hhkb_module():
+    """Import the HHKB reference adapter (source tree or installed libdir)."""
+    global _HHKB_MOD
+    if _HHKB_MOD is not None:
+        return _HHKB_MOD
+    path = hhkb_source_path()
+    if path is None:
+        raise SystemExit("hhkb adapter module not found — run make install")
+    spec = importlib.util.spec_from_file_location("desk_switch_hhkb", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot load hhkb adapter: {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _HHKB_MOD = mod
+    return mod
+
+
 def empty_hhkb_probe(*, unknown: bool = False) -> dict:
-    return {
-        "present": unknown,  # watch-safe: a failed probe is not "gone"
-        "usb": False,
-        "bluetooth": False,
-        "transport": "unknown" if unknown else "absent",
-        "unknown": unknown,
-        "names": [],
-    }
+    return load_hhkb_module().empty_hhkb_probe(unknown=unknown)
 
 
 def hhkb_transport_of(usb: bool, bluetooth: bool, present: bool, unknown: bool = False) -> str:
-    if usb and bluetooth:
-        return "both"
-    if usb:
-        return "usb"
-    if bluetooth:
-        return "bluetooth"
-    if unknown or (present and not usb and not bluetooth):
-        return "unknown"
-    return "absent"
-
-
-def _finish_hhkb_probe(usb: bool, bluetooth: bool, present: bool, unknown: bool, names: list) -> dict:
-    if present:
-        unknown = False
-    return {
-        "present": present or unknown,
-        "usb": usb,
-        "bluetooth": bluetooth,
-        "transport": hhkb_transport_of(usb, bluetooth, present, unknown),
-        "unknown": unknown and not present,
-        "names": names,
-    }
+    return load_hhkb_module().hhkb_transport_of(usb, bluetooth, present, unknown)
 
 
 def merge_hhkb_probes(*probes: dict) -> dict:
-    usb = any(p.get("usb") for p in probes)
-    bluetooth = any(p.get("bluetooth") for p in probes)
-    present = any(p.get("present") and not p.get("unknown") for p in probes)
-    unknown = bool(probes) and all(p.get("unknown") for p in probes) and not present
-    names: list[str] = []
-    for probe in probes:
-        names.extend(probe.get("names") or [])
-    return _finish_hhkb_probe(usb, bluetooth, present, unknown, names)
-
-
-def _hid_id_parts(name: str) -> tuple[int | None, int | None, int | None]:
-    """Parse 0003:000004FE:00000016.XXXX → (bus, vid, pid)."""
-    head = str(name).split(".", 1)[0]
-    parts = head.split(":")
-    if len(parts) < 3:
-        return None, None, None
-    try:
-        return int(parts[0], 16), int(parts[1], 16), int(parts[2], 16)
-    except ValueError:
-        return None, None, None
+    return load_hhkb_module().merge_hhkb_probes(*probes)
 
 
 def parse_linux_hhkb_sysfs(hid_dir: Path, usb_dir: Path | None, vid: int, pid: int) -> dict:
-    """USB vs Bluetooth from hid bus type (0003=USB, 0005=BT) plus /sys USB tree."""
-    if not hid_dir.is_dir():
-        return empty_hhkb_probe(unknown=True)
-    usb = False
-    bluetooth = False
-    present = False
-    names: list[str] = []
-    needle = f"{vid:04X}:{pid:04X}"
-    try:
-        entries = list(hid_dir.iterdir())
-    except OSError:
-        return empty_hhkb_probe(unknown=True)
-    for entry in entries:
-        bus, hid_vid, hid_pid = _hid_id_parts(entry.name)
-        hid_name = ""
-        uevent = entry / "uevent"
-        try:
-            text = uevent.read_text() if uevent.is_file() else ""
-        except OSError:
-            text = ""
-        for line in text.splitlines():
-            if line.startswith("HID_NAME="):
-                hid_name = line.split("=", 1)[1]
-        id_hit = needle in entry.name.upper() or (hid_vid == vid and hid_pid == pid)
-        name_hit = bool(hid_name and HHKB_NAME_RE.search(hid_name))
-        if not (id_hit or name_hit):
-            continue
-        present = True
-        if hid_name:
-            names.append(hid_name)
-        if bus == HID_BUS_USB:
-            usb = True
-        elif bus == HID_BUS_BLUETOOTH:
-            bluetooth = True
-    if usb_dir is not None and usb_dir.is_dir():
-        try:
-            for entry in usb_dir.iterdir():
-                try:
-                    got_vid = (entry / "idVendor").read_text().strip()
-                    got_pid = (entry / "idProduct").read_text().strip()
-                except OSError:
-                    continue
-                try:
-                    if int(got_vid, 16) == vid and int(got_pid, 16) == pid:
-                        usb = True
-                        present = True
-                except ValueError:
-                    continue
-        except OSError:
-            pass
-    return _finish_hhkb_probe(usb, bluetooth, present, False, names)
+    return load_hhkb_module().parse_linux_hhkb_sysfs(hid_dir, usb_dir, vid, pid)
 
 
 def hhkb_probe_linux(vid: int, pid: int) -> dict:
-    return parse_linux_hhkb_sysfs(HID_DEVICES_DIR, USB_DEVICES_DIR, vid, pid)
-
-
-def _ioreg_int(block: str, key: str) -> int | None:
-    match = re.search(rf'"{re.escape(key)}"\s*=\s*(0x[0-9a-fA-F]+|\d+)', block)
-    return int(match.group(1), 0) if match else None
-
-
-def _ioreg_str(block: str, key: str) -> str:
-    match = re.search(rf'"{re.escape(key)}"\s*=\s*"([^"]*)"', block)
-    return match.group(1) if match else ""
-
-
-def _ioreg_bool(block: str, key: str) -> bool | None:
-    match = re.search(rf'"{re.escape(key)}"\s*=\s*(Yes|No|true|false)', block, re.I)
-    if not match:
-        return None
-    return match.group(1).lower() in ("yes", "true")
+    return load_hhkb_module().hhkb_probe_linux(vid, pid)
 
 
 def split_ioreg_nodes(text: str) -> list[str]:
-    return [part for part in re.split(r"\n\s*\+-o\s+", "\n" + (text or "")) if part.strip()]
+    return load_hhkb_module().split_ioreg_nodes(text)
 
 
 def parse_ioreg_hhkb(hid_text: str, usb_text: str, bt_text: str, vid: int, pid: int) -> dict:
-    """Mac USB cable vs Bluetooth from ioreg (IOUSB + IOHIDDevice + IOBluetoothDevice)."""
-    usb = False
-    bluetooth = False
-    present = False
-    names: list[str] = []
-    for block in split_ioreg_nodes(usb_text):
-        product = _ioreg_str(block, "USB Product Name") or _ioreg_str(block, "kUSBProductString")
-        id_hit = _ioreg_int(block, "idVendor") == vid and _ioreg_int(block, "idProduct") == pid
-        name_hit = bool(product and HHKB_NAME_RE.search(product))
-        if not (id_hit or name_hit):
-            continue
-        usb = True
-        present = True
-        if product:
-            names.append(product)
-    for block in split_ioreg_nodes(hid_text):
-        product = _ioreg_str(block, "Product") or _ioreg_str(block, "ProductName")
-        hid_vid = _ioreg_int(block, "VendorID")
-        hid_pid = _ioreg_int(block, "ProductID")
-        id_hit = hid_vid == vid and hid_pid in (None, pid)
-        name_hit = bool(product and HHKB_NAME_RE.search(product))
-        if not (id_hit or name_hit):
-            continue
-        present = True
-        if product:
-            names.append(product)
-        transport = (_ioreg_str(block, "Transport") or "").lower()
-        if "usb" in transport:
-            usb = True
-        elif "bluetooth" in transport or "ble" in transport:
-            bluetooth = True
-    for block in split_ioreg_nodes(bt_text):
-        name = _ioreg_str(block, "Name") or _ioreg_str(block, "DeviceName")
-        if not (name and HHKB_NAME_RE.search(name)):
-            continue
-        connected = _ioreg_bool(block, "DeviceConnected")
-        if connected is None:
-            connected = _ioreg_bool(block, "Connected")
-        if connected is False:
-            continue
-        bluetooth = True
-        present = True
-        names.append(name)
-    return _finish_hhkb_probe(usb, bluetooth, present, False, names)
+    return load_hhkb_module().parse_ioreg_hhkb(hid_text, usb_text, bt_text, vid, pid)
 
 
 def parse_hidutil_hhkb(text: str, vid: int, pid: int) -> dict:
-    """Any HHKB HID row — Product name or VID/PID, not only usage page 1 / usage 6."""
-    usb = False
-    bluetooth = False
-    present = False
-    names: list[str] = []
-    in_services = True
-    vid_tok = f"0x{vid:x}"
-    pid_tok = f"0x{pid:x}"
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if line.startswith("Services:"):
-            in_services = True
-            continue
-        if line.startswith("Devices:"):
-            in_services = False
-            continue
-        if not in_services:
-            continue
-        low = line.lower()
-        name_hit = bool(HHKB_NAME_RE.search(line))
-        col_hit = False
-        cols = line.split()
-        if cols and cols[0].startswith("0x"):
-            try:
-                col_hit = int(cols[0], 0) == vid and len(cols) > 1 and int(cols[1], 0) == pid
-            except ValueError:
-                col_hit = False
-        id_hit = col_hit or (vid_tok in low and pid_tok in low)
-        if not (name_hit or id_hit):
-            continue
-        present = True
-        if name_hit:
-            names.append(line)
-        if "bluetooth" in low:
-            bluetooth = True
-        elif "usb" in low:
-            usb = True
-    return _finish_hhkb_probe(usb, bluetooth, present, False, names)
-
-
-def _ioreg(args: list[str]) -> str:
-    try:
-        proc = run(["ioreg", *args], timeout=4.0)
-        return proc.stdout or ""
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+    return load_hhkb_module().parse_hidutil_hhkb(text, vid, pid)
 
 
 def hhkb_probe_macos(vid: int, pid: int) -> dict:
-    """Prefer ioreg (USB tree + HID Transport + BT name). hidutil VID/PID misses BT HHKB-Studio1."""
-    parsed = parse_ioreg_hhkb(
-        _ioreg(["-r", "-c", "IOHIDDevice", "-l", "-w", "0"]),
-        _ioreg(["-p", "IOUSB", "-l", "-w", "0"]),
-        _ioreg(["-r", "-c", "IOBluetoothDevice", "-l", "-w", "0"]),
-        vid,
-        pid,
-    )
-    hidutil_unknown = False
-    hidutil_text = ""
-    try:
-        proc = run(
-            ["hidutil", "list", "--matching", json.dumps({"VendorID": vid, "ProductID": pid})],
-            timeout=4.0,
-        )
-        if proc.returncode != 0:
-            hidutil_unknown = True
-        hidutil_text = proc.stdout or ""
-    except (OSError, subprocess.TimeoutExpired):
-        hidutil_unknown = True
-    hidutil = parse_hidutil_hhkb(hidutil_text, vid, pid)
-    merged = merge_hhkb_probes(parsed, hidutil)
-    if hidutil_unknown and not merged["present"]:
-        return empty_hhkb_probe(unknown=True)
-    return merged
+    return load_hhkb_module().hhkb_probe_macos(vid, pid)
 
 
 def hhkb_present_macos(vid: int, pid: int) -> bool:
@@ -649,14 +518,35 @@ def hhkb_present_linux(vid: int, pid: int) -> bool:
     return bool(hhkb_probe_linux(vid, pid).get("present"))
 
 
+def _hhkb_probe_exec(path: Path, vid: int, pid: int) -> dict | None:
+    try:
+        proc = run([str(path), "info", "--vid", hex(vid), "--pid", hex(pid)], timeout=4.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or "present" not in data:
+        return None
+    return data
+
+
 def hhkb_probe(cfg: dict) -> dict:
+    """keyboard.presence: bound adapter binary, else in-process HHKB module."""
+    if not cfg.get("_keyboard_enabled", True):
+        return empty_hhkb_probe()
     vid = cfg["hhkb_vendor_id"]
     pid = cfg["hhkb_product_id"]
-    if SYSTEM == "Darwin":
-        return hhkb_probe_macos(vid, pid)
-    if SYSTEM == "Linux":
-        return hhkb_probe_linux(vid, pid)
-    raise SystemExit(f"unsupported OS: {SYSTEM}")
+    bound = bind_role(cfg, "keyboard")
+    path = bound.get("path")
+    if path:
+        probe = _hhkb_probe_exec(Path(path), vid, pid)
+        if probe is not None:
+            return probe
+    return load_hhkb_module().hhkb_probe(vid, pid, SYSTEM)
 
 
 def hhkb_present(cfg: dict) -> bool:
@@ -664,6 +554,9 @@ def hhkb_present(cfg: dict) -> bool:
 
 
 def libexec_dir() -> Path:
+    env = os.environ.get("DESK_SWITCH_LIB")
+    if env:
+        return Path(env).expanduser()
     return Path.home() / ".local" / "lib" / "desk-switch"
 
 
@@ -680,35 +573,287 @@ def which_cmd(name: str) -> Path | None:
     return None
 
 
+def _is_exe(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def resolve_backend_id(backend: str) -> Path | None:
+    """Resolve an adapter id: libdir/<id>, libdir/<id>/<id>, PATH desk-switch-<id>, PATH <id>."""
+    lib = libexec_dir()
+    for candidate in (lib / backend, lib / backend / backend):
+        if _is_exe(candidate):
+            return candidate
+    prefixed = which_cmd(f"desk-switch-{backend}")
+    if prefixed:
+        return prefixed
+    return which_cmd(backend)
+
+
 def which_adapter(backend: str, configured: str | None = None) -> Path | None:
     """Resolve an adapter helper: explicit path, then libexec, then PATH."""
     if configured:
         expanded = Path(str(configured)).expanduser()
-        if expanded.is_file() and os.access(expanded, os.X_OK):
+        if _is_exe(expanded):
             return expanded
-    private = libexec_dir() / backend
-    if private.is_file() and os.access(private, os.X_OK):
-        return private
+    lib = libexec_dir()
+    for candidate in (lib / backend, lib / backend / backend):
+        if _is_exe(candidate):
+            return candidate
     if configured:
         found = which_cmd(str(configured))
         if found:
             return found
         if Path(str(configured)).name != backend:
             return None
+    prefixed = which_cmd(f"desk-switch-{backend}")
+    if prefixed:
+        return prefixed
     return which_cmd(backend)
 
 
+def manifest_api_ok(raw: dict) -> bool:
+    try:
+        major = int(str(raw.get("api_version", 0)).split(".", 1)[0])
+    except (TypeError, ValueError):
+        return False
+    return major == ADAPTER_API_VERSION and bool(raw.get("id"))
+
+
+def load_manifest_file(path: Path) -> dict | None:
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(raw, dict) or not manifest_api_ok(raw):
+        return None
+    return raw
+
+
+def builtin_manifest(adapter_id: str) -> dict | None:
+    raw = BUILTIN_MANIFESTS.get(adapter_id)
+    return dict(raw) if raw else None
+
+
+def manifest_for(adapter_id: str, binary: Path | None = None) -> dict:
+    lib = libexec_dir()
+    candidates = [
+        lib / f"{adapter_id}.manifest.json",
+        lib / adapter_id / "manifest.json",
+    ]
+    if binary is not None:
+        candidates.extend(
+            [
+                binary.parent / f"{adapter_id}.manifest.json",
+                binary.parent / "manifest.json",
+                binary.with_name(f"{adapter_id}.manifest.json"),
+            ]
+        )
+    for path in candidates:
+        loaded = load_manifest_file(path)
+        if loaded and str(loaded.get("id")) == adapter_id:
+            return loaded
+    return builtin_manifest(adapter_id) or {
+        "api_version": ADAPTER_API_VERSION,
+        "id": adapter_id,
+        "name": adapter_id,
+        "capabilities": [],
+    }
+
+
+def _binary_for_manifest(lib: Path, adapter_id: str, manifest_path: Path) -> Path | None:
+    if manifest_path.name == "manifest.json":
+        nested = manifest_path.parent / adapter_id
+        if _is_exe(nested):
+            return nested
+    flat = lib / adapter_id
+    if _is_exe(flat):
+        return flat
+    nested = lib / adapter_id / adapter_id
+    if _is_exe(nested):
+        return nested
+    return resolve_backend_id(adapter_id)
+
+
+def scan_libdir_manifests(lib: Path | None = None) -> list[dict]:
+    """File-drop manifests: <libdir>/<id>.manifest.json or <libdir>/<id>/manifest.json."""
+    root = lib or libexec_dir()
+    found: dict[str, dict] = {}
+    if not root.is_dir():
+        return []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        manifest_path: Path | None = None
+        if entry.is_file() and entry.name.endswith(".manifest.json"):
+            manifest_path = entry
+        elif entry.is_dir() and (entry / "manifest.json").is_file():
+            manifest_path = entry / "manifest.json"
+        if manifest_path is None:
+            continue
+        raw = load_manifest_file(manifest_path)
+        if raw is None:
+            continue
+        adapter_id = str(raw["id"])
+        binary = _binary_for_manifest(root, adapter_id, manifest_path)
+        found[adapter_id] = {
+            "id": adapter_id,
+            "name": raw.get("name") or adapter_id,
+            "capabilities": list(raw.get("capabilities") or []),
+            "path": str(binary) if binary else None,
+            "manifest": raw,
+            "source": "scan",
+        }
+    return list(found.values())
+
+
+def role_matches_caps(role: str, capabilities: list) -> bool:
+    wanted = ROLE_CAPABILITIES.get(role) or ()
+    have = {str(c) for c in capabilities}
+    return any(cap in have for cap in wanted)
+
+
+def _role_enabled(cfg: dict, role: str) -> bool:
+    if role == "mouse":
+        return bool(cfg.get("_mouse_enabled", True))
+    if role == "display":
+        return bool(cfg.get("_dualup_enabled", True))
+    if role == "keyboard":
+        return bool(cfg.get("_keyboard_enabled", True))
+    return True
+
+
+def _role_pin(cfg: dict, role: str) -> tuple[str | None, str | None]:
+    """Return (backend, path) pins from config. path wins over scan."""
+    if role == "mouse":
+        return cfg.get("_mouse_backend"), cfg.get("_mouse_path") or None
+    if role == "display":
+        return cfg.get("_display_backend"), cfg.get("_display_path") or None
+    if role == "keyboard":
+        return cfg.get("_keyboard_backend"), cfg.get("_keyboard_path") or None
+    return None, None
+
+
+def _binding(adapter_id: str | None, path: Path | None, source: str, **extra: object) -> dict:
+    manifest = manifest_for(adapter_id, path) if adapter_id else None
+    out = {
+        "id": adapter_id,
+        "path": path,
+        "source": source,
+        "manifest": manifest,
+        "capabilities": list((manifest or {}).get("capabilities") or []),
+    }
+    out.update(extra)
+    return out
+
+
+def bind_role(cfg: dict, role: str) -> dict:
+    """Bind one role. Pins override scan; reference id wins ties; no silent guess."""
+    cache = cfg.setdefault("_bindings", {})
+    if role in cache:
+        return cache[role]
+    if not _role_enabled(cfg, role):
+        cache[role] = _binding(None, None, "disabled", enabled=False)
+        return cache[role]
+    backend, path_pin = _role_pin(cfg, role)
+    if path_pin:
+        expanded = Path(str(path_pin)).expanduser()
+        if _is_exe(expanded):
+            adapter_id = backend or ROLE_REFERENCE_ID.get(role) or expanded.name
+            cache[role] = _binding(adapter_id, expanded, "path", enabled=True)
+            return cache[role]
+        cache[role] = _binding(backend, None, "path", enabled=True)
+        return cache[role]
+    if backend:
+        resolved = resolve_backend_id(str(backend))
+        cache[role] = _binding(str(backend), resolved, "backend", enabled=True)
+        return cache[role]
+    scanned = [item for item in scan_libdir_manifests() if role_matches_caps(role, item.get("capabilities") or [])]
+    reference = ROLE_REFERENCE_ID.get(role)
+    if len(scanned) == 1:
+        item = scanned[0]
+        path = Path(item["path"]) if item.get("path") else resolve_backend_id(item["id"])
+        cache[role] = _binding(item["id"], path, "scan", enabled=True)
+        return cache[role]
+    if len(scanned) > 1:
+        preferred = next((item for item in scanned if item["id"] == reference), None)
+        if preferred:
+            path = Path(preferred["path"]) if preferred.get("path") else resolve_backend_id(preferred["id"])
+            cache[role] = _binding(
+                preferred["id"],
+                path,
+                "scan",
+                enabled=True,
+                candidates=[item["id"] for item in scanned],
+            )
+            return cache[role]
+        cache[role] = _binding(
+            None,
+            None,
+            "ambiguous",
+            enabled=True,
+            candidates=[item["id"] for item in scanned],
+        )
+        return cache[role]
+    if reference:
+        if role == "mouse":
+            resolved = which_adapter("mxswitch", str(cfg.get("mxswitch") or "mxswitch"))
+            cache[role] = _binding("mxswitch", resolved, "reference", enabled=True)
+            return cache[role]
+        if role == "display":
+            resolved = which_adapter("lgdualup", str(cfg.get("lgdualup") or "lgdualup"))
+            cache[role] = _binding("lgdualup", resolved, "reference", enabled=True)
+            return cache[role]
+        if role == "keyboard":
+            resolved = resolve_backend_id(reference) or hhkb_source_path()
+            cache[role] = _binding("hhkb", resolved, "incore" if resolved == hhkb_source_path() else "reference", enabled=True)
+            return cache[role]
+    cache[role] = _binding(reference, None, "missing", enabled=True)
+    return cache[role]
+
+
+def discovered_adapters(cfg: dict | None = None) -> list[dict]:
+    found = {item["id"]: item for item in scan_libdir_manifests()}
+    for adapter_id, raw in BUILTIN_MANIFESTS.items():
+        if adapter_id in found:
+            continue
+        path = resolve_backend_id(adapter_id)
+        if path is None and adapter_id == "hhkb":
+            path = hhkb_source_path()
+        if path is None:
+            continue
+        found[adapter_id] = {
+            "id": adapter_id,
+            "name": raw.get("name") or adapter_id,
+            "capabilities": list(raw.get("capabilities") or []),
+            "path": str(path),
+            "manifest": dict(raw),
+            "source": "builtin",
+        }
+    items = list(found.values())
+    items.sort(key=lambda item: str(item.get("id") or ""))
+    if cfg is not None:
+        cfg["_discovered"] = items
+    return items
+
+
 def mxswitch_path(cfg: dict) -> Path:
-    path = which_adapter("mxswitch", str(cfg.get("mxswitch") or "mxswitch"))
+    bound = bind_role(cfg, "mouse")
+    path = bound.get("path")
     if path is None:
-        raise SystemExit(f"mouse adapter (mxswitch) not found: {cfg.get('mxswitch')}")
-    return path
+        raise SystemExit(
+            f"mouse adapter not found: {bound.get('id') or cfg.get('_mouse_backend') or cfg.get('mxswitch')}"
+        )
+    return Path(path)
 
 
 def lgdualup_path(cfg: dict) -> Path | None:
     if not cfg.get("_dualup_enabled", True):
         return None
-    return which_adapter("lgdualup", str(cfg.get("lgdualup") or "lgdualup"))
+    bound = bind_role(cfg, "display")
+    path = bound.get("path")
+    return Path(path) if path else None
 
 
 def switch_mouse(cfg: dict, channel: int | None = None) -> int:
@@ -720,7 +865,7 @@ def switch_mouse(cfg: dict, channel: int | None = None) -> int:
     try:
         proc = run(cmd, timeout=8.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"mxswitch failed to start: {exc}")
+        log(f"mouse adapter failed to start: {exc}")
         return 1
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
@@ -803,7 +948,7 @@ def layout_verb(mode: str) -> str:
 
 
 def dualup_layout_path(cfg: dict) -> Path | None:
-    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    adapters = display_adapter_cfg(cfg)
     if cfg.get("_dualup_layout", adapters.get("layout", True)) is False:
         return None
     configured = cfg.get("_dualup_layout_helper") or adapters.get("layout_helper")
@@ -811,7 +956,7 @@ def dualup_layout_path(cfg: dict) -> Path | None:
     if path:
         return path
     sub = "macos" if SYSTEM == "Darwin" else "linux"
-    bundled = HERE / sub / "dualup-layout"
+    bundled = HERE / "adapters" / "lgdualup" / sub / "dualup-layout"
     if bundled.is_file() and os.access(bundled, os.X_OK):
         return bundled
     return None
@@ -834,7 +979,7 @@ def apply_dualup_layout(cfg: dict, mode: str) -> int:
             return 0
         print("dualup layout helper not found — run `make install` (OS layout skipped)")
         return 0
-    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    adapters = display_adapter_cfg(cfg)
     display_id = str(
         cfg.get("_dualup_display_id") or adapters.get("display_id") or ""
     ).strip()
@@ -874,7 +1019,7 @@ def apply_dualup_layout(cfg: dict, mode: str) -> int:
 
 def apply_peer_layout(cfg: dict, mode: str) -> int:
     """Best-effort SSH of layout-only to the other machine (no USB toggle)."""
-    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    adapters = display_adapter_cfg(cfg)
     peer = str(cfg.get("_dualup_peer") or adapters.get("peer") or "").strip()
     if not peer:
         return 0
@@ -933,7 +1078,7 @@ def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
         return rc
     if verb == "pbp":
         rc = rc or dualup_assign_pbp_inputs(cfg)
-    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    adapters = display_adapter_cfg(cfg)
     raw_settle = cfg.get("_dualup_layout_settle_s")
     if raw_settle is None:
         raw_settle = adapters.get("layout_settle_s", LAYOUT_DEFAULT_SETTLE_S)
@@ -1147,7 +1292,7 @@ def dualup_inputs_map(cfg: dict) -> dict:
 def peer_ssh_target(cfg: dict) -> str:
     adapters = _as_dict(cfg.get("adapters"))
     hosts_ad = _as_dict(adapters.get("hosts"))
-    dual = _as_dict(adapters.get("dualup"))
+    dual = display_adapter_cfg(cfg)
     return str(
         cfg.get("_peer")
         or hosts_ad.get("peer")
@@ -1245,6 +1390,29 @@ def peek_peer_status(cfg: dict) -> dict | None:
     return slim
 
 
+def format_bar_strip(state: dict) -> dict:
+    """Quiet strip model: focus + optional display mark. Shells only paint."""
+    hint = str(state.get("target_hint") or "?")
+    if hint not in HINT_FOR_HOST.values() and hint != "?":
+        hint = "?"
+    strip: dict[str, str] = {"focus": hint}
+    mode = str(state.get("dualup_mode") or "unknown").lower()
+    if mode in ("full", "pbp"):
+        strip["display"] = mode
+    return strip
+
+
+def format_strip_title(strip: dict) -> str:
+    """Painted default strip: MAC/LNX plus PBP/FULL when a display mode is known."""
+    focus = str(strip.get("focus") or "?")
+    if focus not in HINT_FOR_HOST.values():
+        focus = ""
+    display = str(strip.get("display") or "").lower()
+    mark = "PBP" if display == "pbp" else ("FULL" if display == "full" else "")
+    parts = [part for part in (focus, mark) if part]
+    return "  ".join(parts) if parts else "desk"
+
+
 def format_bar_label(state: dict) -> str:
     """Compact shared glyph for Omarchy + DeskSwitchBar: LNX  kbU  mx2  PBP."""
     hint = str(state.get("target_hint") or "?")
@@ -1304,38 +1472,68 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
     """User-facing adapter snapshot. Keep this shape stable; add keys, don't rename."""
     hosts = cfg.get("hosts") or {}
     layout_path = dualup_layout_path(cfg)
+    mouse_bound = bind_role(cfg, "mouse")
+    display_bound = bind_role(cfg, "display")
+    keyboard_bound = bind_role(cfg, "keyboard")
+    display = {
+        "enabled": bool(cfg.get("_dualup_enabled", True)),
+        "available": dual_path is not None,
+        "backend": display_bound.get("id") or "lgdualup",
+        "path": str(dual_path) if dual_path else None,
+        "layout": bool(cfg.get("_dualup_layout", True)),
+        "layout_helper": str(layout_path) if layout_path else None,
+        "display_id": str(cfg.get("_dualup_display_id") or "") or None,
+        "mode": None,
+        "inputs": dualup_inputs_map(cfg),
+        "source": display_bound.get("source"),
+    }
+    if display_bound.get("candidates"):
+        display["candidates"] = display_bound["candidates"]
+    keyboard = {
+        "enabled": bool(cfg.get("_keyboard_enabled", True)),
+        "available": keyboard_bound.get("path") is not None or keyboard_bound.get("source") == "incore",
+        "backend": keyboard_bound.get("id") or "hhkb",
+        "path": str(keyboard_bound["path"]) if keyboard_bound.get("path") else None,
+        "source": keyboard_bound.get("source"),
+    }
+    discovered = []
+    for item in discovered_adapters(cfg):
+        discovered.append(
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "capabilities": item.get("capabilities") or [],
+                "path": item.get("path"),
+                "source": item.get("source"),
+            }
+        )
     return {
         "mouse": {
             "enabled": bool(cfg.get("_mouse_enabled", True)),
             "available": mouse_path is not None,
-            "backend": "mxswitch",
+            "backend": mouse_bound.get("id") or "mxswitch",
             "path": str(mouse_path) if mouse_path else None,
             "channel": mouse_channel,
+            "source": mouse_bound.get("source"),
         },
+        "keyboard": keyboard,
         "hosts": {
             "this_host": cfg["this_host"],
             "follow_channel": cfg["target_channel"],
             "mac": hosts.get("mac") or {},
             "linux": hosts.get("linux") or {},
         },
-        "dualup": {
-            "enabled": bool(cfg.get("_dualup_enabled", True)),
-            "available": dual_path is not None,
-            "backend": "lgdualup",
-            "path": str(dual_path) if dual_path else None,
-            "layout": bool(cfg.get("_dualup_layout", True)),
-            "layout_helper": str(layout_path) if layout_path else None,
-            "display_id": str(cfg.get("_dualup_display_id") or "") or None,
-            "mode": None,
-            "inputs": dualup_inputs_map(cfg),
-        },
+        "display": dict(display),
+        "dualup": dict(display),
+        "discovered": discovered,
     }
 
 
 def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
     probe = hhkb_probe(cfg)
     mouse = mouse_snapshot(cfg)
-    mouse_path = which_adapter("mxswitch", str(cfg.get("mxswitch") or "mxswitch"))
+    mouse_bound = bind_role(cfg, "mouse")
+    mouse_path = Path(mouse_bound["path"]) if mouse_bound.get("path") else None
     dual_path = lgdualup_path(cfg)
     dual_info = ""
     dual_usb = False
@@ -1399,10 +1597,17 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "usb": bool(probe.get("usb")),
         "bluetooth": bool(probe.get("bluetooth")),
         "transport": probe.get("transport") or "absent",
+        "backend": (adapters.get("keyboard") or {}).get("backend") or "hhkb",
     }
+    if isinstance(adapters.get("keyboard"), dict):
+        adapters["keyboard"].update(adapters["hhkb"])
     adapters["dualup"]["mode"] = dual_mode
     adapters["dualup"]["usb"] = dual_usb
     adapters["dualup"]["inputs"] = inputs
+    if isinstance(adapters.get("display"), dict):
+        adapters["display"]["mode"] = dual_mode
+        adapters["display"]["usb"] = dual_usb
+        adapters["display"]["inputs"] = inputs
     present = bool(adapters["hhkb"]["present"])
     state = {
         "os": SYSTEM,
@@ -1433,9 +1638,11 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "dualup_inputs": inputs,
         "peer": peer,
         "adapters": adapters,
+        "ui": {"tray": {"density": tray_density(cfg)}},
     }
     state["bar_label"] = format_bar_label(state)
     state["bar_tooltip"] = format_bar_tooltip(state)
+    state["bar_strip"] = format_bar_strip(state)
     return state
 
 

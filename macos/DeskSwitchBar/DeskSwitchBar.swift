@@ -3,8 +3,9 @@ import Foundation
 import SwiftUI
 
 /// Menu-bar companion for desk-switch. Mirrors the Omarchy bar widget:
-/// title is the shared `bar_label` (focus + kb/mouse/DualUp chips).
-/// Does not talk to mxswitch / lgdualup directly.
+/// strip title is quiet `bar_strip` (focus + optional display mark).
+/// `ui.tray.density == chips` paints the dense `bar_label` instead.
+/// Chips stay in the click panel. Does not talk to adapters directly.
 
 @main
 struct DeskSwitchBarApp: App {
@@ -14,7 +15,7 @@ struct DeskSwitchBarApp: App {
         MenuBarExtra {
             DeskPanel(model: model)
         } label: {
-            Text(model.barLabel)
+            Text(model.stripTitle)
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
         }
         .menuBarExtraStyle(.window)
@@ -24,6 +25,7 @@ struct DeskSwitchBarApp: App {
 final class DeskSwitchModel: ObservableObject {
     @Published var hint = ""
     @Published var barLabel = "desk"
+    @Published var stripTitle = "desk"
     @Published var summary = "Refresh to probe HHKB / MX / DualUp"
     @Published var hhkbLine = "HHKB  …"
     @Published var mouseLine = "MX  …"
@@ -53,6 +55,7 @@ final class DeskSwitchModel: ObservableObject {
                 DispatchQueue.main.async {
                     self.hint = parsed.hint
                     self.barLabel = parsed.barLabel
+                    self.stripTitle = parsed.stripTitle
                     self.summary = parsed.summary
                     self.hhkbLine = parsed.hhkbLine
                     self.mouseLine = parsed.mouseLine
@@ -65,6 +68,7 @@ final class DeskSwitchModel: ObservableObject {
                 DispatchQueue.main.async {
                     self.hint = ""
                     self.barLabel = "desk"
+                    self.stripTitle = "desk"
                     self.summary = error.localizedDescription
                     self.hhkbLine = "HHKB  …"
                     self.mouseLine = "MX  …"
@@ -270,6 +274,7 @@ enum DeskSwitchCLI {
 struct StatusSnapshot {
     var hint = ""
     var barLabel = "desk"
+    var stripTitle = "desk"
     var summary = "Refresh to probe HHKB / MX / DualUp"
     var hhkbLine = "HHKB  …"
     var mouseLine = "MX  …"
@@ -291,7 +296,8 @@ struct StatusSnapshot {
         else {
             let first = text.split(whereSeparator: { $0.isWhitespace }).first
             let hint = ["MAC", "LNX"].contains(first.map(String.init) ?? "") ? String(first!) : ""
-            return StatusSnapshot(hint: hint, barLabel: hint.isEmpty ? "desk" : hint, summary: text.isEmpty ? "Refresh to probe HHKB / MX / DualUp" : text)
+            let title = hint.isEmpty ? "desk" : hint
+            return StatusSnapshot(hint: hint, barLabel: title, stripTitle: title, summary: text.isEmpty ? "Refresh to probe HHKB / MX / DualUp" : text)
         }
 
         var hint = String(describing: obj["target_hint"] ?? "")
@@ -306,6 +312,38 @@ struct StatusSnapshot {
             barLabel = hint
         } else {
             barLabel = "desk"
+        }
+
+        var density = "strip"
+        if let ui = obj["ui"] as? [String: Any],
+           let tray = ui["tray"] as? [String: Any],
+           let raw = tray["density"] as? String
+        {
+            density = raw.lowercased()
+        }
+        var stripFocus = hint
+        var stripDisplay = ""
+        if let strip = obj["bar_strip"] as? [String: Any] {
+            let focus = strip["focus"] as? String ?? ""
+            if ["MAC", "LNX"].contains(focus) {
+                stripFocus = focus
+            }
+            stripDisplay = (strip["display"] as? String ?? "").lowercased()
+        }
+        let stripTitle: String
+        if density == "chips" {
+            stripTitle = barLabel
+        } else {
+            var parts: [String] = []
+            if ["MAC", "LNX"].contains(stripFocus) {
+                parts.append(stripFocus)
+            }
+            if stripDisplay == "pbp" {
+                parts.append("PBP")
+            } else if stripDisplay == "full" {
+                parts.append("FULL")
+            }
+            stripTitle = parts.isEmpty ? "desk" : parts.joined(separator: "  ")
         }
 
         let usb = obj["hhkb_usb"] as? Bool ?? false
@@ -376,6 +414,7 @@ struct StatusSnapshot {
         return StatusSnapshot(
             hint: hint,
             barLabel: barLabel,
+            stripTitle: stripTitle,
             summary: summary,
             hhkbLine: "HHKB  \(hhkbValue)",
             mouseLine: "MX  \(mouseValue)",

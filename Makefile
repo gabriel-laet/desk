@@ -13,24 +13,25 @@ MENUBAR_BUILD := build/$(MENUBAR_APP)
 all: mxswitch lgdualup
 
 ifeq ($(UNAME),Darwin)
-mxswitch: macos/mxswitch.c
-	clang -O2 -Wall -o mxswitch macos/mxswitch.c \
+mxswitch: adapters/mxswitch/macos/mxswitch.c
+	clang -O2 -Wall -o mxswitch adapters/mxswitch/macos/mxswitch.c \
 		-framework IOKit -framework CoreFoundation -framework CoreGraphics
 	codesign -s - mxswitch
 
-lgdualup: macos/lgdualup.c
-	clang -O2 -Wall -o lgdualup macos/lgdualup.c \
+lgdualup: adapters/lgdualup/macos/lgdualup.c
+	clang -O2 -Wall -o lgdualup adapters/lgdualup/macos/lgdualup.c \
 		-framework IOKit -framework CoreFoundation
 	codesign -s - lgdualup
 else
 mxswitch:
-	@echo "Linux mouse adapter uses linux/mxswitch.py; nothing to compile."
+	@echo "Linux mouse adapter uses adapters/mxswitch/linux/mxswitch.py; nothing to compile."
 
 lgdualup:
-	@echo "Linux dualup adapter uses linux/lgdualup.sh; nothing to compile."
+	@echo "Linux display adapter uses adapters/lgdualup/linux/lgdualup.sh; nothing to compile."
 endif
 
 # desk-switch + adapter helpers. Menubar is a separate macOS target.
+# Installed helper paths stay ~/.local/lib/desk-switch/<id> (TCC / shims).
 install: mxswitch lgdualup
 	install -d $(BINDIR) $(LIBDIR) $(CONFDIR) $(CONFDIR_NEW)
 	install -m 755 desk-switch.py $(BINDIR)/desk-switch
@@ -38,12 +39,16 @@ install: mxswitch lgdualup
 ifeq ($(UNAME),Darwin)
 	install -m 755 mxswitch $(LIBDIR)/mxswitch
 	install -m 755 lgdualup $(LIBDIR)/lgdualup
-	install -m 755 macos/dualup-layout $(LIBDIR)/dualup-layout
+	install -m 755 adapters/lgdualup/macos/dualup-layout $(LIBDIR)/dualup-layout
 else
-	install -m 755 linux/mxswitch.py $(LIBDIR)/mxswitch
-	install -m 755 linux/lgdualup.sh $(LIBDIR)/lgdualup
-	install -m 755 linux/dualup-layout $(LIBDIR)/dualup-layout
+	install -m 755 adapters/mxswitch/linux/mxswitch.py $(LIBDIR)/mxswitch
+	install -m 755 adapters/lgdualup/linux/lgdualup.sh $(LIBDIR)/lgdualup
+	install -m 755 adapters/lgdualup/linux/dualup-layout $(LIBDIR)/dualup-layout
 endif
+	install -m 755 adapters/hhkb/hhkb.py $(LIBDIR)/hhkb
+	install -m 644 adapters/mxswitch/manifest.json $(LIBDIR)/mxswitch.manifest.json
+	install -m 644 adapters/lgdualup/manifest.json $(LIBDIR)/lgdualup.manifest.json
+	install -m 644 adapters/hhkb/manifest.json $(LIBDIR)/hhkb.manifest.json
 	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/mxswitch
 	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/lgdualup
 	@if [ ! -f $(CONFDIR)/config.json ] && [ ! -f $(CONFDIR_NEW)/config.json ]; then \
@@ -60,16 +65,19 @@ endif
 		echo "wrote $(CONFDIR_NEW)/config.json — set adapters.dualup.inputs from desk-switch status / DualUp --list"; \
 	fi
 	@echo "installed $(BINDIR)/desk-switch"
-	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout"
+	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb"
+	@echo "  manifests: $(LIBDIR)/*.manifest.json"
 	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/hhkb-mx-follow"
-	@echo "Linux DualUp USB: sudo cp linux/43-lg-dualup.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger"
+	@echo "Linux mouse hidraw: sudo cp adapters/mxswitch/linux/42-logitech-hidpp.rules /etc/udev/rules.d/"
+	@echo "Linux DualUp USB: sudo cp adapters/lgdualup/linux/43-lg-dualup.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger"
 ifeq ($(UNAME),Darwin)
 	@echo "optional macOS menu bar: make install-menubar"
 endif
 
 uninstall:
 	rm -f $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow $(BINDIR)/mxswitch $(BINDIR)/lgdualup
-	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout
+	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout $(LIBDIR)/hhkb
+	rm -f $(LIBDIR)/mxswitch.manifest.json $(LIBDIR)/lgdualup.manifest.json $(LIBDIR)/hhkb.manifest.json
 
 menubar:
 ifeq ($(UNAME),Darwin)

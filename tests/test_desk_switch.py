@@ -181,6 +181,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data["adapters"]["hosts"]["this_host"], "linux")
         self.assertEqual(data["adapters"]["mouse"]["backend"], "mxswitch")
         self.assertEqual(data["adapters"]["dualup"]["backend"], "lgdualup")
+        self.assertEqual(data["adapters"]["display"]["backend"], "lgdualup")
+        self.assertIn("keyboard", data["adapters"])
+        self.assertIn("discovered", data["adapters"])
+        self.assertIn("bar_strip", data)
+        self.assertIn("focus", data["bar_strip"])
+        self.assertEqual(data["ui"]["tray"]["density"], "strip")
 
     def test_switch_rejects_bad_channel(self) -> None:
         proc = self._run("switch", "9")
@@ -226,6 +232,33 @@ class AdapterConfigTests(unittest.TestCase):
         self.assertEqual(cfg["mxswitch"], "/opt/mxswitch")
         self.assertTrue(cfg["_mouse_enabled"])
         self.assertTrue(cfg["_dualup_enabled"])
+
+    def test_display_alias_and_backend_and_density(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "mouse": {"backend": "dummy-mouse"},
+                            "keyboard": {"backend": "hhkb"},
+                            "display": {
+                                "enabled": True,
+                                "backend": "lgdualup",
+                                "inputs": {"mac": "hdmi1", "linux": "dp"},
+                            },
+                        },
+                        "ui": {"tray": {"density": "chips"}},
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)):
+                cfg = ds.load_config()
+        self.assertEqual(cfg["_mouse_backend"], "dummy-mouse")
+        self.assertEqual(cfg["_display_backend"], "lgdualup")
+        self.assertEqual(cfg["_keyboard_backend"], "hhkb")
+        self.assertEqual(cfg["hosts"]["linux"]["dualup_input"], "dp")
+        self.assertEqual(ds.tray_density(cfg), "chips")
 
     def test_legacy_keys_still_load(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -287,6 +320,9 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("⌘⌥U", src)
         self.assertIn("desk-switch", src)
         self.assertIn("bar_label", src)
+        self.assertIn("bar_strip", src)
+        self.assertIn("stripTitle", src)
+        self.assertIn("density", src)
         self.assertIn("hhkb_usb", src)
         self.assertIn("hhkb_transport", src)
         self.assertIn("USB on this host", src)
@@ -299,6 +335,8 @@ class BarWidgetSourceTests(unittest.TestCase):
         bar = (ROOT / "BarWidget.qml").read_text()
         panel = (ROOT / "Panel.qml").read_text()
         self.assertIn("bar_label", bar)
+        self.assertIn("bar_strip", bar)
+        self.assertIn("stripTitle", bar)
         self.assertIn("hhkb_usb", bar)
         self.assertIn("status --json", bar)
         self.assertIn("USB on this host", panel)
@@ -578,8 +616,8 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertEqual(cfg["hosts"]["linux"]["dualup_input"], "dp")
 
     def test_lgdualup_sources_accept_desk_switch_modes(self) -> None:
-        c_src = (ROOT / "macos" / "lgdualup.c").read_text()
-        sh_src = (ROOT / "linux" / "lgdualup.sh").read_text()
+        c_src = (ROOT / "adapters" / "lgdualup" / "macos" / "lgdualup.c").read_text()
+        sh_src = (ROOT / "adapters" / "lgdualup" / "linux" / "lgdualup.sh").read_text()
         for src in (c_src, sh_src):
             self.assertIn("full", src)
             self.assertIn("50-50", src)
@@ -590,8 +628,8 @@ class DualupAdapterTests(unittest.TestCase):
 
 
 class DualupLayoutScriptTests(unittest.TestCase):
-    MAC = ROOT / "macos" / "dualup-layout"
-    LNX = ROOT / "linux" / "dualup-layout"
+    MAC = ROOT / "adapters" / "lgdualup" / "macos" / "dualup-layout"
+    LNX = ROOT / "adapters" / "lgdualup" / "linux" / "dualup-layout"
     DID = "9134432D-0196-4653-9712-EFCAF1980612"
 
     def _run_script(
@@ -860,7 +898,7 @@ class MacosDualupLayoutUnitTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        path = ROOT / "macos" / "dualup-layout"
+        path = ROOT / "adapters" / "lgdualup" / "macos" / "dualup-layout"
         loader = importlib.machinery.SourceFileLoader("dualup_layout_macos", str(path))
         spec = importlib.util.spec_from_loader(loader.name, loader)
         assert spec is not None
@@ -1067,6 +1105,12 @@ class HintAndCacheTests(unittest.TestCase):
         )
         self.assertEqual(no_hint, "kb-  mx-  PBP")
         self.assertNotIn("?", no_hint)
+        strip = ds.format_bar_strip(
+            {"target_hint": "LNX", "dualup_mode": "pbp"}
+        )
+        self.assertEqual(strip, {"focus": "LNX", "display": "pbp"})
+        self.assertEqual(ds.format_strip_title(strip), "LNX  PBP")
+        self.assertEqual(ds.format_strip_title({"focus": "MAC"}), "MAC")
 
     def test_mac_status_uses_cached_channel_and_bt_hhkb(self) -> None:
         cfg = {
@@ -1276,15 +1320,193 @@ class DualupModeDetectTests(unittest.TestCase):
             "hhkb_usb",
             "hhkb_bluetooth",
             "bar_label",
+            "bar_strip",
             "target_hint",
             "follow_hhkb_usb",
             "dualup_mode",
             "dualup_inputs",
         ):
             self.assertIn(key, data)
+        self.assertIn("focus", data["bar_strip"])
         self.assertIn(data["hhkb_transport"], {"usb", "bluetooth", "both", "unknown", "absent"})
         self.assertEqual(data["dualup_inputs"]["mac"], "hdmi1")
         self.assertEqual(data["dualup_inputs"]["linux"], "dp")
+
+
+class AdapterDiscoveryTests(unittest.TestCase):
+    DUMMY = ROOT / "examples" / "dummy-mouse" / "dummy-mouse"
+    DUMMY_MANIFEST = ROOT / "examples" / "dummy-mouse" / "dummy-mouse.manifest.json"
+
+    def _libdir(self, tmp: str) -> Path:
+        lib = Path(tmp) / "lib"
+        lib.mkdir()
+        helper = lib / "dummy-mouse"
+        helper.write_bytes(self.DUMMY.read_bytes())
+        helper.chmod(0o755)
+        (lib / "dummy-mouse.manifest.json").write_text(self.DUMMY_MANIFEST.read_text())
+        return lib
+
+    def test_scan_finds_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self._libdir(tmp)
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                found = {item["id"]: item for item in ds.scan_libdir_manifests()}
+        self.assertIn("dummy-mouse", found)
+        self.assertIn("mouse.host_switch", found["dummy-mouse"]["capabilities"])
+        self.assertTrue(found["dummy-mouse"]["path"])
+
+    def test_backend_pin_binds_dummy_mouse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self._libdir(tmp)
+            cfg = {
+                "_mouse_enabled": True,
+                "_mouse_backend": "dummy-mouse",
+                "mxswitch": "mxswitch",
+            }
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                bound = ds.bind_role(cfg, "mouse")
+        self.assertEqual(bound["id"], "dummy-mouse")
+        self.assertEqual(Path(bound["path"]).name, "dummy-mouse")
+        self.assertEqual(bound["source"], "backend")
+
+    def test_scan_binds_lone_mouse_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self._libdir(tmp)
+            cfg = {"_mouse_enabled": True, "mxswitch": "mxswitch-missing"}
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                bound = ds.bind_role(cfg, "mouse")
+        self.assertEqual(bound["id"], "dummy-mouse")
+        self.assertEqual(bound["source"], "scan")
+
+    def test_ambiguous_mouse_adapters_need_a_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self._libdir(tmp)
+            other = lib / "other-mouse"
+            other.write_text("#!/bin/sh\nexit 0\n")
+            other.chmod(0o755)
+            (lib / "other-mouse.manifest.json").write_text(
+                json.dumps(
+                    {
+                        "api_version": 1,
+                        "id": "other-mouse",
+                        "name": "Other",
+                        "capabilities": ["mouse.host_switch"],
+                    }
+                )
+            )
+            cfg = {"_mouse_enabled": True, "mxswitch": "mxswitch-missing"}
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                bound = ds.bind_role(cfg, "mouse")
+        self.assertIsNone(bound["id"])
+        self.assertEqual(bound["source"], "ambiguous")
+        self.assertEqual(sorted(bound["candidates"]), ["dummy-mouse", "other-mouse"])
+
+    def test_to_linux_invokes_dummy_mouse(self) -> None:
+        env = os.environ.copy()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            lib = self._libdir(tmp)
+            state = home / "dummy-state.json"
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "this_host": "mac",
+                        "adapters": {
+                            "mouse": {"enabled": True, "backend": "dummy-mouse"},
+                            "dualup": {"enabled": False},
+                        },
+                    }
+                )
+            )
+            env["HOME"] = str(home)
+            env["PATH"] = "/usr/bin:/bin"
+            env["DESK_SWITCH_LIB"] = str(lib)
+            env["DUMMY_MOUSE_STATE"] = str(state)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "to", "linux", "--mouse-only"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            status = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("Switching to channel 2", proc.stdout)
+            self.assertEqual(json.loads(state.read_text())["channel"], 2)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            data = json.loads(status.stdout)
+            self.assertEqual(data["adapters"]["mouse"]["backend"], "dummy-mouse")
+            self.assertTrue(any(item["id"] == "dummy-mouse" for item in data["adapters"]["discovered"]))
+
+    def test_path_pin_stops_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = self._libdir(tmp)
+            cfg = {
+                "_mouse_enabled": True,
+                "_mouse_path": str(Path(tmp) / "missing-mouse"),
+                "_mouse_backend": "dummy-mouse",
+            }
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                bound = ds.bind_role(cfg, "mouse")
+        self.assertIsNone(bound["path"])
+        self.assertEqual(bound["source"], "path")
+
+    def test_nested_libdir_and_path_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Path(tmp) / "lib"
+            nested = lib / "unifying"
+            nested.mkdir(parents=True)
+            helper = nested / "unifying"
+            helper.write_text("#!/bin/sh\necho ok\n")
+            helper.chmod(0o755)
+            (nested / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "api_version": 1,
+                        "id": "unifying",
+                        "name": "Unifying",
+                        "capabilities": ["mouse.host_switch"],
+                    }
+                )
+            )
+            with mock.patch.object(ds, "libexec_dir", return_value=lib):
+                self.assertEqual(ds.resolve_backend_id("unifying"), helper)
+                found = {item["id"] for item in ds.scan_libdir_manifests()}
+            self.assertIn("unifying", found)
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "bin"
+            bindir.mkdir()
+            helper = bindir / "desk-switch-unifying"
+            helper.write_text("#!/bin/sh\n")
+            helper.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bindir}:/usr/bin:/bin"
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                ds, "libexec_dir", return_value=Path(tmp) / "empty-lib"
+            ):
+                (Path(tmp) / "empty-lib").mkdir()
+                self.assertEqual(ds.resolve_backend_id("unifying"), helper)
+
+    def test_reference_manifests_exist(self) -> None:
+        for name in ("mxswitch", "lgdualup", "hhkb"):
+            raw = json.loads((ROOT / "adapters" / name / "manifest.json").read_text())
+            self.assertEqual(raw["api_version"], 1)
+            self.assertEqual(raw["id"], name)
+
+    def test_makefile_installs_from_adapters_tree(self) -> None:
+        text = (ROOT / "Makefile").read_text()
+        self.assertIn("adapters/mxswitch/macos/mxswitch.c", text)
+        self.assertIn("adapters/lgdualup/macos/lgdualup.c", text)
+        self.assertIn("adapters/hhkb/hhkb.py", text)
+        self.assertIn("$(LIBDIR)/mxswitch.manifest.json", text)
+        self.assertIn("$(LIBDIR)/mxswitch", text)
 
 
 if __name__ == "__main__":
