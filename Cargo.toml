@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/desk-switch-core",
+    "crates/desk-switch",
+]
+
+[workspace.package]
+version = "1.6.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/gabriel-laet/desk-switch"
+authors = ["Gabriel Laet"]
+
+[workspace.dependencies]
+serde_json = "1"
+regex = "1"
+thiserror = "2"
+wait-timeout = "0.2"

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Desk switch: one CLI for hopping a desk between machines.
 
+Python reference (keep until the Rust CLI is confirmed on both hosts).
+`make install` ships the Rust binary to the same path; use
+`make install-python` for this script. Product core: crates/desk-switch.
+
+
 Core is orchestration + contract. Hardware plugs in as adapters:
 
     mouse      — host hop (`mouse.host_switch`; reference: mxswitch)

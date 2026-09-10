@@ -4,24 +4,26 @@ Hop a Logitech MX Master (and, if you want, an [LG DualUp](https://www.lg.com/us
 between a Mac Studio and an Omarchy/Linux desk. Optional: follow the
 [HHKB Studio](https://happyhackingkb.com/) when it leaves this host.
 
-One command: **`desk-switch`**. Core is orchestration + contract. MX / DualUp /
-HHKB are **reference adapters** under `adapters/` — not forever-in-core
-special cases. `mxswitch` / `lgdualup` on PATH are private shims, not tools
-you need to learn. Drop another mouse or display adapter beside them.
+One command: **`desk-switch`** (Rust core as of 1.6.0; same path as before).
+Core is orchestration + contract. MX / DualUp / HHKB are **reference
+adapters** under `adapters/` — not forever-in-core special cases.
+`mxswitch` / `lgdualup` on PATH are private shims, not tools you need to
+learn. Drop another mouse or display adapter beside them.
 
 Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 *away*. Install the watcher on every computer you leave from.
 
-**In this repo:** `desk-switch` CLI (core), reference adapters under
-`adapters/mxswitch`, `adapters/lgdualup`, `adapters/hhkb`, Omarchy bar
-plugin, macOS menu bar app, LaunchAgent / systemd units.
+**In this repo:** Rust `desk-switch` CLI (`crates/desk-switch` +
+`crates/desk-switch-core`), Python reference `desk-switch.py`, reference
+adapters under `adapters/mxswitch`, `adapters/lgdualup`, `adapters/hhkb`,
+Omarchy bar plugin, macOS menu bar app, LaunchAgent / systemd units.
 
 Shells stay at `macos/DeskSwitchBar/` and the git-root QML (Omarchy plugin
 layout requires `BarWidget.qml` at the checkout root). A later phase can
 group them under `shells/`.
 
 **RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
-(draft — architecture only, no code yet).
+(phase 1 shipped; phase 2 is this Rust core).
 
 The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
 (`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS
@@ -98,7 +100,8 @@ pulls mouse + DualUp input to whichever host has the cable.
 
 - HHKB Studio (USB or Bluetooth; VID `04FE` / PID `0016`)
 - MX Master 3 / 3S / 4 on matching Easy-Switch channels
-- Python 3.9+
+- **Rust** (stable `cargo` / `rustc`) for the CLI — [rustup](https://rustup.rs)
+- Python 3.9+ for reference adapters (`hhkb`, Linux `mxswitch`, `dualup-layout`) and `make install-python`
 - macOS: Xcode Command Line Tools (`clang` for helpers; `swiftc` for the menu bar)
 - Linux: `hidraw` + the udev rules below
 - DualUp hardware is optional. The USB helper **and** the OS layout helper
@@ -130,11 +133,11 @@ cd desk-switch
 Keep the clone at `~/.local/share/desk-switch` if you want `git pull && make
 install` updates. Put `~/.local/bin` on `PATH`.
 
-`make install` writes:
+`make install` builds the Rust CLI (`cargo build --release`) and writes:
 
 ```
-~/.local/bin/desk-switch                 # the CLI
-~/.local/bin/hhkb-mx-follow              # same program (legacy name)
+~/.local/bin/desk-switch                 # Rust CLI (same path as the old Python script)
+~/.local/bin/hhkb-mx-follow              # same binary (legacy name)
 ~/.local/lib/desk-switch/mxswitch        # mouse reference (TCC path — do not move)
 ~/.local/lib/desk-switch/lgdualup        # display USB helper
 ~/.local/lib/desk-switch/dualup-layout   # display OS layout (displayplacer / hyprctl)
@@ -143,6 +146,17 @@ install` updates. Put `~/.local/bin` on `PATH`.
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
 ~/.config/desk-switch/config.json        # first install only
+```
+
+Input Monitoring on macOS still grants **`~/.local/lib/desk-switch/mxswitch`**,
+not the new CLI. Reinstalling desk-switch does not move that helper.
+
+`desk-switch.py` stays in the repo as the readable reference until both
+hosts have run the Rust binary for a while. Fallback:
+
+```bash
+make install-python    # same adapters; CLI is desk-switch.py at the same path
+python3 desk-switch.py status --json
 ```
 
 Old configs under `~/.config/hhkb-mx-follow/` still load. Prefer
@@ -291,6 +305,24 @@ cp macos/local.desk-switch-bar.plist.example \
    ~/Library/LaunchAgents/local.desk-switch-bar.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.desk-switch-bar.plist
 ```
+
+## Python → Rust migration
+
+Phase 2 of [RFC 0001](docs/rfc/0001-rust-core-and-adapters.md) replaces the
+installed CLI with Rust. Argv, config paths, and `status --json` keys stay
+the same (`bar_label`, `bar_strip`, `adapters.discovered`, …). Helpers stay
+out of process under `adapters/` / `~/.local/lib/desk-switch/`.
+
+| What | Action |
+|---|---|
+| `~/.local/bin/desk-switch` | `make install` overwrites with the Rust binary |
+| `hhkb-mx-follow` | same binary (copy) |
+| LaunchAgent / systemd `watch` | keep the existing unit name; it now execs Rust |
+| `desk-switch.py` | in-tree reference; `make install-python` if you need it |
+| Input Monitoring | still `~/.local/lib/desk-switch/mxswitch` |
+
+`status --json` `version` is `1.6.0`. Bars should ignore the number and keep
+reading the same keys.
 
 ## CLI
 

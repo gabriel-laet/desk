@@ -8,9 +8,21 @@ APPDIR := $(HOME)/Applications
 MENUBAR_APP := DeskSwitchBar.app
 MENUBAR_BUILD := build/$(MENUBAR_APP)
 
-.PHONY: all mxswitch lgdualup menubar install install-menubar uninstall uninstall-menubar validate-plugin test
+CARGO ?= cargo
+RUST_BIN := target/release/desk-switch
 
-all: mxswitch lgdualup
+.PHONY: all mxswitch lgdualup rust-cli menubar install install-python install-adapters install-menubar uninstall uninstall-menubar validate-plugin test
+
+all: mxswitch lgdualup rust-cli
+
+# Phase 2 CLI. Helpers stay C/Python/sh under adapters/.
+rust-cli:
+	@if command -v $(CARGO) >/dev/null 2>&1; then \
+		$(CARGO) build --release; \
+	else \
+		echo "cargo not found — install Rust (https://rustup.rs) or use: make install-python"; \
+		exit 1; \
+	fi
 
 ifeq ($(UNAME),Darwin)
 mxswitch: adapters/mxswitch/macos/mxswitch.c
@@ -32,10 +44,21 @@ endif
 
 # desk-switch + adapter helpers. Menubar is a separate macOS target.
 # Installed helper paths stay ~/.local/lib/desk-switch/<id> (TCC / shims).
-install: mxswitch lgdualup
+# CLI is the Rust binary at the same path; desk-switch.py stays in-tree as reference.
+install: mxswitch lgdualup rust-cli
+	install -d $(BINDIR) $(LIBDIR) $(CONFDIR) $(CONFDIR_NEW)
+	install -m 755 $(RUST_BIN) $(BINDIR)/desk-switch
+	install -m 755 $(RUST_BIN) $(BINDIR)/hhkb-mx-follow
+	@$(MAKE) --no-print-directory install-adapters
+
+install-python: mxswitch lgdualup
 	install -d $(BINDIR) $(LIBDIR) $(CONFDIR) $(CONFDIR_NEW)
 	install -m 755 desk-switch.py $(BINDIR)/desk-switch
 	install -m 755 desk-switch.py $(BINDIR)/hhkb-mx-follow
+	@$(MAKE) --no-print-directory install-adapters
+	@echo "installed Python reference CLI (fallback) → $(BINDIR)/desk-switch"
+
+install-adapters:
 ifeq ($(UNAME),Darwin)
 	install -m 755 mxswitch $(LIBDIR)/mxswitch
 	install -m 755 lgdualup $(LIBDIR)/lgdualup
@@ -64,7 +87,7 @@ endif
 		cp $(CONFDIR_NEW)/config.json $(CONFDIR)/config.json; \
 		echo "wrote $(CONFDIR_NEW)/config.json — set adapters.dualup.inputs from desk-switch status / DualUp --list"; \
 	fi
-	@echo "installed $(BINDIR)/desk-switch"
+	@echo "installed $(BINDIR)/desk-switch  (Rust; python3 desk-switch.py is the in-tree reference)"
 	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb"
 	@echo "  manifests: $(LIBDIR)/*.manifest.json"
 	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/hhkb-mx-follow"
@@ -112,5 +135,7 @@ validate-plugin:
 	./scripts/omarchy-plugin-validate .
 
 test:
+	$(CARGO) test --workspace
+	$(CARGO) build
 	python3 tests/test_desk_switch.py
 	./scripts/omarchy-plugin-validate .

@@ -22,6 +22,20 @@ ds = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ds)
 
 
+def desk_switch_argv() -> list[str]:
+    """Prefer the Rust CLI when built; otherwise the Python reference."""
+    env = os.environ.get("DESK_SWITCH_BIN")
+    if env:
+        return [env]
+    for candidate in (
+        ROOT / "target" / "debug" / "desk-switch",
+        ROOT / "target" / "release" / "desk-switch",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return [str(candidate)]
+    return [sys.executable, str(ROOT / "desk-switch.py")]
+
+
 class HostMappingTests(unittest.TestCase):
     def test_aliases(self) -> None:
         self.assertEqual(ds.normalize_host("macos"), "mac")
@@ -83,7 +97,7 @@ class HostMappingTests(unittest.TestCase):
 class CliTests(unittest.TestCase):
     def _run(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, str(ROOT / "desk-switch.py"), *args],
+            [*desk_switch_argv(), *args],
             capture_output=True,
             text=True,
             env=env or os.environ.copy(),
@@ -114,7 +128,7 @@ class CliTests(unittest.TestCase):
             (cfg_dir / "config.json").write_text(json.dumps({"lgdualup": "lgdualup-missing"}))
             env["HOME"] = str(home)
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "pbp", "50-50"],
+                [*desk_switch_argv(), "pbp", "50-50"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -132,7 +146,7 @@ class CliTests(unittest.TestCase):
             cfg_dir.mkdir(parents=True)
             (cfg_dir / "config.json").write_text(json.dumps({"lgdualup": "lgdualup-missing"}))
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "full"],
+                [*desk_switch_argv(), "full"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -157,13 +171,13 @@ class CliTests(unittest.TestCase):
                 })
             )
             hint = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--hint"],
+                [*desk_switch_argv(), "status", "--hint"],
                 capture_output=True,
                 text=True,
                 env=env,
             )
             js = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json"],
+                [*desk_switch_argv(), "status", "--json"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1308,7 +1322,7 @@ class DualupModeDetectTests(unittest.TestCase):
                 })
             )
             js = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [*desk_switch_argv(), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1426,13 +1440,13 @@ class AdapterDiscoveryTests(unittest.TestCase):
             env["DUMMY_MOUSE_STATE"] = str(state)
             env["XDG_CACHE_HOME"] = str(home / "cache")
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "to", "linux", "--mouse-only"],
+                [*desk_switch_argv(), "to", "linux", "--mouse-only"],
                 capture_output=True,
                 text=True,
                 env=env,
             )
             status = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [*desk_switch_argv(), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1507,6 +1521,9 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("adapters/hhkb/hhkb.py", text)
         self.assertIn("$(LIBDIR)/mxswitch.manifest.json", text)
         self.assertIn("$(LIBDIR)/mxswitch", text)
+        self.assertIn("$(RUST_BIN)", text)
+        self.assertIn("$(CARGO) build --release", text)
+        self.assertIn("install-python", text)
 
 
 if __name__ == "__main__":

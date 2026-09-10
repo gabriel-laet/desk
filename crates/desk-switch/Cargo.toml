@@ -1,0 +1,18 @@
+[package]
+name = "desk-switch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "desk-switch CLI — hop a desk between machines"
+
+[[bin]]
+name = "desk-switch"
+path = "src/main.rs"
+
+[dependencies]
+desk-switch-core = { path = "../desk-switch-core" }
+
+[dev-dependencies]
+serde_json = "1"
