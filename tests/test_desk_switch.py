@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -343,6 +344,8 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("DeskUIConfig", src)
         self.assertIn("DeskUIConfigStore", src)
         self.assertIn("Configure tray", src)
+        self.assertIn("applyOptimisticLight", src)
+        self.assertIn("placeholderLights", src)
         self.assertIn("onMove", src)
         self.assertIn(".config/desk-switch", src)
         self.assertIn("show_altitude", src)
@@ -1639,6 +1642,9 @@ class AlexaAdapterTests(unittest.TestCase):
                 self.assertEqual(recorded, ["command", *phrase.split(), "-d", "Escritório"])
                 self.assertNotIn("escritório", phrase.lower())
                 self.assertNotIn("escritorio", self.alexa.fold_text(phrase))
+                cached = json.loads((home / "cache" / "desk-switch" / "alexa-status.json").read_text())
+                self.assertEqual(cached["lights"][0]["state"], verb)
+                self.assertEqual(cached["lights"][0]["state_source"], "command")
 
     def test_list_prefers_devices_when_smarthome_json_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1733,6 +1739,76 @@ class AlexaAdapterTests(unittest.TestCase):
         self.assertTrue(lights)
         self.assertEqual(lights[0]["speaker"], "Escritório")
         self.assertEqual(lights[0]["on_phrase"], "acender a luz")
+        self.assertNotIn("lights", [item["id"] for item in data["slots"]])
+
+    def test_status_json_lights_slot_follows_command_cache(self) -> None:
+        env = os.environ.copy()
+        env["PATH"] = "/usr/bin:/bin"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            lib = home / "lib"
+            lib.mkdir()
+            helper = lib / "alexa"
+            helper.write_bytes((ROOT / "adapters" / "alexa" / "alexa.py").read_bytes())
+            helper.chmod(0o755)
+            (lib / "alexa.manifest.json").write_text(
+                (ROOT / "adapters" / "alexa" / "manifest.json").read_text()
+            )
+            bindir = home / "bin"
+            bindir.mkdir()
+            cli = bindir / "alexacli"
+            cli.write_text("#!/bin/sh\nexit 0\n")
+            cli.chmod(0o755)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{bindir}:/usr/bin:/bin"
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            env["DESK_SWITCH_LIB"] = str(lib)
+            env["DESK_SWITCH_WEATHER_URL"] = ""
+            cfg_dir = home / ".config" / "desk-switch"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "this_host": "mac",
+                        "adapters": {
+                            "smarthome": {"enabled": True, "backend": "alexa"},
+                            "dualup": {"enabled": False},
+                        },
+                        "ui": {"tray": {"lights": True}},
+                    }
+                )
+            )
+            before = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(before.returncode, 0, before.stderr)
+            before_data = json.loads(before.stdout)
+            lights_slot = next(item for item in before_data["slots"] if item["id"] == "lights")
+            self.assertEqual(lights_slot["label"], "?")
+            self.assertEqual(lights_slot["glyph"], "light.off")
+            on = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "smarthome", "on"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(on.returncode, 0, on.stdout + on.stderr)
+            after = subprocess.run(
+                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(after.returncode, 0, after.stderr)
+            after_data = json.loads(after.stdout)
+            self.assertEqual(after_data["adapters"]["smarthome"]["lights"][0]["state"], "on")
+            slot = next(item for item in after_data["slots"] if item["id"] == "lights")
+            self.assertEqual(slot["glyph"], "light.on")
+            self.assertEqual(slot["label"], "ON")
+            self.assertEqual(after_data["bar_strip"]["lights"], "on")
 
     def test_smarthome_cli_on_invokes_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1800,6 +1876,103 @@ class AlexaAdapterTests(unittest.TestCase):
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("smarthome adapter not found", proc.stdout)
+
+    def test_on_writes_cache_before_failed_speak_reverts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bindir = home / "bin"
+            bindir.mkdir()
+            cli = bindir / "alexacli"
+            cli.write_text("#!/bin/sh\nexit 1\n")
+            cli.chmod(0o755)
+            cache = home / "cache" / "desk-switch" / "alexa-status.json"
+            cache.parent.mkdir(parents=True)
+            cache.write_text(
+                json.dumps(
+                    {
+                        "lights": [
+                            {
+                                "id": "desk",
+                                "state": "off",
+                                "state_source": "command",
+                                "updated_at": 1.0,
+                            }
+                        ]
+                    }
+                )
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{bindir}:/usr/bin:/bin"
+            env["HOME"] = str(home)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "adapters" / "alexa" / "alexa.py"), "on"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            cached = json.loads(cache.read_text())
+            self.assertEqual(cached["lights"][0]["state"], "off")
+
+    def test_entity_power_preferred_when_readable(self) -> None:
+        self.assertEqual(self.alexa.entity_power_state({"powerState": "ON"}), "on")
+        self.assertTrue(self.alexa.entity_looks_like_light({"name": "Luz mesa", "kind": "LIGHT"}))
+        lights = [self.alexa.default_light("Escritório", "acender a luz", "apagar a luz", "off")]
+        changed = self.alexa.apply_entity_light_state(
+            lights, [{"name": "desk light", "powerState": "on"}]
+        )
+        self.assertTrue(changed)
+        self.assertEqual(lights[0]["state"], "on")
+        self.assertEqual(lights[0]["state_source"], "entity")
+
+    def test_refresh_does_not_clobber_newer_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            env["PATH"] = "/usr/bin:/bin"
+            cache = home / "cache" / "desk-switch" / "alexa-status.json"
+
+            def slow_devices(_cli):
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(
+                    json.dumps(
+                        {
+                            "lights": [
+                                {
+                                    "id": "desk",
+                                    "state": "on",
+                                    "state_source": "command",
+                                    "updated_at": time.time() + 10,
+                                }
+                            ]
+                        }
+                    )
+                )
+                return [{"name": "Escritório"}], None
+
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                self.alexa, "list_echo_devices", side_effect=slow_devices
+            ), mock.patch.object(
+                self.alexa,
+                "try_smarthome_entities",
+                return_value={"ok": False, "source": None, "error": "empty", "entities": []},
+            ), mock.patch.object(
+                self.alexa, "cli_probe", return_value={"name": "alexacli", "available": True, "path": "/bin/true"}
+            ), mock.patch.object(
+                self.alexa, "auth_configured", return_value={"configured": True, "path": "", "domain": None}
+            ):
+                data = self.alexa.snapshot(
+                    cli_name="alexacli",
+                    device="Escritório",
+                    on_phrase="acender a luz",
+                    off_phrase="apagar a luz",
+                    refresh=True,
+                )
+            self.assertEqual(data["lights"][0]["state"], "on")
+            self.assertEqual(data["lights"][0]["state_source"], "command")
 
     def test_bar_strip_lights_opt_in_only(self) -> None:
         state = {
@@ -2192,6 +2365,33 @@ class SlotComposeTests(unittest.TestCase):
         self.assertEqual(slots[1]["glyph"], "mug")
         self.assertEqual(slots[2]["label"], "PBP")
         self.assertEqual(slots[1]["actions"][0]["argv"], ["kettle", "heat", "93"])
+        self.assertNotIn("lights", [item["id"] for item in slots])
+
+    def test_collect_slots_lights_on_off_unknown(self) -> None:
+        state = {
+            "dualup_mode": "unknown",
+            "adapters": {"smarthome": {"lights": [{"state": "on"}]}},
+        }
+        self.assertEqual(ds.collect_slots(state, {}), [])
+        on = ds.collect_slots(state, {"_tray_lights": True})
+        self.assertEqual(on[0]["id"], "lights")
+        self.assertEqual(on[0]["glyph"], "light.on")
+        self.assertEqual(on[0]["label"], "ON")
+        self.assertEqual(on[0]["actions"][0]["argv"], ["smarthome", "on"])
+        state["adapters"]["smarthome"]["lights"] = [{"state": "off"}]
+        off = ds.collect_slots(state, {"_tray_lights": True})
+        self.assertEqual(off[0]["glyph"], "light.off")
+        self.assertEqual(off[0]["label"], "OFF")
+        state["adapters"]["smarthome"]["lights"] = [{"state": "unknown"}]
+        unknown = ds.collect_slots(state, {"_tray_lights": True})
+        self.assertEqual(unknown[0]["glyph"], "light.off")
+        self.assertEqual(unknown[0]["label"], "?")
+        pinned = ds.collect_slots(
+            {"dualup_mode": "unknown", "adapters": {"smarthome": {"lights": []}}},
+            {"_ui_slots": [{"id": "lights", "enabled": True}], "_ui_slots_exclusive": True},
+        )
+        self.assertEqual([item["id"] for item in pinned], ["lights"])
+        self.assertEqual(pinned[0]["label"], "?")
 
     def test_weather_slot_survives_offline_kettle(self) -> None:
         state = {

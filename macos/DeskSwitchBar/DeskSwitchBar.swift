@@ -222,11 +222,51 @@ final class DeskSwitchModel: ObservableObject {
         }
     }
 
+    func applyOptimisticLight(on: Bool) {
+        let glyph = on ? "light.on" : "light.off"
+        let label = on ? "ON" : "OFF"
+        let actions = [
+            SlotAction(label: "On", argv: ["smarthome", "on"]),
+            SlotAction(label: "Off", argv: ["smarthome", "off"]),
+        ]
+        if let index = slots.firstIndex(where: { $0.id == "lights" }) {
+            slots[index].glyph = glyph
+            slots[index].label = label
+            slots[index].hot = on
+            if slots[index].actions.isEmpty {
+                slots[index].actions = actions
+            }
+        } else {
+            slots.append(
+                TraySlot(
+                    id: "lights",
+                    glyph: glyph,
+                    label: label,
+                    detail: nil,
+                    hot: on,
+                    face: false,
+                    progress: 0,
+                    actions: actions
+                )
+            )
+        }
+        if let index = ui.slots.firstIndex(where: { $0.id == "lights" }) {
+            ui.slots[index].enabled = true
+            ui.lights = true
+        }
+    }
+
     func run(_ args: [String]) {
+        if args == ["smarthome", "on"] {
+            applyOptimisticLight(on: true)
+        } else if args == ["smarthome", "off"] {
+            applyOptimisticLight(on: false)
+        }
+        let timeout: TimeInterval = args.first == "smarthome" ? 30 : 20
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let out = try DeskSwitchCLI.run(args)
+                let out = try DeskSwitchCLI.run(args, timeout: timeout)
                 DispatchQueue.main.async {
                     self.lastLine = out.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.refresh()
@@ -1029,15 +1069,37 @@ struct DeskUIConfig: Equatable {
         ]
     }
 
+    static func placeholderLights(state: String = "unknown") -> TraySlot {
+        let on = state == "on"
+        return TraySlot(
+            id: "lights",
+            glyph: on ? "light.on" : "light.off",
+            label: on ? "ON" : (state == "off" ? "OFF" : "?"),
+            detail: nil,
+            hot: on,
+            face: false,
+            progress: 0,
+            actions: [
+                SlotAction(label: "On", argv: ["smarthome", "on"]),
+                SlotAction(label: "Off", argv: ["smarthome", "off"]),
+            ]
+        )
+    }
+
     static func apply(_ slots: [TraySlot], ui: DeskUIConfig) -> [TraySlot] {
         let byID = Dictionary(slots.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var out: [TraySlot] = []
         var used = Set<String>()
         for pref in ui.slots {
             used.insert(pref.id)
-            guard pref.enabled, var slot = byID[pref.id] else { continue }
-            slot = decorate(slot, ui: ui)
-            out.append(slot)
+            guard pref.enabled else { continue }
+            if var slot = byID[pref.id] {
+                out.append(decorate(slot, ui: ui))
+            } else if pref.id == "lights" {
+                // Core omitted the slot (unknown / adapter timeout). Keep the
+                // bulb and On/Off actions so the tray can still command + flip.
+                out.append(decorate(placeholderLights(), ui: ui))
+            }
         }
         for slot in slots where !used.contains(slot.id) && slot.id != "lights" {
             out.append(decorate(slot, ui: ui))

@@ -35,9 +35,22 @@ overrides the binary.
 | `off` | `light.off` | `alexacli command "apagar a luz" -d Escritório` |
 
 `alexacli smarthome list` / `sh list` is attempted and recorded. On this
-desk it currently fails with an empty JSON parse. When it works, `list`
-grows entity ids without a core change (`list_source` becomes
-`devices+smarthome`).
+desk it currently fails with an empty JSON parse and **does not expose
+light power**. `alexacli ask` can query in English prose but is too slow
+and language-fragile for the 15s tray poll. Until the entity list
+returns a `powerState`, `lights[].state` is last commanded:
+
+- `on` / `off` write that state to the cache *before* the speak so a
+  concurrent `desk-switch status --json` (DeskSwitchBar poll / HUD
+  refresh) is honest.
+- A failed speak reverts the cache.
+- A device-list refresh will not clobber a newer command that landed
+  while `alexacli devices` was in flight.
+- When `sh list` later returns a light with `powerState`,
+  `state_source` becomes `entity` and `lights_readable` is true.
+
+Do not expect an Alexa-app / physical-switch toggle to show on the tray
+until that entity read works.
 
 ## Escritório desk light
 
