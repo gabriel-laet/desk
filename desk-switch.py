@@ -8,6 +8,7 @@ Core is orchestration + contract. Hardware plugs in as adapters:
     hosts      — which machine is Mac vs Linux, channels, follow target
     display    — input + PBP/full + OS layout (reference: lgdualup)
                  `adapters.dualup` is a legacy alias of `display`
+    smarthome  — list devices + light on/off (reference: alexa)
 
 Reference adapters live under `adapters/` in this repo and install to
 `~/.local/lib/desk-switch/` (`$DESK_SWITCH_LIB`). Third parties drop a
@@ -22,6 +23,9 @@ binary + `*.manifest.json` (`api_version: 1`) in that libdir, or
     desk-switch switch mac        # same as: to mac
     desk-switch pbp <mode>
     desk-switch full
+    desk-switch smarthome list     # Echo / smart-home devices (adapter)
+    desk-switch smarthome status
+    desk-switch smarthome on|off   # desk light via the bound adapter
     desk-switch watch              # HHKB leave → mouse away; USB appear → desk here
     desk-switch watch --dry-run
 
@@ -44,7 +48,7 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
@@ -79,11 +83,13 @@ ROLE_CAPABILITIES = {
     "mouse": ("mouse.host_switch",),
     "display": ("display.input", "display.pbp", "display.full", "layout.apply"),
     "keyboard": ("keyboard.presence",),
+    "smarthome": ("smarthome.list", "smarthome.status", "light.on", "light.off"),
 }
 ROLE_REFERENCE_ID = {
     "mouse": "mxswitch",
     "display": "lgdualup",
     "keyboard": "hhkb",
+    "smarthome": "alexa",
 }
 BUILTIN_MANIFESTS = {
     "mxswitch": {
@@ -109,6 +115,12 @@ BUILTIN_MANIFESTS = {
         "id": "hhkb",
         "name": "HHKB presence",
         "capabilities": ["keyboard.presence"],
+    },
+    "alexa": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "alexa",
+        "name": "Alexa smart home",
+        "capabilities": ["smarthome.list", "smarthome.status", "light.on", "light.off"],
     },
 }
 
@@ -220,6 +232,7 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     mouse = _as_dict(adapters.get("mouse"))
     hosts_ad = _as_dict(adapters.get("hosts"))
     keyboard = _as_dict(adapters.get("keyboard"))
+    smarthome = _as_dict(adapters.get("smarthome"))
     dual = display_adapter_cfg(user)
     ui = _as_dict(user.get("ui"))
     tray = _as_dict(ui.get("tray"))
@@ -247,6 +260,17 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         cfg["_keyboard_backend"] = str(keyboard["backend"])
     if keyboard.get("path"):
         cfg["_keyboard_path"] = str(keyboard["path"])
+
+    cfg["_smarthome_enabled"] = bool(smarthome.get("enabled", True))
+    if smarthome.get("backend"):
+        cfg["_smarthome_backend"] = str(smarthome["backend"])
+    if smarthome.get("path"):
+        cfg["_smarthome_path"] = str(smarthome["path"])
+    extras: dict[str, str] = {}
+    for key in ("device", "light_on", "light_off", "cli"):
+        if smarthome.get(key):
+            extras[key] = str(smarthome[key])
+    cfg["_smarthome_extras"] = extras
 
     cfg["_dualup_enabled"] = bool(dual.get("enabled", True))
     cfg["_dualup_layout"] = bool(dual.get("layout", True))
@@ -278,6 +302,7 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     )
     if tray.get("density"):
         cfg["_tray_density"] = str(tray["density"])
+    cfg["_tray_lights"] = bool(tray.get("lights"))
     return cfg
 
 
@@ -452,6 +477,16 @@ def hhkb_source_path() -> Path | None:
     if bundled.is_file():
         return bundled
     installed = libexec_dir() / "hhkb"
+    if installed.is_file():
+        return installed
+    return None
+
+
+def alexa_source_path() -> Path | None:
+    bundled = HERE / "adapters" / "alexa" / "alexa.py"
+    if bundled.is_file():
+        return bundled
+    installed = libexec_dir() / "alexa"
     if installed.is_file():
         return installed
     return None
@@ -721,6 +756,8 @@ def _role_enabled(cfg: dict, role: str) -> bool:
         return bool(cfg.get("_dualup_enabled", True))
     if role == "keyboard":
         return bool(cfg.get("_keyboard_enabled", True))
+    if role == "smarthome":
+        return bool(cfg.get("_smarthome_enabled", True))
     return True
 
 
@@ -732,6 +769,8 @@ def _role_pin(cfg: dict, role: str) -> tuple[str | None, str | None]:
         return cfg.get("_display_backend"), cfg.get("_display_path") or None
     if role == "keyboard":
         return cfg.get("_keyboard_backend"), cfg.get("_keyboard_path") or None
+    if role == "smarthome":
+        return cfg.get("_smarthome_backend"), cfg.get("_smarthome_path") or None
     return None, None
 
 
@@ -809,6 +848,10 @@ def bind_role(cfg: dict, role: str) -> dict:
             resolved = resolve_backend_id(reference) or hhkb_source_path()
             cache[role] = _binding("hhkb", resolved, "incore" if resolved == hhkb_source_path() else "reference", enabled=True)
             return cache[role]
+        if role == "smarthome":
+            resolved = resolve_backend_id(reference) or alexa_source_path()
+            cache[role] = _binding("alexa", resolved, "reference" if resolved else "missing", enabled=True)
+            return cache[role]
     cache[role] = _binding(reference, None, "missing", enabled=True)
     return cache[role]
 
@@ -821,6 +864,8 @@ def discovered_adapters(cfg: dict | None = None) -> list[dict]:
         path = resolve_backend_id(adapter_id)
         if path is None and adapter_id == "hhkb":
             path = hhkb_source_path()
+        if path is None and adapter_id == "alexa":
+            path = alexa_source_path()
         if path is None:
             continue
         found[adapter_id] = {
@@ -854,6 +899,54 @@ def lgdualup_path(cfg: dict) -> Path | None:
     bound = bind_role(cfg, "display")
     path = bound.get("path")
     return Path(path) if path else None
+
+
+def smarthome_adapter_path(cfg: dict) -> Path | None:
+    if not cfg.get("_smarthome_enabled", True):
+        return None
+    bound = bind_role(cfg, "smarthome")
+    path = bound.get("path")
+    return Path(path) if path else None
+
+
+def smarthome_adapter_cmd(cfg: dict, *verbs: str) -> list[str] | None:
+    """Argv for the bound smarthome adapter. Core does not name a vendor CLI."""
+    path = smarthome_adapter_path(cfg)
+    if path is None:
+        return None
+    cmd = [str(path), *[str(v) for v in verbs]]
+    extras = cfg.get("_smarthome_extras") if isinstance(cfg.get("_smarthome_extras"), dict) else {}
+    if extras.get("device"):
+        cmd.extend(["--device", str(extras["device"])])
+    if extras.get("light_on"):
+        cmd.extend(["--on-phrase", str(extras["light_on"])])
+    if extras.get("light_off"):
+        cmd.extend(["--off-phrase", str(extras["light_off"])])
+    if extras.get("cli"):
+        cmd.extend(["--cli", str(extras["cli"])])
+    return cmd
+
+
+def invoke_smarthome(cfg: dict, verb: str, *extra: str, timeout: float = 20.0) -> dict | None:
+    cmd = smarthome_adapter_cmd(cfg, verb, *extra)
+    if cmd is None:
+        return None
+    try:
+        proc = run(cmd, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": str(exc)}
+    text = (proc.stdout or "").strip()
+    try:
+        data = json.loads(text) if text else {}
+    except json.JSONDecodeError:
+        data = {"raw": text}
+    if not isinstance(data, dict):
+        data = {"data": data}
+    if proc.returncode != 0 and "ok" not in data:
+        data["ok"] = False
+        data.setdefault("error", (proc.stderr or "").strip() or f"exit {proc.returncode}")
+    data["_returncode"] = proc.returncode
+    return data
 
 
 def switch_mouse(cfg: dict, channel: int | None = None) -> int:
@@ -1399,6 +1492,17 @@ def format_bar_strip(state: dict) -> dict:
     mode = str(state.get("dualup_mode") or "unknown").lower()
     if mode in ("full", "pbp"):
         strip["display"] = mode
+    # Lights stay out of the default strip. Opt in with ui.tray.lights.
+    if state.get("_tray_lights"):
+        lights = ((state.get("adapters") or {}).get("smarthome") or {}).get("lights") or []
+        mark = None
+        if isinstance(lights, list):
+            for item in lights:
+                if isinstance(item, dict) and str(item.get("state") or "") in ("on", "off"):
+                    mark = str(item["state"])
+                    break
+        if mark:
+            strip["lights"] = mark
     return strip
 
 
@@ -1496,6 +1600,18 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
         "path": str(keyboard_bound["path"]) if keyboard_bound.get("path") else None,
         "source": keyboard_bound.get("source"),
     }
+    smarthome_bound = bind_role(cfg, "smarthome")
+    smarthome_path = smarthome_bound.get("path")
+    smarthome = {
+        "enabled": bool(cfg.get("_smarthome_enabled", True)),
+        "available": smarthome_path is not None,
+        "backend": smarthome_bound.get("id") or "alexa",
+        "path": str(smarthome_path) if smarthome_path else None,
+        "source": smarthome_bound.get("source"),
+        "capabilities": list(smarthome_bound.get("capabilities") or []),
+    }
+    if smarthome_bound.get("candidates"):
+        smarthome["candidates"] = smarthome_bound["candidates"]
     discovered = []
     for item in discovered_adapters(cfg):
         discovered.append(
@@ -1525,6 +1641,7 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
         },
         "display": dict(display),
         "dualup": dict(display),
+        "smarthome": smarthome,
         "discovered": discovered,
     }
 
@@ -1608,6 +1725,13 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         adapters["display"]["mode"] = dual_mode
         adapters["display"]["usb"] = dual_usb
         adapters["display"]["inputs"] = inputs
+    snapshot = invoke_smarthome(cfg, "info", timeout=4.0)
+    if isinstance(snapshot, dict) and isinstance(adapters.get("smarthome"), dict):
+        reserved = {"enabled", "available", "backend", "path", "source", "capabilities", "candidates"}
+        for key, value in snapshot.items():
+            if str(key).startswith("_") or key in reserved:
+                continue
+            adapters["smarthome"][key] = value
     present = bool(adapters["hhkb"]["present"])
     state = {
         "os": SYSTEM,
@@ -1640,9 +1764,11 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "adapters": adapters,
         "ui": {"tray": {"density": tray_density(cfg)}},
     }
+    state["_tray_lights"] = bool(cfg.get("_tray_lights"))
     state["bar_label"] = format_bar_label(state)
     state["bar_tooltip"] = format_bar_tooltip(state)
     state["bar_strip"] = format_bar_strip(state)
+    state.pop("_tray_lights", None)
     return state
 
 
@@ -1690,6 +1816,18 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
         f"mac={state.get('dualup_inputs', {}).get('mac', 'hdmi1')}  "
         f"linux={state.get('dualup_inputs', {}).get('linux', 'dp')}  "
         f"{dual.get('path') or '-'}"
+    )
+    home = adapters.get("smarthome") or {}
+    home_state = "available" if home.get("available") else "missing"
+    if not home.get("enabled", True):
+        home_state = "disabled"
+    lights = home.get("lights") if isinstance(home.get("lights"), list) else []
+    light_mark = "unknown"
+    if lights and isinstance(lights[0], dict) and lights[0].get("state"):
+        light_mark = str(lights[0]["state"])
+    print(
+        f"  smarthome   : {home_state}  backend={home.get('backend', 'alexa')}  "
+        f"lights={light_mark}  {home.get('path') or '-'}"
     )
     mouse_line = "missing"
     if state.get("mouse_channel") is not None:
@@ -1812,6 +1950,71 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
         time.sleep(interval)
 
 
+def format_smarthome_human(verb: str, data: dict) -> str:
+    if verb in ("on", "off"):
+        device = data.get("device") or "?"
+        phrase = data.get("phrase") or verb
+        if data.get("ok"):
+            return f"light {verb} → {device}: {phrase}"
+        return f"light {verb} failed: {data.get('error') or 'adapter error'}"
+    devices = data.get("devices") if isinstance(data.get("devices"), list) else []
+    lights = data.get("lights") if isinstance(data.get("lights"), list) else []
+    lines = ["devices:"]
+    if devices:
+        for item in devices:
+            if isinstance(item, dict):
+                lines.append(f"  {item.get('name') or item.get('id') or '?'}")
+            else:
+                lines.append(f"  {item}")
+    else:
+        lines.append("  (none — authenticate the smarthome adapter CLI, then list again)")
+    lines.append("lights:")
+    if lights:
+        for item in lights:
+            if not isinstance(item, dict):
+                lines.append(f"  {item}")
+                continue
+            lines.append(
+                f"  {item.get('name') or item.get('id') or 'desk'}  "
+                f"{item.get('state') or 'unknown'}  via {item.get('speaker') or '?'}"
+            )
+    else:
+        lines.append("  (none)")
+    if data.get("error"):
+        lines.append(f"note: {data['error']}")
+    source = data.get("list_source")
+    if source:
+        lines.append(f"list_source: {source}")
+    return "\n".join(lines)
+
+
+def cmd_smarthome(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
+    action = str(verb or "status").strip().lower()
+    if action in ("info", "probe"):
+        action = "status"
+    if action not in ("list", "status", "on", "off"):
+        print(f"unknown smarthome verb: {verb} (try list, status, on, off)", file=sys.stderr)
+        return 2
+    if smarthome_adapter_path(cfg) is None:
+        print("smarthome adapter not found (install adapters/alexa or pin adapters.smarthome)")
+        return 0
+    extra = ("--refresh",) if action == "status" else ()
+    data = invoke_smarthome(cfg, action, *extra, timeout=25.0)
+    if data is None:
+        print("smarthome adapter not found (install adapters/alexa or pin adapters.smarthome)")
+        return 0
+    if as_json:
+        printable = {k: v for k, v in data.items() if not str(k).startswith("_")}
+        print(json.dumps(printable, indent=2))
+    else:
+        print(format_smarthome_human(action, data))
+    rc = data.get("_returncode")
+    try:
+        return int(rc) if rc is not None else (0 if data.get("ok", True) or data.get("devices") else 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -1835,6 +2038,14 @@ def build_parser() -> argparse.ArgumentParser:
     pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
     sub.add_parser("full", help="DualUp full: USB toggle + 2880x2560 @ 270°")
     sub.add_parser("layout", help="re-apply DualUp full or PBP from the live display")
+    smarthome = sub.add_parser("smarthome", help="list devices / light status / on / off (bound adapter)")
+    smarthome.add_argument(
+        "verb",
+        nargs="?",
+        default="status",
+        help="list | status | on | off",
+    )
+    smarthome.add_argument("--json", action="store_true", help="print adapter JSON")
     return parser
 
 
@@ -1858,6 +2069,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_full(cfg)
     if args.cmd == "layout":
         return cmd_layout(cfg)
+    if args.cmd == "smarthome":
+        return cmd_smarthome(cfg, args.verb, as_json=args.json)
     return 2
 
 

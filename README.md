@@ -13,8 +13,8 @@ Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 *away*. Install the watcher on every computer you leave from.
 
 **In this repo:** `desk-switch` CLI (core), reference adapters under
-`adapters/mxswitch`, `adapters/lgdualup`, `adapters/hhkb`, Omarchy bar
-plugin, macOS menu bar app, LaunchAgent / systemd units.
+`adapters/mxswitch`, `adapters/lgdualup`, `adapters/hhkb`, `adapters/alexa`,
+Omarchy bar plugin, macOS menu bar app, LaunchAgent / systemd units.
 
 Shells stay at `macos/DeskSwitchBar/` and the git-root QML (Omarchy plugin
 layout requires `BarWidget.qml` at the checkout root). A later phase can
@@ -74,6 +74,7 @@ Adapters (roles are capabilities; ids are what you drop on disk):
 | **keyboard** | `keyboard.presence` | `hhkb` | `adapters/hhkb/` |
 | **hosts** | config only | — | `config.json` |
 | **display** | `display.input` / `pbp` / `full` + `layout.apply` | `lgdualup` | `adapters/lgdualup/` |
+| **smarthome** | `smarthome.list` / `smarthome.status` / `light.on` / `light.off` | `alexa` | `adapters/alexa/` |
 
 `adapters.dualup` is a legacy alias of `adapters.display`. Pin with
 `adapters.<role>.backend` / `path`, or drop a binary + manifest in
@@ -82,12 +83,14 @@ ship `desk-switch-<id>` on PATH. See [Plug another adapter](#plug-another-adapte
 
 `status --json` exposes `adapters.mouse` / `adapters.keyboard` /
 `adapters.hosts` / `adapters.display` (and legacy `adapters.dualup`),
-`adapters.discovered`, and the shared bar fields (`target_hint`,
-`bar_label`, additive `bar_strip`, `hhkb_transport`, `hhkb_usb`,
-`hhkb_bluetooth`, `mouse_channel`, `mouse_online`, `dualup_mode`).
-Omarchy QML and macOS DeskSwitchBar parse the same keys. The strip paints
-`bar_strip` (`focus` + optional `display`); chips stay in the click panel.
-`ui.tray.density: "chips"` restores the dense `bar_label` title.
+`adapters.smarthome`, `adapters.discovered`, and the shared bar fields
+(`target_hint`, `bar_label`, additive `bar_strip`, `hhkb_transport`,
+`hhkb_usb`, `hhkb_bluetooth`, `mouse_channel`, `mouse_online`,
+`dualup_mode`). Omarchy QML and macOS DeskSwitchBar parse the same keys.
+The strip paints `bar_strip` (`focus` + optional `display`); chips stay
+in the click panel. Lights stay out of the strip unless
+`ui.tray.lights` is true. `ui.tray.density: "chips"` restores the dense
+`bar_label` title.
 
 **Lock screen / greeter:** keep the HHKB **USB cable in the machine you are
 unlocking**. Omarchy’s password screen often fails to use Bluetooth; USB is
@@ -139,6 +142,7 @@ install` updates. Put `~/.local/bin` on `PATH`.
 ~/.local/lib/desk-switch/lgdualup        # display USB helper
 ~/.local/lib/desk-switch/dualup-layout   # display OS layout (displayplacer / hyprctl)
 ~/.local/lib/desk-switch/hhkb            # keyboard.presence reference
+~/.local/lib/desk-switch/alexa           # smarthome reference (wraps alexacli)
 ~/.local/lib/desk-switch/*.manifest.json # api_version: 1
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
@@ -310,6 +314,10 @@ desk-switch full                # USB full + OS layout (Mac 2880x2560@270 / Linu
 desk-switch layout              # re-apply full or PBP from the live DualUp geometry
 desk-switch watch               # HHKB leave → mouse away; USB appear → to this host
 desk-switch watch --dry-run
+desk-switch smarthome list      # Echo devices (and entities when that API works)
+desk-switch smarthome status    # light-oriented snapshot
+desk-switch smarthome on        # desk light on (Escritório: "acender a luz")
+desk-switch smarthome off       # desk light off (Escritório: "apagar a luz")
 desk-switch --version
 ```
 
@@ -366,6 +374,11 @@ Edit [`config.example.json`](config.example.json) →
       "switch_pbp": false,
       "display_id": "9134432D-0196-4653-9712-EFCAF1980612",
       "inputs": { "mac": "hdmi1", "linux": "dp" }
+    },
+    "smarthome": {
+      "enabled": true,
+      "backend": "alexa",
+      "device": "Escritório"
     }
   },
   "ui": { "tray": { "density": "strip" } }
@@ -377,7 +390,9 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.mouse.backend` / `path` | Mouse adapter id or executable. Pin wins over libdir scan |
 | `adapters.keyboard.backend` / `path` | Keyboard.presence adapter (`hhkb` is the reference) |
 | `adapters.display` | Same role as `adapters.dualup` (legacy alias). `backend` / `path` pin the display adapter |
+| `adapters.smarthome` | Smart-home role. `backend` / `path` pin the adapter (`alexa` is the reference). Optional `device` is the Echo that hears light phrases |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
+| `ui.tray.lights` | If true, `bar_strip` may include a `lights` on/off mark. Default omit — bars stay quiet |
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
 | `adapters.hosts.*.channel` | Easy-Switch slot for `to mac` / `to linux` |
@@ -460,7 +475,41 @@ channel. A worked example lives at [`examples/dummy-mouse/`](examples/dummy-mous
 
 Display adapters list `display.input` / `display.pbp` / `display.full` /
 `layout.apply`. Keyboard adapters list `keyboard.presence` and speak JSON
-from `info` (`present`, `usb`, `bluetooth`, `transport`).
+from `info` (`present`, `usb`, `bluetooth`, `transport`). Smart-home
+adapters list `smarthome.list` / `smarthome.status` / `light.on` /
+`light.off` and speak JSON from `info` / `list` / `on` / `off`.
+
+## Alexa / smart-home (Mac first)
+
+The `alexa` adapter is a thin wrapper around [`alexacli`](https://github.com/buddyh/alexa-cli).
+desk-switch never talks to Amazon itself.
+
+1. Install `alexacli` on the Mac (`brew install buddyh/tap/alexacli`).
+2. Authenticate once: `alexacli auth` (this desk uses domain `amazon.com`).
+   Credentials live in `~/.alexa-cli/config.json`.
+3. `make install` so `~/.local/lib/desk-switch/alexa` + its manifest land.
+4. Confirm Echo names: `desk-switch smarthome list` (Sala, Escritório).
+
+`alexacli smarthome list` currently fails with an empty JSON parse on this
+desk. The adapter lists **Echo devices** via `alexacli devices` today and
+retries the entity list later without changing core.
+
+**Escritório desk light — safe phrases only.** Alexa routes by the Echo
+you address (`-d Escritório`), not by stuffing the room into the sentence.
+Spoken text must be exactly:
+
+| Action | Command | Utterance |
+|---|---|---|
+| On | `desk-switch smarthome on` | `acender a luz` |
+| Off | `desk-switch smarthome off` | `apagar a luz` |
+
+Do **not** say “acender a luz do escritório” / “apagar a luz do escritório”
+— that hits the wrong device. The adapter refuses an utterance that names
+the Echo.
+
+Light state in `status --json` is last commanded (`on` / `off`) or
+`unknown` until `smarthome list` can read entities. Bars do not show it
+unless `ui.tray.lights` is on.
 
 ## Troubleshooting
 
