@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import io
 import json
-
-
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -332,6 +332,7 @@ class DualupAdapterTests(unittest.TestCase):
             "_dualup_layout_helper": str(layout),
             "_dualup_layout_retries": 3,
             "_dualup_layout_retry_delay_s": 0,
+            "_dualup_layout_settle_s": 0,
             "pbp_mode": "50-50",
             "hosts": {
                 "mac": {"channel": 1, "dualup_input": "hdmi1"},
@@ -421,6 +422,58 @@ class DualupAdapterTests(unittest.TestCase):
             self.assertEqual(calls[0][1:], ["pbp", "full"])
             self.assertEqual(calls[1], [str(layout), "full"])
             self.assertEqual(len(calls), 2)
+
+    def test_full_settles_before_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lg, layout, _log = self._helpers(tmp)
+            cfg = self._cfg(lg, layout, _dualup_layout_settle_s=0.4)
+            order: list[str] = []
+
+            def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+                if cmd[0] == str(lg):
+                    order.append("usb")
+                else:
+                    order.append("layout")
+                return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+            def fake_sleep(seconds: float) -> None:
+                order.append(f"sleep:{seconds}")
+
+            with mock.patch.object(ds, "run", side_effect=fake_run), mock.patch(
+                "sys.stdout", io.StringIO()
+            ), mock.patch.object(ds, "lgdualup_path", return_value=lg), mock.patch.object(
+                ds, "dualup_layout_path", return_value=layout
+            ), mock.patch.object(ds.time, "sleep", side_effect=fake_sleep):
+                rc = ds.cmd_full(cfg)
+            self.assertEqual(rc, 0)
+            self.assertEqual(order, ["usb", "sleep:0.4", "layout"])
+
+    def test_pbp_settles_after_assign_before_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lg, layout, _log = self._helpers(tmp)
+            cfg = self._cfg(lg, layout, _dualup_layout_settle_s=0.4)
+            order: list[str] = []
+
+            def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+                if cmd[0] == str(lg) and cmd[1:2] == ["pbp-assign"]:
+                    order.append("assign")
+                elif cmd[0] == str(lg):
+                    order.append("usb")
+                else:
+                    order.append("layout")
+                return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+            def fake_sleep(seconds: float) -> None:
+                order.append(f"sleep:{seconds}")
+
+            with mock.patch.object(ds, "run", side_effect=fake_run), mock.patch(
+                "sys.stdout", io.StringIO()
+            ), mock.patch.object(ds, "lgdualup_path", return_value=lg), mock.patch.object(
+                ds, "dualup_layout_path", return_value=layout
+            ), mock.patch.object(ds.time, "sleep", side_effect=fake_sleep):
+                rc = ds.cmd_pbp(cfg, "50-50")
+            self.assertEqual(rc, 0)
+            self.assertEqual(order, ["usb", "assign", "sleep:0.4", "layout"])
 
     def test_layout_retries_when_edid_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -539,6 +592,7 @@ class DualupAdapterTests(unittest.TestCase):
 class DualupLayoutScriptTests(unittest.TestCase):
     MAC = ROOT / "macos" / "dualup-layout"
     LNX = ROOT / "linux" / "dualup-layout"
+    DID = "9134432D-0196-4653-9712-EFCAF1980612"
 
     def _run_script(
         self, script: Path, args: list[str], env_bin: Path, extra_env: dict | None = None
@@ -554,142 +608,158 @@ class DualupLayoutScriptTests(unittest.TestCase):
             env=env,
         )
 
+    def _macos_list(self, res: str, rotation: int, modes: list[str]) -> str:
+        mode_block = "\n".join(modes)
+        return (
+            f"Persistent screen id: {self.DID}\n"
+            "Type: 28 inch external screen\n"
+            f"Resolution: {res}\n"
+            "Hertz: 60\n"
+            "Color Depth: 8\n"
+            "Scaling: off\n"
+            "Origin: (0,0) - main display\n"
+            f"Rotation: {rotation}\n"
+            "Enabled: true\n"
+            f"Resolutions for persistent screen id: {self.DID}\n"
+            f"{mode_block}\n"
+        )
+
+    def _write_displayplacer(
+        self,
+        bin_dir: Path,
+        list_before: str,
+        list_after: str | None = None,
+        *,
+        reject_verbose: bool = False,
+        apply_rc: int = 0,
+    ) -> None:
+        before = bin_dir / "list-before.txt"
+        after = bin_dir / "list-after.txt"
+        before.write_text(list_before)
+        after.write_text(list_after if list_after is not None else list_before)
+        placer = bin_dir / "displayplacer"
+        placer.write_text(
+            "#!/bin/sh\n"
+            f"BEFORE={shlex.quote(str(before))}\n"
+            f"AFTER={shlex.quote(str(after))}\n"
+            f"STATE={shlex.quote(str(bin_dir / 'applied'))}\n"
+            f"REJECT_VERBOSE={shlex.quote('yes' if reject_verbose else 'no')}\n"
+            f"APPLY_RC={apply_rc}\n"
+            'if [ "$1" = list ]; then\n'
+            '  if [ -f "$STATE" ]; then cat "$AFTER"; else cat "$BEFORE"; fi\n'
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$REJECT_VERBOSE" = yes ]; then\n'
+            '  case "$1" in\n'
+            "    *hz:*|*color_depth:*) echo 'verbose rejected'; exit 1 ;;\n"
+            "  esac\n"
+            "fi\n"
+            'if [ "$APPLY_RC" -eq 0 ]; then touch "$STATE"; fi\n'
+            'echo "applied:$*"\n'
+            'exit "$APPLY_RC"\n'
+        )
+        placer.chmod(0o755)
+
+    def _assert_verbose_apply(self, stdout: str, res: str) -> None:
+        self.assertIn(f"res:{res}", stdout)
+        self.assertIn("hz:60", stdout)
+        self.assertIn("color_depth:8", stdout)
+        self.assertIn("enabled:true", stdout)
+        self.assertIn("scaling:off", stdout)
+        self.assertIn("origin:(0,0)", stdout)
+        self.assertIn("degree:270", stdout)
+        self.assertIn(
+            f"id:{self.DID} res:{res} hz:60 color_depth:8 enabled:true "
+            f"scaling:off origin:(0,0) degree:270",
+            stdout,
+        )
+
     def test_macos_full_is_2880x2560_at_270(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            placer = bin_dir / "displayplacer"
-            placer.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = list ]; then\n"
-                "cat <<'EOF'\n"
-                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
-                "Type: 28 inch external screen\n"
-                "Resolution: 2880x2560\n"
-                "  mode 0: res:2880x2560 hz:60\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo \"applied:$*\"\n"
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list("2880x2560", 270, ["  mode 0: res:2880x2560 hz:60"]),
             )
-            placer.chmod(0o755)
-            proc = self._run_script(self.MAC, ["full", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+            proc = self._run_script(self.MAC, ["full", "--id", self.DID], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:2880x2560 degree:270", proc.stdout)
+        self._assert_verbose_apply(proc.stdout, "2880x2560")
+        self.assertNotIn("fallback", proc.stdout)
 
     def test_macos_pbp_prefers_2880x1280_at_270(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            placer = bin_dir / "displayplacer"
-            placer.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = list ]; then\n"
-                "cat <<'EOF'\n"
-                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
-                "Type: 28 inch external screen\n"
-                "  mode 0: res:2880x1280 hz:60\n"
-                "  mode 1: res:2560x1440 hz:60\n"
-                "  mode 2: res:1920x1080 hz:60\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo \"applied:$*\"\n"
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list(
+                    "2880x1280",
+                    270,
+                    [
+                        "  mode 0: res:2880x1280 hz:60",
+                        "  mode 1: res:2560x1440 hz:60",
+                        "  mode 2: res:1920x1080 hz:60",
+                    ],
+                ),
             )
-            placer.chmod(0o755)
-            proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+            proc = self._run_script(self.MAC, ["pbp", "--id", self.DID], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:2880x1280 degree:270", proc.stdout)
+        self._assert_verbose_apply(proc.stdout, "2880x1280")
         self.assertNotIn("degree:0", proc.stdout)
         self.assertNotIn("1080x1920", proc.stdout)
 
     def test_macos_full_accepts_degree0_edid_2560x2880(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            placer = bin_dir / "displayplacer"
-            placer.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = list ]; then\n"
-                "cat <<'EOF'\n"
-                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
-                "Type: 28 inch external screen\n"
-                "Resolution: 2560x2880\n"
-                "  mode 0: res:2560x2880 hz:60\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo \"applied:$*\"\n"
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list("2560x2880", 0, ["  mode 0: res:2560x2880 hz:60"]),
+                self._macos_list("2880x2560", 270, ["  mode 0: res:2880x2560 hz:60"]),
             )
-            placer.chmod(0o755)
-            proc = self._run_script(self.MAC, ["full", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+            proc = self._run_script(self.MAC, ["full", "--id", self.DID], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:2880x2560 degree:270", proc.stdout)
+        self._assert_verbose_apply(proc.stdout, "2880x2560")
 
     def test_macos_pbp_accepts_degree0_edid_1280x2880(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            placer = bin_dir / "displayplacer"
-            placer.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = list ]; then\n"
-                "cat <<'EOF'\n"
-                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
-                "Type: 28 inch external screen\n"
-                "Resolution: 1280x2880\n"
-                "  mode 0: res:1280x2880 hz:60\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo \"applied:$*\"\n"
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list("1280x2880", 0, ["  mode 0: res:1280x2880 hz:60"]),
+                self._macos_list("2880x1280", 270, ["  mode 0: res:2880x1280 hz:60"]),
             )
-            placer.chmod(0o755)
-            proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+            proc = self._run_script(self.MAC, ["pbp", "--id", self.DID], bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:2880x1280 degree:270", proc.stdout)
+        self._assert_verbose_apply(proc.stdout, "2880x1280")
         self.assertNotIn("res:1280x2880", proc.stdout)
 
     def test_macos_res_flag_accepts_axis_swap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            placer = bin_dir / "displayplacer"
-            placer.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = list ]; then\n"
-                "cat <<'EOF'\n"
-                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
-                "Type: 28 inch external screen\n"
-                "  mode 0: res:2560x2880 hz:60\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo \"applied:$*\"\n"
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list("2560x2880", 0, ["  mode 0: res:2560x2880 hz:60"]),
+                self._macos_list("2880x2560", 270, ["  mode 0: res:2880x2560 hz:60"]),
             )
-            placer.chmod(0o755)
             proc = self._run_script(
                 self.MAC,
-                ["full", "--id", "9134432D-0196-4653-9712-EFCAF1980612", "--res", "2560x2880"],
+                ["full", "--id", self.DID, "--res", "2560x2880"],
                 bin_dir,
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("res:2880x2560 degree:270", proc.stdout)
+        self._assert_verbose_apply(proc.stdout, "2880x2560")
 
     def test_macos_pbp_does_not_use_generic_landscape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            placer = bin_dir / "displayplacer"
-            placer.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = list ]; then\n"
-                "cat <<'EOF'\n"
-                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
-                "Type: 28 inch external screen\n"
-                "  mode 0: res:1920x1080 hz:60\n"
-                "  mode 1: res:2560x1440 hz:60\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo \"applied:$*\"\n"
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list(
+                    "1920x1080",
+                    0,
+                    ["  mode 0: res:1920x1080 hz:60", "  mode 1: res:2560x1440 hz:60"],
+                ),
             )
-            placer.chmod(0o755)
-            proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+            proc = self._run_script(self.MAC, ["pbp", "--id", self.DID], bin_dir)
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertNotIn("1920x1080", proc.stdout)
         self.assertNotIn("2560x1440", proc.stdout)
@@ -697,23 +767,36 @@ class DualupLayoutScriptTests(unittest.TestCase):
     def test_macos_pbp_exits_2_when_edid_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            placer = bin_dir / "displayplacer"
-            placer.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = list ]; then\n"
-                "cat <<'EOF'\n"
-                "Persistent screen id: 9134432D-0196-4653-9712-EFCAF1980612\n"
-                "Type: 28 inch external screen\n"
-                "Resolution: 2880x2560\n"
-                "  mode 0: res:2880x2560 hz:60\n"
-                "EOF\n"
-                "exit 0\n"
-                "fi\n"
-                "echo unexpected\n"
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list("2880x2560", 270, ["  mode 0: res:2880x2560 hz:60"]),
             )
-            placer.chmod(0o755)
-            proc = self._run_script(self.MAC, ["pbp", "--id", "9134432D-0196-4653-9712-EFCAF1980612"], bin_dir)
+            proc = self._run_script(self.MAC, ["pbp", "--id", self.DID], bin_dir)
         self.assertEqual(proc.returncode, 2)
+
+    def test_macos_exits_2_when_apply_does_not_rotate(self) -> None:
+        stuck = self._macos_list("2560x2880", 0, ["  mode 0: res:2560x2880 hz:60"])
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_displayplacer(bin_dir, stuck, stuck)
+            proc = self._run_script(self.MAC, ["full", "--id", self.DID], bin_dir)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("wanted 2880x2560 @ 270", proc.stderr)
+        self.assertIn("2560x2880 @ 0", proc.stderr)
+
+    def test_macos_falls_back_to_short_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_displayplacer(
+                bin_dir,
+                self._macos_list("2560x2880", 0, ["  mode 0: res:2560x2880 hz:60"]),
+                self._macos_list("2880x2560", 270, ["  mode 0: res:2880x2560 hz:60"]),
+                reject_verbose=True,
+            )
+            proc = self._run_script(self.MAC, ["full", "--id", self.DID], bin_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("fallback", proc.stdout)
+        self.assertIn(f"id:{self.DID} res:2880x2560 degree:270", proc.stdout)
 
     def _write_hyprctl(self, bin_dir: Path, monitors_json: str) -> None:
         hypr = bin_dir / "hyprctl"
@@ -770,6 +853,57 @@ class DualupLayoutScriptTests(unittest.TestCase):
             proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
         self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
         self.assertNotIn("2560x1440", proc.stdout)
+
+
+class MacosDualupLayoutUnitTests(unittest.TestCase):
+    DID = "9134432D-0196-4653-9712-EFCAF1980612"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = ROOT / "macos" / "dualup-layout"
+        loader = importlib.machinery.SourceFileLoader("dualup_layout_macos", str(path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        cls.ml = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.ml)
+
+    def test_pick_res_keeps_edid_axis_swap(self) -> None:
+        text = (
+            f"Persistent screen id: {self.DID}\n"
+            "Resolution: 2560x2880\n"
+            "  mode 0: res:2560x2880 hz:60\n"
+        )
+        self.assertEqual(self.ml.pick_res("full", text, ""), "2880x2560")
+
+    def test_verbose_profile_uses_defaults(self) -> None:
+        profile = self.ml.verbose_profile(self.DID, "2880x2560", 270, {})
+        self.assertEqual(
+            profile,
+            f"id:{self.DID} res:2880x2560 hz:60 color_depth:8 enabled:true "
+            "scaling:off origin:(0,0) degree:270",
+        )
+
+    def test_layout_matches_requires_res_and_rotation(self) -> None:
+        ok = (
+            f"Persistent screen id: {self.DID}\n"
+            "Resolution: 2880x2560\n"
+            "Rotation: 270\n"
+        )
+        stuck = (
+            f"Persistent screen id: {self.DID}\n"
+            "Resolution: 2560x2880\n"
+            "Rotation: 0\n"
+        )
+        self.assertTrue(self.ml.layout_matches(ok, self.DID, "2880x2560", 270))
+        self.assertFalse(self.ml.layout_matches(stuck, self.DID, "2880x2560", 270))
+        self.assertFalse(self.ml.layout_matches(ok, self.DID, "2880x2560", 0))
+
+    def test_mode_line_extras_from_swapped_edid(self) -> None:
+        text = "  mode 0: res:2560x2880 hz:60 color_depth:8 scaling:off\n"
+        extras = self.ml.mode_line_extras(text, "2880x2560")
+        self.assertEqual(extras["hz"], "60")
+        self.assertEqual(extras["color_depth"], "8")
+        self.assertEqual(extras["scaling"], "off")
 
 
 class HhkbTransportTests(unittest.TestCase):

@@ -18,8 +18,14 @@ half/full markers are what we want — wait for the real mode (exit 2).
 
 ``--res`` accepts the axis-swapped form of a listed mode.
 
-Exit 0: layout applied (or displayplacer missing — skipped)
-Exit 2: target mode not in EDID yet (caller should retry)
+Apply uses the verbose displayplacer profile (hz / color_depth / scaling /
+origin) first; the short ``id:… res:… degree:…`` form is the fallback.
+After apply, re-``list`` and confirm Resolution + Rotation. displayplacer
+can return 0 without rotating (DualUp full often stays ``2560x2880`` @ 0);
+that is exit 2 so ``apply_dualup_layout`` retries.
+
+Exit 0: layout applied and verified (or displayplacer missing — skipped)
+Exit 2: target mode not in EDID yet, or apply did not stick (caller should retry)
 Exit 1: hard failure
 """
 
@@ -38,7 +44,15 @@ PBP_APPLY_RES = "2880x1280"
 PBP_RES = PBP_APPLY_RES
 PBP_EDID = ("2880x1280", "1280x2880")
 RES_RE = re.compile(r"(?:res:)?(\d{3,5})x(\d{3,5})")
+RES_LINE_RE = re.compile(r"^Resolution:\s*(\d{3,5}x\d{3,5})", re.M)
+ROT_LINE_RE = re.compile(r"^Rotation:\s*(-?\d+)", re.M)
+FIELD_LINE_RE = re.compile(r"^(Hertz|Color Depth|Scaling|Origin|Enabled):\s*(.+)$", re.M)
+MODE_KV_RE = re.compile(r"(res|hz|color_depth|scaling|enabled|origin):(\S+)")
 TILT_DEGREE = 270
+DEFAULT_HZ = "60"
+DEFAULT_COLOR_DEPTH = "8"
+DEFAULT_SCALING = "off"
+DEFAULT_ORIGIN = "(0,0)"
 DUALUP_MARKERS = (
     "2880x2560",
     "2560x2880",
@@ -147,6 +161,130 @@ def pick_res(mode: str, text: str, requested: str) -> str | None:
     return None
 
 
+def screen_by_id(screens: list[dict], display_id: str) -> dict | None:
+    for screen in screens:
+        if screen.get("id") == display_id:
+            return screen
+    return None
+
+
+def screen_resolution(text: str) -> str:
+    match = RES_LINE_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def screen_rotation(text: str) -> int | None:
+    match = ROT_LINE_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def screen_header_extras(text: str) -> dict[str, str]:
+    extras: dict[str, str] = {}
+    for match in FIELD_LINE_RE.finditer(text):
+        key = match.group(1).lower().replace(" ", "_")
+        raw = match.group(2).strip()
+        if key == "hertz":
+            extras["hz"] = raw.split()[0]
+        elif key == "color_depth":
+            extras["color_depth"] = raw.split()[0]
+        elif key == "scaling":
+            extras["scaling"] = raw.split()[0]
+        elif key == "enabled":
+            extras["enabled"] = raw.split()[0]
+        elif key == "origin":
+            origin = re.search(r"\(-?\d+,-?\d+\)", raw)
+            if origin:
+                extras["origin"] = origin.group(0)
+    return extras
+
+
+def parse_mode_kv(line: str) -> dict[str, str]:
+    return {match.group(1): match.group(2) for match in MODE_KV_RE.finditer(line)}
+
+
+def mode_line_extras(text: str, res: str) -> dict[str, str]:
+    """hz/color_depth/scaling from a listed mode (exact res, else axis-swap)."""
+    swapped = swap_res(res)
+    fallback: dict[str, str] = {}
+    for line in text.splitlines():
+        kv = parse_mode_kv(line)
+        listed = kv.get("res")
+        if listed not in (res, swapped):
+            continue
+        extras = {key: value for key, value in kv.items() if key != "res"}
+        if listed == res:
+            return extras
+        if not fallback:
+            fallback = extras
+    return fallback
+
+
+def apply_extras(text: str, screen_text: str, res: str) -> dict[str, str]:
+    extras = {
+        "hz": DEFAULT_HZ,
+        "color_depth": DEFAULT_COLOR_DEPTH,
+        "enabled": "true",
+        "scaling": DEFAULT_SCALING,
+        "origin": DEFAULT_ORIGIN,
+    }
+    extras.update(screen_header_extras(screen_text))
+    extras.update(mode_line_extras(text, res))
+    return extras
+
+
+def verbose_profile(display_id: str, res: str, degree: int, extras: dict[str, str]) -> str:
+    return (
+        f"id:{display_id} res:{res} hz:{extras.get('hz') or DEFAULT_HZ} "
+        f"color_depth:{extras.get('color_depth') or DEFAULT_COLOR_DEPTH} "
+        f"enabled:{extras.get('enabled') or 'true'} "
+        f"scaling:{extras.get('scaling') or DEFAULT_SCALING} "
+        f"origin:{extras.get('origin') or DEFAULT_ORIGIN} degree:{degree}"
+    )
+
+
+def short_profile(display_id: str, res: str, degree: int) -> str:
+    return f"id:{display_id} res:{res} degree:{degree}"
+
+
+def layout_matches(text: str, display_id: str, res: str, degree: int) -> bool:
+    screen = screen_by_id(parse_screens(text), display_id)
+    blob = screen.get("text") if screen else ""
+    if not blob:
+        return False
+    got_res = screen_resolution(blob)
+    got_rot = screen_rotation(blob)
+    return got_res == res and got_rot == degree
+
+
+def current_layout(text: str, display_id: str) -> tuple[str, str]:
+    screen = screen_by_id(parse_screens(text), display_id)
+    blob = screen.get("text") if screen else ""
+    if not blob:
+        return ("?", "?")
+    got_res = screen_resolution(blob) or "?"
+    got_rot = screen_rotation(blob)
+    return (got_res, str(got_rot) if got_rot is not None else "?")
+
+
+def print_placer(proc: subprocess.CompletedProcess) -> None:
+    out = (proc.stdout or "").rstrip()
+    err = (proc.stderr or "").rstrip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr if proc.returncode else sys.stdout)
+
+
+def apply_profile(placer: str, profile: str) -> int:
+    try:
+        applied = run([placer, profile], timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"dualup-layout: displayplacer apply failed: {exc}", file=sys.stderr)
+        return 2
+    print_placer(applied)
+    return 2 if applied.returncode != 0 else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("full", "pbp"))
@@ -195,20 +333,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"dualup-layout: {want} not in EDID yet", file=sys.stderr)
         return 2
 
-    cmd = [placer, f"id:{display_id} res:{res} degree:{degree}"]
-    print(f"dualup-layout {args.mode} → id:{display_id} res:{res} degree:{degree}")
+    screen = screen_by_id(screens, display_id)
+    extras = apply_extras(text, (screen or {}).get("text") or "", res)
+    verbose = verbose_profile(display_id, res, degree, extras)
+    short = short_profile(display_id, res, degree)
+    print(f"dualup-layout {args.mode} → {verbose}")
+    if apply_profile(placer, verbose) != 0:
+        print(f"dualup-layout {args.mode} fallback → {short}")
+        if apply_profile(placer, short) != 0:
+            return 2
+
     try:
-        applied = run(cmd, timeout=8.0)
+        checked = run([placer, "list"], timeout=8.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"dualup-layout: displayplacer apply failed: {exc}", file=sys.stderr)
+        print(f"dualup-layout: displayplacer list failed: {exc}", file=sys.stderr)
         return 2
-    out = (applied.stdout or "").rstrip()
-    err = (applied.stderr or "").rstrip()
-    if out:
-        print(out)
-    if err:
-        print(err, file=sys.stderr if applied.returncode else sys.stdout)
-    if applied.returncode != 0:
+    if checked.returncode != 0:
+        err = (checked.stderr or checked.stdout or "").strip()
+        print(f"dualup-layout: displayplacer list failed: {err}", file=sys.stderr)
+        return 2
+    after = checked.stdout or ""
+    if not layout_matches(after, display_id, res, degree):
+        got_res, got_rot = current_layout(after, display_id)
+        print(
+            f"dualup-layout: wanted {res} @ {degree}, "
+            f"displayplacer list has {got_res} @ {got_rot}",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

@@ -920,7 +920,7 @@ def dualup_assign_pbp_inputs(cfg: dict) -> int:
 
 
 def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
-    """USB PBP/full, then (for PBP) input pair, then tilted OS layout."""
+    """USB PBP/full, then (for PBP) input pair, settle, then tilted OS layout."""
     chosen = mode.strip()
     verb = layout_verb(chosen)
     print(f"DualUp {verb} → {chosen}")
@@ -933,13 +933,13 @@ def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
         return rc
     if verb == "pbp":
         rc = rc or dualup_assign_pbp_inputs(cfg)
-        adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
-        raw_settle = cfg.get("_dualup_layout_settle_s")
-        if raw_settle is None:
-            raw_settle = adapters.get("layout_settle_s", LAYOUT_DEFAULT_SETTLE_S)
-        settle = float(raw_settle)
-        if settle > 0:
-            time.sleep(settle)
+    adapters = _as_dict(_as_dict(cfg.get("adapters")).get("dualup"))
+    raw_settle = cfg.get("_dualup_layout_settle_s")
+    if raw_settle is None:
+        raw_settle = adapters.get("layout_settle_s", LAYOUT_DEFAULT_SETTLE_S)
+    settle = float(raw_settle)
+    if settle > 0:
+        time.sleep(settle)
     layout_rc = apply_dualup_layout(cfg, chosen)
     apply_peer_layout(cfg, chosen)
     return rc or layout_rc
