@@ -1,3 +1,0 @@
-#!/bin/sh
-# Deprecated alias — prefer `desk`.
-exec "$(dirname "$0")/desk" "$@"

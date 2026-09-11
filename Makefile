@@ -1,9 +1,9 @@
 PREFIX ?= $(HOME)/.local
 BINDIR := $(PREFIX)/bin
 LIBDIR := $(PREFIX)/lib/desk
-CONFDIR := $(HOME)/.config/hhkb-mx-follow
-CONFDIR_OLD := $(HOME)/.config/desk-switch
-CONFDIR_NEW := $(HOME)/.config/desk
+CONFDIR := $(HOME)/.config/desk
+CONFDIR_LEGACY_SWITCH := $(HOME)/.config/desk-switch
+CONFDIR_LEGACY_HHKB := $(HOME)/.config/hhkb-mx-follow
 UNAME := $(shell uname -s)
 APPDIR := $(HOME)/Applications
 MENUBAR_APP := DeskSwitchBar.app
@@ -35,10 +35,9 @@ endif
 # Helpers install to ~/.local/lib/desk/<id> (legacy ~/.local/lib/desk-switch is still read).
 # Shells: macos/DeskSwitchBar + linux/omarchy (plugin manifest stays at git root).
 install: mxswitch lgdualup
-	install -d $(BINDIR) $(LIBDIR) $(CONFDIR) $(CONFDIR_OLD) $(CONFDIR_NEW)
+	install -d $(BINDIR) $(LIBDIR) $(CONFDIR)
 	install -m 755 desk.py $(BINDIR)/desk
-	install -m 755 scripts/desk-alias $(BINDIR)/desk-switch
-	install -m 755 scripts/desk-alias $(BINDIR)/hhkb-mx-follow
+	rm -f $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow
 ifeq ($(UNAME),Darwin)
 	install -m 755 mxswitch $(LIBDIR)/mxswitch
 	install -m 755 lgdualup $(LIBDIR)/lgdualup
@@ -61,20 +60,19 @@ endif
 	install -m 755 scripts/desk-adapter-shim $(BINDIR)/mxswitch
 	install -m 755 scripts/desk-adapter-shim $(BINDIR)/lgdualup
 	install -m 755 scripts/desk-adapter-shim $(BINDIR)/kettle
-	@if [ ! -f $(CONFDIR)/config.json ] && [ ! -f $(CONFDIR_OLD)/config.json ] && [ ! -f $(CONFDIR_NEW)/config.json ]; then \
+	@if [ ! -f $(CONFDIR)/config.json ] && [ ! -f $(CONFDIR_LEGACY_SWITCH)/config.json ] && [ ! -f $(CONFDIR_LEGACY_HHKB)/config.json ]; then \
 		if [ "$(UNAME)" = Darwin ]; then \
 			sed -e 's#"this_host": "mac"#"this_host": "mac"#' \
 				-e 's#"follow_channel": 2#"follow_channel": 2#' \
-				config.example.json > $(CONFDIR_NEW)/config.json; \
+				config.example.json > $(CONFDIR)/config.json; \
 		else \
 			sed -e 's#"this_host": "mac"#"this_host": "linux"#' \
 				-e 's#"follow_channel": 2#"follow_channel": 1#' \
-				config.example.json > $(CONFDIR_NEW)/config.json; \
+				config.example.json > $(CONFDIR)/config.json; \
 		fi; \
-		echo "wrote $(CONFDIR_NEW)/config.json — set adapters.dualup.inputs from desk status / DualUp --list"; \
+		echo "wrote $(CONFDIR)/config.json — set adapters.dualup.inputs from desk status / DualUp --list"; \
 	fi
 	@echo "installed $(BINDIR)/desk"
-	@echo "  deprecated aliases: $(BINDIR)/desk-switch  $(BINDIR)/hhkb-mx-follow"
 	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb  $(LIBDIR)/alexa  $(LIBDIR)/kettle  $(LIBDIR)/weather"
 	@echo "  manifests: $(LIBDIR)/*.manifest.json"
 	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/kettle"

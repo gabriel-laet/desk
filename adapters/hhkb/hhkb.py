@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """HHKB keyboard.presence reference adapter.
 
-Core follow policy (watch edges, follow_channel) stays in desk-switch.
+Core follow policy (watch edges, follow_channel) stays in desk.
 VID/PID, USB-ghost matching, and ioreg/sysfs/hidutil probes live here.
 
     hhkb info [--vid 0x04FE] [--pid 0x0016]   # JSON presence
     hhkb probe                                 # same as info
 
-When installed: ~/.local/lib/desk-switch/hhkb
-desk-switch prefers this binary when discovered; otherwise it imports this
+When installed: ~/.local/lib/desk/hhkb
+desk prefers this binary when discovered; otherwise it imports this
 module from the source tree as a temporary in-process fallback.
 """
 

@@ -13,10 +13,10 @@ Core orchestrates. Shells only paint. Hardware plugs in as adapters:
     weather    — Open-Meteo ambient ° + altitude (reference: weather)
 
 Reference adapters live under `adapters/` and install to
-`~/.local/lib/desk/` (`$DESK_LIB`, then `$DESK_SWITCH_LIB`, then the
-legacy `~/.local/lib/desk-switch/` path). Third parties drop a binary +
-`*.manifest.json` (`api_version: 1`) in that libdir, or `desk-<id>` /
-`desk-switch-<id>` on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
+`~/.local/lib/desk/` (`$DESK_LIB`). Older libdir and config paths still
+load for one release. Third parties drop a binary +
+`*.manifest.json` (`api_version: 1`) in that libdir, or `desk-<id>`
+on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
 
     desk status
     desk status --json
@@ -35,8 +35,6 @@ legacy `~/.local/lib/desk-switch/` path). Third parties drop a binary +
     desk weather status     # Open-Meteo ambient (adapter)
     desk watch              # HHKB leave → mouse away; USB appear → desk here
     desk watch --dry-run
-
-`desk-switch` and `hhkb-mx-follow` are deprecated aliases for the same program.
 """
 
 from __future__ import annotations
@@ -1955,8 +1953,6 @@ def peek_peer_status(cfg: dict) -> dict | None:
     remote = (
         'export PATH="$HOME/.local/bin:$PATH"; '
         "if command -v desk >/dev/null; then desk status --json --local; "
-        "elif command -v desk-switch >/dev/null; then desk-switch status --json --local; "
-        "elif command -v hhkb-mx-follow >/dev/null; then hhkb-mx-follow status --json --local; "
         "else echo '{}'; fi"
     )
     try:

@@ -783,13 +783,13 @@ enum DeskSwitchCLI {
 
     static func locate() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for name in ["desk", "desk-switch", "hhkb-mx-follow"] {
+        for name in ["desk"] {
             let path = "\(home)/.local/bin/\(name)"
             if FileManager.default.isExecutableFile(atPath: path) {
                 return path
             }
         }
-        for name in ["desk", "desk-switch", "hhkb-mx-follow"] {
+        for name in ["desk"] {
             if let found = which(name) {
                 return found
             }

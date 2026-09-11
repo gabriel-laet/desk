@@ -14,9 +14,9 @@ adapters = mouse / keyboard / display / smarthome / kettle / weather
 shells   = macOS DeskSwitchBar + Omarchy tray — they paint `slots`, nothing else
 ```
 
-Taught command: **`desk`**. `desk-switch` and `hhkb-mx-follow` are
-deprecated aliases that exec `desk` so old LaunchAgents / systemd units
-keep working.
+Taught command: **`desk`**. LaunchAgent / systemd *unit filenames* can
+stay (`local.hhkb-mx-follow`, `hhkb-mx-follow.service`); they invoke
+`desk`.
 
 Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 *away*. Install the watcher on every computer you leave from.
@@ -128,8 +128,6 @@ Put `~/.local/bin` on `PATH`. `git pull && make install` from the clone.
 
 ```
 ~/.local/bin/desk                        # the CLI
-~/.local/bin/desk-switch                 # deprecated alias → desk
-~/.local/bin/hhkb-mx-follow              # deprecated alias → desk
 ~/.local/lib/desk/mxswitch               # mouse reference (TCC path — do not move)
 ~/.local/lib/desk/lgdualup               # display USB helper
 ~/.local/lib/desk/dualup-layout          # display OS layout (displayplacer / hyprctl)
@@ -171,8 +169,7 @@ cp macos/local.hhkb-mx-follow.plist.example \
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hhkb-mx-follow.plist
 ```
 
-The example plist now calls `desk watch`. Old units that still exec
-`hhkb-mx-follow` keep working via the alias. Log:
+The example plist calls `desk watch`. Log:
 `~/Library/Logs/hhkb-mx-follow.log`.
 
 Menu bar (optional): see [macOS menu bar](#macos-menu-bar).
@@ -213,14 +210,13 @@ journalctl --user -u hhkb-mx-follow -f
 ```
 
 `WantedBy=graphical-session.target` — starts with Hyprland/Omarchy.
-The unit runs `desk watch`; the `hhkb-mx-follow` alias still works.
+The unit runs `desk watch`.
 
 ## Omarchy plugin
 
 The plugin manifest stays at the git root (`manifest.json`, id
 `glaet.desk-switch`). The widget is `linux/omarchy/BarWidget.qml`. It
-calls `desk` (falls back to `desk-switch`, then `hhkb-mx-follow`). It
-does **not** run `make install`.
+calls `desk` only. It does **not** run `make install`.
 
 On the Linux box:
 
@@ -263,7 +259,7 @@ Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `slots`
 (composite `NSImage`) or quiet `bar_strip`. Click for a modular HUD:
 host strip first, then each enabled slot once by `kind`. **Configure
 tray** drag-reorders slots and writes `ui` in `~/.config/desk/config.json`.
-Calls `desk` (PATH, then `~/.local/bin`; falls back to `desk-switch`).
+Calls `desk` only (PATH, then `~/.local/bin`).
 macOS 13+. Ad-hoc signed, not App Store.
 
 ```bash
@@ -332,8 +328,7 @@ while EDID catches up.
 Not `2880x1280` t3 (stretched) and not `1280x2880` t0 (wrong orientation).
 Set `adapters.dualup.peer` to SSH layout-only to the other machine.
 
-Deprecated aliases: `desk-switch`, `hhkb-mx-follow`. `mxswitch` /
-`lgdualup` / `kettle` on PATH exec the private helpers.
+`mxswitch` / `lgdualup` / `kettle` on PATH exec the private helpers.
 
 ## Config
 
@@ -553,7 +548,7 @@ After PBP / full the host must also get the OS layout. Optional
 
 **Panel / menu bar shows `?` or “desk not found”.** CLI not installed, or
 GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in `~/.local/bin`
-directly (`desk`, then `desk-switch`). `make install` then
+directly (`desk`). `make install` then
 `open -a DeskSwitchBar`.
 
 **Omarchy widget missing.** `make install` on Linux, then

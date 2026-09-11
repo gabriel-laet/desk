@@ -1,6 +1,8 @@
 # RFC 0001 — Rust core, adapter contract, thinner trays
 
-**Status:** draft (phase 1 landed in-tree; Rust core is a later series)
+**Status:** draft (phase 1 landed in-tree; Rust core is a later series).
+Taught CLI is now **`desk`**. Historical sections below that still say
+`desk-switch` describe the pre-rename product.
 **See also:** [RFC 0002](0002-desk-product-kettle-shared-tray.md) —
 product name **desk** (`gabriel-laet/desk`), kettle fold, shared
 `slots` tray / HUD.

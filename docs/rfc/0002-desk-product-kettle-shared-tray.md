@@ -4,8 +4,7 @@
 [`gabriel-laet/desk`](https://github.com/gabriel-laet/desk). Fellow
 kettle lives at `adapters/kettle/`; weather at `adapters/weather/`.
 The former `gabriel-laet/kettle` repo was hard-deleted (historical
-links below are not live). Taught CLI is **`desk`**
-(`desk-switch` / `hhkb-mx-follow` are deprecated aliases).
+links below are not live). Taught CLI is **`desk`**.
 **Extends:** [RFC 0001](0001-rust-core-and-adapters.md) — same pluggability
 north star; this RFC adds the product name, the kettle fold, and a
 generic slot tray / HUD.

@@ -99,15 +99,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("weather", proc.stdout)
         self.assertIn("smarthome", proc.stdout)
 
-    def test_legacy_wrapper_help(self) -> None:
-        for name in ("desk-switch.py", "hhkb-mx-follow.py"):
-            proc = subprocess.run(
-                [sys.executable, str(ROOT / name), "--help"],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(proc.returncode, 0, name)
-            self.assertIn("watch", proc.stdout)
+    def test_help_does_not_advertise_aliases(self) -> None:
+        proc = self._run("--help")
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("desk-switch", proc.stdout)
+        self.assertNotIn("hhkb-mx-follow", proc.stdout)
+        self.assertFalse((ROOT / "desk-switch.py").exists())
+        self.assertFalse((ROOT / "hhkb-mx-follow.py").exists())
+        self.assertFalse((ROOT / "scripts" / "desk-alias").exists())
 
     def test_pbp_without_lgdualup_is_noop(self) -> None:
         env = os.environ.copy()
@@ -331,8 +330,9 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("⌘⌥⇧F", src)
         self.assertIn("⌘⌥⇧P", src)
         self.assertIn("⌘⌥U", src)
-        self.assertIn('["desk", "desk-switch", "hhkb-mx-follow"]', src)
-        self.assertIn("desk-switch", src)
+        self.assertIn('for name in ["desk"]', src)
+        self.assertIn("desk not found", src)
+        self.assertNotIn('["desk", "desk-switch", "hhkb-mx-follow"]', src)
         self.assertIn("bar_label", src)
         self.assertIn("bar_strip", src)
         self.assertIn("stripTitle", src)
@@ -389,6 +389,9 @@ class BarWidgetSourceTests(unittest.TestCase):
         self.assertIn("slotActions", panel)
         self.assertIn("hhkb_usb", bar)
         self.assertIn("status --json", bar)
+        self.assertIn("desk status --json", bar)
+        self.assertNotIn("hhkb-mx-follow", bar)
+        self.assertNotIn("desk-switch status", bar)
         self.assertIn("USB on this host", panel)
         self.assertIn("BT only", panel)
         self.assertIn("StatusChip", panel)
@@ -1590,8 +1593,29 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("$(LIBDIR)/weather.manifest.json", text)
         self.assertIn("$(LIBDIR)/mxswitch", text)
         self.assertIn("desk.py $(BINDIR)/desk", text)
-        self.assertIn("scripts/desk-alias $(BINDIR)/desk-switch", text)
+        self.assertNotIn("scripts/desk-alias", text)
+        self.assertNotIn("$(BINDIR)/desk-switch", text.split("rm -f", 1)[0])
+        self.assertIn("rm -f $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow", text)
         self.assertIn("$(PREFIX)/lib/desk", text)
+        self.assertIn("CONFDIR := $(HOME)/.config/desk", text)
+
+
+class AdapterShimTests(unittest.TestCase):
+    def test_missing_helper_exits_127(self) -> None:
+        env = os.environ.copy()
+        with tempfile.TemporaryDirectory() as tmp:
+            env["HOME"] = tmp
+            env["DESK_LIB"] = str(Path(tmp) / "empty-lib")
+            Path(env["DESK_LIB"]).mkdir()
+            proc = subprocess.run(
+                ["sh", str(ROOT / "scripts" / "desk-adapter-shim"), "--info"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(proc.returncode, 127)
+        self.assertIn("desk:", proc.stderr)
+        self.assertIn("make install", proc.stderr)
 
 
 class AlexaAdapterTests(unittest.TestCase):
