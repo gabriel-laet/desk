@@ -1,0 +1,77 @@
+{
+  "adapters": {
+    "mouse": {
+      "enabled": true,
+      "backend": "mxswitch"
+    },
+    "keyboard": {
+      "enabled": true,
+      "backend": "hhkb"
+    },
+    "display": {
+      "backend": "lgdualup"
+    },
+    "hosts": {
+      "this_host": "mac",
+      "follow_channel": 2,
+      "mac": {
+        "channel": 1
+      },
+      "linux": {
+        "channel": 2
+      },
+      "follow_hhkb_usb": true
+    },
+    "dualup": {
+      "enabled": true,
+      "pbp_mode": "50-50",
+      "switch_pbp": false,
+      "display_id": "",
+      "inputs": {
+        "mac": "hdmi1",
+        "linux": "dp"
+      }
+    },
+    "smarthome": {
+      "enabled": true,
+      "backend": "alexa",
+      "device": "DeviceName"
+    },
+    "kettle": {
+      "enabled": true,
+      "backend": "kettle",
+      "host": "YOUR_HOST"
+    },
+    "weather": {
+      "enabled": true,
+      "backend": "weather",
+      "latitude": 0,
+      "longitude": 0,
+      "timezone": "UTC",
+      "label": "Home"
+    }
+  },
+  "hhkb_vendor_id": 1278,
+  "hhkb_product_id": 22,
+  "poll_interval_s": 0.5,
+  "absent_polls_required": 4,
+  "sleep_gap_s": 3.0,
+  "switch_retries": 8,
+  "switch_retry_delay_s": 0.6,
+  "ui": {
+    "tray": {
+      "density": "strip",
+      "lights": false,
+      "slots": [
+        { "id": "weather", "enabled": true, "kind": "chip", "show_altitude": true },
+        { "id": "kettle", "enabled": true, "kind": "face" },
+        { "id": "dualup", "enabled": true, "kind": "mode" },
+        { "id": "lights", "enabled": false, "kind": "toggle" }
+      ]
+    },
+    "hud": {
+      "show_faces": true,
+      "density": "regular"
+    }
+  }
+}

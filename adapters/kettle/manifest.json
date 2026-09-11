@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "kettle",
+  "name": "Fellow Stagg EKG Pro",
+  "capabilities": ["appliance.status", "appliance.heat", "appliance.off"]
+}

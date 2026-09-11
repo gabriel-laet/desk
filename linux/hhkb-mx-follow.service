@@ -1,0 +1,12 @@
+[Unit]
+Description=desk HHKB follow — desk watch (push MX Master when the keyboard leaves)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/bin/desk watch
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

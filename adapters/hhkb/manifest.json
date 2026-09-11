@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "hhkb",
+  "name": "HHKB presence",
+  "capabilities": ["keyboard.presence"]
+}

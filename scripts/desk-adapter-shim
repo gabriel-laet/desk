@@ -1,0 +1,19 @@
+#!/bin/sh
+# Compat shim: adapter backend. Prefer `desk <id> …`.
+# Real helper lives under ~/.local/lib/desk/ (legacy: ~/.local/lib/desk-switch/).
+ADAPTER="${DESK_ADAPTER:-${DESK_SWITCH_ADAPTER:-$(basename "$0")}}"
+if [ -n "$DESK_LIB" ]; then
+  LIBDIRS="$DESK_LIB"
+elif [ -n "$DESK_SWITCH_LIB" ]; then
+  LIBDIRS="$DESK_SWITCH_LIB"
+else
+  LIBDIRS="$HOME/.local/lib/desk $HOME/.local/lib/desk-switch"
+fi
+for LIBDIR in $LIBDIRS; do
+  HELPER="$LIBDIR/$ADAPTER"
+  if [ -x "$HELPER" ]; then
+    exec "$HELPER" "$@"
+  fi
+done
+echo "desk: $ADAPTER adapter helper not found — run make install" >&2
+exit 127

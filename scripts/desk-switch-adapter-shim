@@ -1,0 +1,3 @@
+#!/bin/sh
+# Deprecated name for scripts/desk-adapter-shim.
+exec "$(dirname "$0")/desk-adapter-shim" "$@"

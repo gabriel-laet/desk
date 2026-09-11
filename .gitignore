@@ -1,0 +1,8 @@
+*.pyc
+.DS_Store
+/mxswitch
+/lgdualup
+__pycache__/
+config.json
+/build/
+.swiftpm/

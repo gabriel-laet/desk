@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Apply Hyprland resolution/rotation for DualUp full vs PBP.
+
+Used by the desk-switch dualup adapter after `lgdualup pbp`. Not a
+user-facing command — call `desk-switch full` / `desk-switch pbp`.
+
+    dualup-layout full|pbp [--id connector] [--res WxH] [--degree N]
+
+`--id` is a Hyprland connector (`DP-2`) or a description substring.
+
+Confirmed Omarchy modes (DP-2; matches Mac 2880x1280@270 / 2880x2560@270):
+  full → 2560x2880, transform 3
+  pbp  → 1280x2880, transform 3   (not 2880x1280 t3 / not 1280x2880 t0)
+
+`--degree` overrides transform (0→0, 90→1, 180→2, 270→3) when set.
+
+Exit 0: layout applied (or hyprctl missing — skipped)
+Exit 2: target mode not in EDID yet (caller should retry)
+Exit 1: hard failure
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+FULL_RES = "2560x2880"
+FULL_RES_FALLBACKS = ("2560x2880", "2880x2560")
+PBP_RES_CANDIDATES = ("1280x2880", "2880x1280")
+FULL_TRANSFORM = 3
+PBP_TRANSFORM = 3
+DUALUP_MARKERS = (
+    "2560x2880",
+    "2880x2560",
+    "1280x2880",
+    "2880x1280",
+    "DualUp",
+    "SDQHD",
+    "28MQ780",
+    "LG Electronics",
+)
+DEGREE_TO_TRANSFORM = {0: 0, 90: 1, 180: 2, 270: 3}
+
+
+def run(cmd: list[str], timeout: float = 8.0) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def hyprctl_bin() -> str | None:
+    return shutil.which("hyprctl")
+
+
+def monitors_json(hyprctl: str) -> list[dict]:
+    try:
+        proc = run([hyprctl, "-j", "monitors"], timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired):
+        proc = run([hyprctl, "monitors", "-j"], timeout=8.0)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "hyprctl monitors failed").strip())
+    data = json.loads(proc.stdout or "[]")
+    if not isinstance(data, list):
+        raise RuntimeError("hyprctl monitors JSON was not a list")
+    return data
+
+
+def drm_modes(connector: str) -> list[str]:
+    modes: list[str] = []
+    drm = Path("/sys/class/drm")
+    if not drm.is_dir():
+        return modes
+    for entry in drm.iterdir():
+        if not entry.name.endswith(f"-{connector}"):
+            continue
+        path = entry / "modes"
+        if not path.is_file():
+            continue
+        try:
+            modes.extend(path.read_text().split())
+        except OSError:
+            continue
+    return modes
+
+
+def available_modes(mon: dict) -> list[str]:
+    raw = mon.get("availableModes") or mon.get("available_modes") or []
+    found = [str(item) for item in raw] if isinstance(raw, list) else []
+    name = str(mon.get("name") or "")
+    if name:
+        found.extend(drm_modes(name))
+    return found
+
+
+def mode_offered(mon: dict, res: str) -> bool | None:
+    """True/False if we can tell; None if mode lists are empty."""
+    modes = available_modes(mon)
+    if not modes:
+        return None
+    return any(res in str(item) for item in modes)
+
+
+def pick_from(mon: dict, candidates: tuple[str, ...]) -> str | None:
+    saw_list = False
+    for res in candidates:
+        offered = mode_offered(mon, res)
+        if offered is None:
+            continue
+        saw_list = True
+        if offered:
+            return res
+    if not saw_list:
+        return candidates[0]
+    return None
+
+
+def pick_res(mode: str, mon: dict, requested: str) -> str | None:
+    if requested:
+        offered = mode_offered(mon, requested)
+        if offered is False:
+            return None
+        return requested
+    if mode == "full":
+        return pick_from(mon, FULL_RES_FALLBACKS)
+    return pick_from(mon, PBP_RES_CANDIDATES)
+
+
+def looks_like_dualup(mon: dict) -> bool:
+    blob = " ".join(
+        [
+            str(mon.get("name") or ""),
+            str(mon.get("description") or ""),
+            f"{mon.get('width')}x{mon.get('height')}",
+            " ".join(available_modes(mon)),
+        ]
+    )
+    return any(marker.lower() in blob.lower() for marker in DUALUP_MARKERS)
+
+
+def pick_monitor(mons: list[dict], display_id: str) -> dict | None:
+    needle = (display_id or "").strip()
+    if needle:
+        for mon in mons:
+            name = str(mon.get("name") or "")
+            desc = str(mon.get("description") or "")
+            if needle == name or needle.lower() in desc.lower():
+                return mon
+        return None
+    for mon in mons:
+        if looks_like_dualup(mon):
+            return mon
+    return None
+
+
+def hz_for(mon: dict, res: str) -> str:
+    for item in available_modes(mon):
+        match = re.search(rf"{re.escape(res)}@([\d.]+)", str(item))
+        if match:
+            return match.group(1).rstrip(".")
+    raw = mon.get("refreshRate")
+    try:
+        hz = float(raw)
+        if hz > 0:
+            if abs(hz - round(hz)) < 0.02:
+                return str(int(round(hz)))
+            return f"{hz:.2f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        pass
+    return "60"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("full", "pbp"))
+    parser.add_argument("--id", default=os.environ.get("DUALUP_DISPLAY_ID", ""))
+    parser.add_argument("--res", default="")
+    parser.add_argument("--degree", type=int, default=None)
+    args = parser.parse_args(argv)
+
+    if args.degree is not None:
+        transform = DEGREE_TO_TRANSFORM.get(int(args.degree) % 360, PBP_TRANSFORM)
+    else:
+        transform = PBP_TRANSFORM if args.mode == "pbp" else FULL_TRANSFORM
+
+    hyprctl = hyprctl_bin()
+    if not hyprctl:
+        print("dualup-layout: hyprctl not found — skip OS layout", file=sys.stderr)
+        return 0
+
+    try:
+        mons = monitors_json(hyprctl)
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, json.JSONDecodeError) as exc:
+        print(f"dualup-layout: {exc}", file=sys.stderr)
+        return 1
+
+    mon = pick_monitor(mons, args.id)
+    if mon is None:
+        print("dualup-layout: DualUp monitor not found yet (set adapters.dualup.display_id)", file=sys.stderr)
+        return 2
+
+    res = pick_res(args.mode, mon, args.res.strip())
+    if not res:
+        want = args.res.strip() or (FULL_RES if args.mode == "full" else " / ".join(PBP_RES_CANDIDATES))
+        print(f"dualup-layout: {want} not in EDID yet", file=sys.stderr)
+        return 2
+
+    name = str(mon.get("name") or "")
+    x = int(mon.get("x") or 0)
+    y = int(mon.get("y") or 0)
+    try:
+        scale = float(mon.get("scale") or 1.0)
+    except (TypeError, ValueError):
+        scale = 1.0
+    hz = hz_for(mon, res)
+    scale_s = str(int(scale)) if scale == int(scale) else str(scale)
+    spec_s = f"{name},{res}@{hz},{x}x{y},{scale_s},transform,{transform}"
+    print(f"dualup-layout {args.mode} → {spec_s}")
+    try:
+        applied = run([hyprctl, "keyword", "monitor", spec_s], timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"dualup-layout: hyprctl apply failed: {exc}", file=sys.stderr)
+        return 2
+    out = (applied.stdout or "").rstrip()
+    err = (applied.stderr or "").rstrip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr if applied.returncode else sys.stdout)
+    if applied.returncode != 0:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -1,0 +1,6 @@
+# Allow the logged-in user to talk to LG DualUp "Monitor Controls" (043e:9a39).
+#
+#   sudo cp 43-lg-dualup.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+KERNEL=="hidraw*", ATTRS{idVendor}=="043e", ATTRS{idProduct}=="9a39", MODE="0660", TAG+="uaccess"

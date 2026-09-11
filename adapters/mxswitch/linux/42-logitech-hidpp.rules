@@ -1,0 +1,12 @@
+# Allow the logged-in user to talk HID++ to Logitech devices via hidraw.
+#
+#   sudo cp 42-logitech-hidpp.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# USB receivers expose ATTRS{idVendor}. Bluetooth/uhid devices do not —
+# vendor is only in the HID id (0005:046D:xxxx), so match that too.
+# DRIVERS=="logitech-hidpp-device" covers both once the hidpp driver binds.
+
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", KERNELS=="0005:046D:*", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", DRIVERS=="logitech-hidpp-device", GROUP="input", MODE="0660", TAG+="uaccess"
