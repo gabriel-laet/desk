@@ -9,8 +9,8 @@ MX Master + optional LG DualUp + HHKB follow
 
 One CLI. Thin native shells. Adapters you can swap. Bars that stop shouting.
 
-This is the plan for getting there without breaking `desk-switch to linux`
-on a Tuesday morning.
+This is the plan for getting there without breaking `desk to linux`
+on a Tuesday morning. Taught command is now **`desk`**.
 
 ### Design principle — pluggability
 
@@ -45,7 +45,7 @@ shells   = paint `bar_strip` + panel; never speak HID or hyprctl
   (`mxswitch`, `lgdualup`, `hhkb`) ship in-tree under `adapters/<id>/`.
   Third parties drop a binary **and a manifest** in
   `~/.local/lib/desk-switch/` (or on `PATH`) and show up.
-- **Clear binaries.** You learn `desk-switch`. Helpers stay private.
+- **Clear binaries.** You learn `desk`. Helpers stay private.
   `mxswitch` / `lgdualup` on `PATH` remain shims.
 - **Trays that are visual and quiet.** Always-visible strip: focus + maybe
   a display mark. Core **composes** `bar_strip` from adapter status

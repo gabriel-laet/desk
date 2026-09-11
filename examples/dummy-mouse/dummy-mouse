@@ -2,7 +2,7 @@
 """Third-party-shaped mouse adapter used by Phase 1 tests and the README.
 
 Implements mouse.host_switch with the same argv as mxswitch: --info | 1|2|3.
-Not a product helper — drop into ~/.local/lib/desk-switch/ to prove discovery.
+Not a product helper — drop into ~/.local/lib/desk/ to prove discovery.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-STATE_PATH = Path(os.environ.get("DUMMY_MOUSE_STATE", "/tmp/desk-switch-dummy-mouse.json"))
+STATE_PATH = Path(os.environ.get("DUMMY_MOUSE_STATE", "/tmp/desk-dummy-mouse.json"))
 
 
 def load_channel() -> int:

@@ -1,11 +1,3 @@
 #!/bin/sh
-# Compat shim: desk-switch adapter backend.
-# Real helper lives under ~/.local/lib/desk-switch/. Prefer `desk-switch`.
-ADAPTER="${DESK_SWITCH_ADAPTER:-$(basename "$0")}"
-LIBDIR="${DESK_SWITCH_LIB:-$HOME/.local/lib/desk-switch}"
-HELPER="$LIBDIR/$ADAPTER"
-if [ -x "$HELPER" ]; then
-  exec "$HELPER" "$@"
-fi
-echo "desk-switch: $ADAPTER adapter helper not found at $HELPER — run make install" >&2
-exit 127
+# Deprecated name for scripts/desk-adapter-shim.
+exec "$(dirname "$0")/desk-adapter-shim" "$@"

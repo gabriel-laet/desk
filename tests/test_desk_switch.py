@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for desk-switch host mapping and CLI plumbing (no HID required)."""
+"""Unit tests for desk host mapping and CLI plumbing (no HID required)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("desk_switch", ROOT / "desk-switch.py")
+SPEC = importlib.util.spec_from_file_location("desk_switch", ROOT / "desk.py")
 ds = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ds)
 
@@ -84,7 +84,7 @@ class HostMappingTests(unittest.TestCase):
 class CliTests(unittest.TestCase):
     def _run(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, str(ROOT / "desk-switch.py"), *args],
+            [sys.executable, str(ROOT / "desk.py"), *args],
             capture_output=True,
             text=True,
             env=env or os.environ.copy(),
@@ -100,13 +100,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("smarthome", proc.stdout)
 
     def test_legacy_wrapper_help(self) -> None:
-        proc = subprocess.run(
-            [sys.executable, str(ROOT / "hhkb-mx-follow.py"), "--help"],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("watch", proc.stdout)
+        for name in ("desk-switch.py", "hhkb-mx-follow.py"):
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / name), "--help"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, name)
+            self.assertIn("watch", proc.stdout)
 
     def test_pbp_without_lgdualup_is_noop(self) -> None:
         env = os.environ.copy()
@@ -118,7 +119,7 @@ class CliTests(unittest.TestCase):
             (cfg_dir / "config.json").write_text(json.dumps({"lgdualup": "lgdualup-missing"}))
             env["HOME"] = str(home)
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "pbp", "50-50"],
+                [sys.executable, str(ROOT / "desk.py"), "pbp", "50-50"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -136,7 +137,7 @@ class CliTests(unittest.TestCase):
             cfg_dir.mkdir(parents=True)
             (cfg_dir / "config.json").write_text(json.dumps({"lgdualup": "lgdualup-missing"}))
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "full"],
+                [sys.executable, str(ROOT / "desk.py"), "full"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -162,13 +163,13 @@ class CliTests(unittest.TestCase):
                 })
             )
             hint = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--hint"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--hint"],
                 capture_output=True,
                 text=True,
                 env=env,
             )
             js = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--json"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -330,6 +331,7 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("⌘⌥⇧F", src)
         self.assertIn("⌘⌥⇧P", src)
         self.assertIn("⌘⌥U", src)
+        self.assertIn('["desk", "desk-switch", "hhkb-mx-follow"]', src)
         self.assertIn("desk-switch", src)
         self.assertIn("bar_label", src)
         self.assertIn("bar_strip", src)
@@ -354,7 +356,7 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("placeholderLights", src)
         self.assertIn("WidgetKind.toggle", src)
         self.assertIn("onMove", src)
-        self.assertIn(".config/desk-switch", src)
+        self.assertIn(".config/desk", src)
         self.assertIn("show_altitude", src)
         self.assertIn("show_faces", src)
         self.assertNotIn('slot.id == "kettle"', src)
@@ -642,9 +644,9 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertEqual(inputs["linux"], "dp")
         self.assertNotEqual(inputs["mac"], "usbc")
         self.assertEqual(example["adapters"]["smarthome"]["backend"], "alexa")
-        self.assertEqual(example["adapters"]["smarthome"]["device"], "Escritório")
+        self.assertEqual(example["adapters"]["smarthome"]["device"], "DeviceName")
         self.assertEqual(example["adapters"]["kettle"]["backend"], "kettle")
-        self.assertEqual(example["adapters"]["kettle"]["host"], "192.168.3.36")
+        self.assertEqual(example["adapters"]["kettle"]["host"], "YOUR_HOST")
         self.assertEqual(example["adapters"]["weather"]["backend"], "weather")
         self.assertFalse(example["ui"]["tray"]["lights"])
         ids = [item["id"] for item in example["ui"]["tray"]["slots"]]
@@ -1373,7 +1375,7 @@ class DualupModeDetectTests(unittest.TestCase):
                 })
             )
             js = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1492,13 +1494,13 @@ class AdapterDiscoveryTests(unittest.TestCase):
             env["XDG_CACHE_HOME"] = str(home / "cache")
             env["DESK_SWITCH_WEATHER_URL"] = ""
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "to", "linux", "--mouse-only"],
+                [sys.executable, str(ROOT / "desk.py"), "to", "linux", "--mouse-only"],
                 capture_output=True,
                 text=True,
                 env=env,
             )
             status = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1587,6 +1589,9 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("$(LIBDIR)/kettle.manifest.json", text)
         self.assertIn("$(LIBDIR)/weather.manifest.json", text)
         self.assertIn("$(LIBDIR)/mxswitch", text)
+        self.assertIn("desk.py $(BINDIR)/desk", text)
+        self.assertIn("scripts/desk-alias $(BINDIR)/desk-switch", text)
+        self.assertIn("$(PREFIX)/lib/desk", text)
 
 
 class AlexaAdapterTests(unittest.TestCase):
@@ -1599,9 +1604,9 @@ class AlexaAdapterTests(unittest.TestCase):
         spec.loader.exec_module(cls.alexa)
 
     def test_parse_devices_json_array(self) -> None:
-        raw = json.dumps([{"name": "Sala"}, {"name": "Escritório"}])
+        raw = json.dumps([{"name": "LivingRoom"}, {"name": "DeviceName"}])
         names = [item["name"] for item in self.alexa.parse_devices_payload(raw)]
-        self.assertEqual(names, ["Sala", "Escritório"])
+        self.assertEqual(names, ["LivingRoom", "DeviceName"])
 
     def test_empty_smarthome_json_raises(self) -> None:
         with self.assertRaises(json.JSONDecodeError):
@@ -1611,13 +1616,13 @@ class AlexaAdapterTests(unittest.TestCase):
 
     def test_utterance_rejects_device_name(self) -> None:
         with self.assertRaises(SystemExit):
-            self.alexa.utterance_for("on", "acender a luz do escritório", "Escritório")
+            self.alexa.utterance_for("on", "acender a luz do DeviceName", "DeviceName")
         self.assertEqual(
-            self.alexa.utterance_for("on", "acender a luz", "Escritório"),
+            self.alexa.utterance_for("on", "acender a luz", "DeviceName"),
             "acender a luz",
         )
         self.assertEqual(
-            self.alexa.utterance_for("off", "apagar a luz", "Escritório"),
+            self.alexa.utterance_for("off", "apagar a luz", "DeviceName"),
             "apagar a luz",
         )
 
@@ -1649,13 +1654,12 @@ class AlexaAdapterTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 data = json.loads(proc.stdout)
                 self.assertEqual(data["phrase"], phrase)
-                self.assertEqual(data["device"], "Escritório")
-                self.assertEqual(data["argv"], ["command", phrase, "-d", "Escritório"])
+                self.assertEqual(data["device"], "DeviceName")
+                self.assertEqual(data["argv"], ["command", phrase, "-d", "DeviceName"])
                 recorded = log.read_text().split()
-                self.assertEqual(recorded, ["command", *phrase.split(), "-d", "Escritório"])
-                self.assertNotIn("escritório", phrase.lower())
-                self.assertNotIn("escritorio", self.alexa.fold_text(phrase))
-                cached = json.loads((home / "cache" / "desk-switch" / "alexa-status.json").read_text())
+                self.assertEqual(recorded, ["command", *phrase.split(), "-d", "DeviceName"])
+                self.assertNotIn("devicename", self.alexa.fold_text(phrase))
+                cached = json.loads((home / "cache" / "desk" / "alexa-status.json").read_text())
                 self.assertEqual(cached["lights"][0]["state"], verb)
                 self.assertEqual(cached["lights"][0]["state_source"], "command")
 
@@ -1668,7 +1672,7 @@ class AlexaAdapterTests(unittest.TestCase):
             cli.write_text(
                 "#!/bin/sh\n"
                 'if [ "$1" = devices ]; then\n'
-                '  echo \'[{"name":"Sala"},{"name":"Escritório"}]\'\n'
+                '  echo \'[{"name":"LivingRoom"},{"name":"DeviceName"}]\'\n'
                 "  exit 0\n"
                 "fi\n"
                 "echo '{}'\n"
@@ -1687,12 +1691,12 @@ class AlexaAdapterTests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             data = json.loads(proc.stdout)
-            self.assertEqual([item["name"] for item in data["devices"]], ["Sala", "Escritório"])
+            self.assertEqual([item["name"] for item in data["devices"]], ["LivingRoom", "DeviceName"])
             self.assertEqual(data["list_source"], "devices")
             self.assertFalse(data["smarthome_list"]["ok"])
 
     def test_core_forwards_smarthome_verbs_without_amazon_utterances(self) -> None:
-        src = (ROOT / "desk-switch.py").read_text()
+        src = (ROOT / "desk.py").read_text()
         self.assertNotIn("acender a luz", src)
         self.assertNotIn("apagar a luz", src)
         self.assertNotIn("amazon.com", src)
@@ -1735,7 +1739,7 @@ class AlexaAdapterTests(unittest.TestCase):
                 )
             )
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1750,7 +1754,7 @@ class AlexaAdapterTests(unittest.TestCase):
         self.assertNotIn("lights", data["bar_strip"])
         lights = home_ad.get("lights") or []
         self.assertTrue(lights)
-        self.assertEqual(lights[0]["speaker"], "Escritório")
+        self.assertEqual(lights[0]["speaker"], "DeviceName")
         self.assertEqual(lights[0]["on_phrase"], "acender a luz")
         self.assertNotIn("lights", [item["id"] for item in data["slots"]])
 
@@ -1792,7 +1796,7 @@ class AlexaAdapterTests(unittest.TestCase):
                 )
             )
             before = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1804,14 +1808,14 @@ class AlexaAdapterTests(unittest.TestCase):
             self.assertEqual(lights_slot["glyph"], "light.off")
             self.assertEqual(lights_slot["kind"], "toggle")
             on = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "smarthome", "on"],
+                [sys.executable, str(ROOT / "desk.py"), "smarthome", "on"],
                 capture_output=True,
                 text=True,
                 env=env,
             )
             self.assertEqual(on.returncode, 0, on.stdout + on.stderr)
             after = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1837,7 +1841,7 @@ class AlexaAdapterTests(unittest.TestCase):
                 "import json, sys\n"
                 f"json.dump(sys.argv[1:], open({state.as_posix()!r}, 'w'))\n"
                 "print(json.dumps({'ok': True, 'verb': sys.argv[1], "
-                "'phrase': 'acender a luz', 'device': 'Escritório'}))\n"
+                "'phrase': 'acender a luz', 'device': 'DeviceName'}))\n"
             )
             helper.chmod(0o755)
             (lib / "alexa.manifest.json").write_text(
@@ -1861,7 +1865,7 @@ class AlexaAdapterTests(unittest.TestCase):
             env["PATH"] = "/usr/bin:/bin"
             env["DESK_SWITCH_LIB"] = str(lib)
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "smarthome", "on"],
+                [sys.executable, str(ROOT / "desk.py"), "smarthome", "on"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1884,7 +1888,7 @@ class AlexaAdapterTests(unittest.TestCase):
             env["DESK_SWITCH_LIB"] = str(home / "empty-lib")
             (home / "empty-lib").mkdir()
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "smarthome", "list"],
+                [sys.executable, str(ROOT / "desk.py"), "smarthome", "list"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1900,7 +1904,7 @@ class AlexaAdapterTests(unittest.TestCase):
             cli = bindir / "alexacli"
             cli.write_text("#!/bin/sh\nexit 1\n")
             cli.chmod(0o755)
-            cache = home / "cache" / "desk-switch" / "alexa-status.json"
+            cache = home / "cache" / "desk" / "alexa-status.json"
             cache.parent.mkdir(parents=True)
             cache.write_text(
                 json.dumps(
@@ -1933,7 +1937,7 @@ class AlexaAdapterTests(unittest.TestCase):
     def test_entity_power_preferred_when_readable(self) -> None:
         self.assertEqual(self.alexa.entity_power_state({"powerState": "ON"}), "on")
         self.assertTrue(self.alexa.entity_looks_like_light({"name": "Luz mesa", "kind": "LIGHT"}))
-        lights = [self.alexa.default_light("Escritório", "acender a luz", "apagar a luz", "off")]
+        lights = [self.alexa.default_light("DeviceName", "acender a luz", "apagar a luz", "off")]
         changed = self.alexa.apply_entity_light_state(
             lights, [{"name": "desk light", "powerState": "on"}]
         )
@@ -1948,7 +1952,7 @@ class AlexaAdapterTests(unittest.TestCase):
             env["HOME"] = str(home)
             env["XDG_CACHE_HOME"] = str(home / "cache")
             env["PATH"] = "/usr/bin:/bin"
-            cache = home / "cache" / "desk-switch" / "alexa-status.json"
+            cache = home / "cache" / "desk" / "alexa-status.json"
 
             def slow_devices(_cli):
                 cache.parent.mkdir(parents=True, exist_ok=True)
@@ -1966,7 +1970,7 @@ class AlexaAdapterTests(unittest.TestCase):
                         }
                     )
                 )
-                return [{"name": "Escritório"}], None
+                return [{"name": "DeviceName"}], None
 
             with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
                 self.alexa, "list_echo_devices", side_effect=slow_devices
@@ -1981,7 +1985,7 @@ class AlexaAdapterTests(unittest.TestCase):
             ):
                 data = self.alexa.snapshot(
                     cli_name="alexacli",
-                    device="Escritório",
+                    device="DeviceName",
                     on_phrase="acender a luz",
                     off_phrase="apagar a luz",
                     refresh=True,
@@ -2085,7 +2089,7 @@ class KettleAdapterTests(unittest.TestCase):
             "current": {"value": 65.0, "unit": "C"},
             "target": {"value": 96.0, "unit": "C"},
         }
-        slot = self.kettle.slot_from_snapshot(snap, host="192.168.3.36")
+        slot = self.kettle.slot_from_snapshot(snap, host="YOUR_HOST")
         self.assertEqual(slot["id"], "kettle")
         self.assertEqual(slot["glyph"], "flame")
         self.assertEqual(slot["label"], "65°")
@@ -2346,7 +2350,7 @@ class UIConfigTests(unittest.TestCase):
                 )
             )
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json", "--local"],
+                [sys.executable, str(ROOT / "desk.py"), "status", "--json", "--local"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -2569,7 +2573,7 @@ class SlotComposeTests(unittest.TestCase):
                 "python3 - <<'PY'\n"
                 "import json\n"
                 "print(json.dumps({\n"
-                '  "id": "kettle", "reachable": True, "host": "192.168.3.36",\n'
+                '  "id": "kettle", "reachable": True, "host": "YOUR_HOST",\n'
                 '  "temp_c": 65, "target_c": 96, "mode": "holding", "hot": True,\n'
                 '  "slot": {"id": "kettle", "glyph": "flame", "label": "65°", "hot": True, "face": True}\n'
                 "}))\n"
@@ -2601,7 +2605,7 @@ class SlotComposeTests(unittest.TestCase):
                         "mxswitch": "/no/such/mxswitch",
                         "lgdualup": "lgdualup-missing",
                         "adapters": {
-                            "kettle": {"enabled": True, "backend": "kettle", "host": "192.168.3.36"},
+                            "kettle": {"enabled": True, "backend": "kettle", "host": "YOUR_HOST"},
                             "weather": {"enabled": True, "backend": "weather"},
                         },
                     }
@@ -2610,7 +2614,7 @@ class SlotComposeTests(unittest.TestCase):
             env["DESK_SWITCH_LIB"] = str(lib)
             with mock.patch.object(ds, "libexec_dir", return_value=lib):
                 proc = subprocess.run(
-                    [sys.executable, str(ROOT / "desk-switch.py"), "status", "--json"],
+                    [sys.executable, str(ROOT / "desk.py"), "status", "--json"],
                     capture_output=True,
                     text=True,
                     env=env,
@@ -2631,9 +2635,9 @@ class SlotComposeTests(unittest.TestCase):
         self.assertEqual(kinds.get("kettle"), "face")
 
     def test_core_forwards_kettle_verbs(self) -> None:
-        src = (ROOT / "desk-switch.py").read_text()
+        src = (ROOT / "desk.py").read_text()
         self.assertNotIn("GET /cli", src)
-        self.assertNotIn("192.168.3.36", src)
+        self.assertNotIn("YOUR_HOST", src)
         self.assertNotIn("api.open-meteo.com", src)
         parser = ds.build_parser()
         args = parser.parse_args(["kettle", "heat", "93"])

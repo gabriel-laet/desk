@@ -9,34 +9,34 @@
   "trigger.desk-switch.status": {
     "icon": "󰋼",
     "label": "Status",
-    "action": "omarchy-launch-or-focus-tui \"zsh -c 'desk-switch status; read -k 1'\""
+    "action": "omarchy-launch-or-focus-tui \"zsh -c 'desk status; read -k 1'\""
   },
   "trigger.desk-switch.mac": {
     "icon": "󰀵",
     "label": "Switch to Mac",
-    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch to mac'"
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk to mac'"
   },
   "trigger.desk-switch.linux": {
     "icon": "󰣇",
     "label": "Switch to Linux",
-    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch to linux'"
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk to linux'"
   },
   "trigger.desk-switch.full": {
     "icon": "󰍹",
     "label": "DualUp Full  ⌘⌥⇧F",
-    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
-    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch full'"
+    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk full'"
   },
   "trigger.desk-switch.pbp": {
     "icon": "󰍺",
     "label": "DualUp PBP  ⌘⌥⇧P",
-    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
-    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch pbp'"
+    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk pbp'"
   },
   "trigger.desk-switch.layout": {
     "icon": "󰍹",
     "label": "Auto layout  ⌘⌥U",
-    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
-    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch layout'"
+    "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk layout'"
   }
 }

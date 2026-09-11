@@ -1,55 +1,46 @@
 # desk
 
-Orchestrate one desk: hop a Logitech MX Master (and, if you want, an
-[LG DualUp](https://www.lg.com/us/monitors/lg-28mq780-b)) between a Mac
-Studio and an Omarchy/Linux box. Optional: follow the
-[HHKB Studio](https://happyhackingkb.com/) when it leaves this host,
-toggle the Escritório Alexa light, heat a Fellow Stagg on the LAN, and
-show ambient weather. One Mac extra and one Omarchy tray paint the same
-`slots`.
+One CLI. Adapters do the hardware. Shells only paint.
 
-Taught command: **`desk-switch`**. `hhkb-mx-follow` is the same program
-(legacy name — already loaded in LaunchAgents / systemd). There is no
-`desk` CLI alias yet.
+**desk** is a small orchestrator for a two-host desk: hop a Logitech MX
+Master (and, if you want, an [LG DualUp](https://www.lg.com/us/monitors/lg-28mq780-b))
+between macOS and Linux, optionally follow an
+[HHKB Studio](https://happyhackingkb.com/), and hang extra tray slots
+(smart-home light, Fellow-style kettle, weather) off the same contract.
 
-Core is orchestration + contract. MX / DualUp / HHKB / Alexa / kettle /
-weather are **reference adapters** under `adapters/` — not forever-in-core
-special cases. `mxswitch` / `lgdualup` / `kettle` on PATH are private
-shims. Drop another adapter beside them.
+```
+core     = config · status · watch · to/full/pbp · adapter registry · slots
+adapters = mouse / keyboard / display / smarthome / kettle / weather
+shells   = macOS DeskSwitchBar + Omarchy tray — they paint `slots`, nothing else
+```
+
+Taught command: **`desk`**. `desk-switch` and `hhkb-mx-follow` are
+deprecated aliases that exec `desk` so old LaunchAgents / systemd units
+keep working.
 
 Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 *away*. Install the watcher on every computer you leave from.
 
-GitHub: [`gabriel-laet/desk`](https://github.com/gabriel-laet/desk)
-(renamed from desk-switch). Typical checkout on this Mac: `~/src/desk`.
+**Docs:** [RFC 0001](docs/rfc/0001-rust-core-and-adapters.md) ·
+[RFC 0002](docs/rfc/0002-desk-product-kettle-shared-tray.md) ·
+[HUD / tray UI config](docs/ui-config.md)
 
-**In this repo**
+## Adapters
 
-```
-desk-switch.py                 # core CLI → ~/.local/bin/desk-switch
-adapters/                      # mxswitch, lgdualup, hhkb, alexa, kettle, weather
-macos/DeskSwitchBar/           # Mac tray (DeskSwitchBar.app)
-macos/local.*.plist.example    # LaunchAgents (existing unit names)
-linux/omarchy/                 # Omarchy QML tray (same slots JSON)
-linux/hhkb-mx-follow.service   # systemd user unit (existing unit name)
-manifest.json                  # Omarchy plugin — must stay at git root
-docs/ui-config.md              # shared HUD/tray ui schema (Mac writes it)
-```
+| id | role | one line |
+|---|---|---|
+| **mxswitch** | mouse | MX Master Easy-Switch hop (`mouse.host_switch`) |
+| **lgdualup** | display | DualUp input / PBP / full + OS layout |
+| **hhkb** | keyboard | HHKB presence so `watch` can follow the keyboard |
+| **alexa** | smarthome | list devices + desk light on/off (wraps alexacli) |
+| **kettle** | kettle | Fellow-style kettle on the LAN (heat / off / status) |
+| **weather** | weather | Open-Meteo ambient ° + altitude |
 
-Omarchy clones this repo as the plugin and requires `manifest.json` at
-the checkout root. QML lives under `linux/omarchy/` so `macos/` and
-`linux/` each hold that OS’s tray plus its install unit. Adapter
-HID / udev stays under `adapters/<id>/{macos,linux}/` — those are
-hardware helpers, not shells.
+Pin with `adapters.<role>.backend` / `path`, or drop a binary +
+`*.manifest.json` in `~/.local/lib/desk/` (`$DESK_LIB`). Third parties
+can also ship `desk-<id>` on PATH. See [Plug another adapter](#plug-another-adapter).
 
-**RFC:** [0001 — Rust core and adapters](docs/rfc/0001-rust-core-and-adapters.md)
-· [0002 — desk product, kettle, shared tray/HUD](docs/rfc/0002-desk-product-kettle-shared-tray.md)
-· [HUD / tray UI config](docs/ui-config.md)
-
-The **dualup** adapter does three things on `full` / `pbp`: USB HID toggle
-(`lgdualup`), PBP input assignment (Mac=`hdmi1`, Linux=`dp`), and OS
-resolution/rotation (`dualup-layout` via displayplacer on macOS, hyprctl on
-Linux). Optional `adapters.dualup.peer` SSHes layout-only to the other host.
+`adapters.dualup` is a legacy alias of `adapters.display`.
 
 ## How it works
 
@@ -63,80 +54,52 @@ Fn+Ctrl+2 on the HHKB          Fn+Ctrl+0 (HHKB → USB)
  HHKB disconnects (BT hop)      USB appears on the host
         │                       that has the cable
         ▼                              │
- desk-switch watch (~2s)               ▼
+ desk watch (~2s)                      ▼
         │                       watch: rising hhkb_usb
         ▼                              │
  mouse → other Easy-Switch             ▼
- DualUp is left alone           desk-switch to <this_host>
+ DualUp is left alone           desk to <this_host>
                                 (mouse + DualUp input)
 
-desk-switch to linux          (or the Omarchy / macOS panel)
+desk to linux                 (or the Omarchy / macOS panel)
         │
         ├─ mouse adapter  → Linux channel
         └─ dualup adapter → DualUp input (if configured + USB is on this host)
 
-desk-switch pbp                 (or DualUp PBP in the menu bar / Omarchy panel)
+desk pbp                      (or DualUp PBP in the menu bar / Omarchy panel)
         │
         ├─ lgdualup pbp 50-50
-        ├─ lgdualup pbp-assign hdmi1 dp   (Main + Sub; 0xF4 alone cannot set Sub)
+        ├─ lgdualup pbp-assign hdmi1 dp
         ├─ settle (layout_settle_s, default 0.5s)
         └─ dualup-layout pbp      (Mac 2880x1280@270 / Linux 1280x2880 t3)
 
-desk-switch full
+desk full
         │
         ├─ lgdualup pbp full
-        ├─ settle (layout_settle_s, default 0.5s)
+        ├─ settle
         └─ dualup-layout full     (Mac 2880x2560@270 / Linux 2560x2880 t3)
 ```
 
-Adapters (roles are capabilities; ids are what you drop on disk):
+`status --json` exposes `adapters.*`, additive `slots`, and the shared
+bar fields (`target_hint`, `bar_label`, `bar_strip`, HHKB / mouse /
+DualUp probes). New shells paint `slots`. Lights stay out of the strip
+unless `ui.tray.lights` is true. Slot order and HUD prefs live in `ui`
+— see [docs/ui-config.md](docs/ui-config.md).
 
-| Role | Capability | Reference id | Source |
-|---|---|---|---|
-| **mouse** | `mouse.host_switch` | `mxswitch` | `adapters/mxswitch/` |
-| **keyboard** | `keyboard.presence` | `hhkb` | `adapters/hhkb/` |
-| **hosts** | config only | — | `config.json` |
-| **display** | `display.input` / `pbp` / `full` + `layout.apply` | `lgdualup` | `adapters/lgdualup/` |
-| **smarthome** | `smarthome.list` / `smarthome.status` / `light.on` / `light.off` | `alexa` | `adapters/alexa/` |
-| **kettle** | `appliance.status` / `appliance.heat` / `appliance.off` | `kettle` | `adapters/kettle/` |
-| **weather** | `weather.status` | `weather` | `adapters/weather/` |
-
-`adapters.dualup` is a legacy alias of `adapters.display`. Pin with
-`adapters.<role>.backend` / `path`, or drop a binary + manifest in
-`~/.local/lib/desk-switch/` (`$DESK_SWITCH_LIB`). Third parties can also
-ship `desk-switch-<id>` on PATH. See [Plug another adapter](#plug-another-adapter).
-
-`status --json` exposes `adapters.mouse` / `adapters.keyboard` /
-`adapters.hosts` / `adapters.display` (and legacy `adapters.dualup`),
-`adapters.smarthome`, `adapters.kettle`, `adapters.weather`,
-`adapters.discovered`, additive `slots`, and the shared bar fields
-(`target_hint`, `bar_label`, additive `bar_strip`, `hhkb_transport`,
-`hhkb_usb`, `hhkb_bluetooth`, `mouse_channel`, `mouse_online`,
-`dualup_mode`). Omarchy QML and macOS DeskSwitchBar parse the same keys.
-New shells paint `slots` (Mac composites one `NSImage`; Omarchy lays
-out the same array). `bar_strip` (`focus` + optional `display`) stays.
-Lights stay out of the strip unless `ui.tray.lights` is true.
-`ui.tray.density: "chips"` restores the dense `bar_label` title.
-Slot order and HUD prefs live in the same `ui` object — see
-[Shared HUD / tray UI config](docs/ui-config.md). DeskSwitchBar can
-drag-reorder them; Omarchy reads the same file later.
-
-**Lock screen / greeter:** keep the HHKB **USB cable in the machine you are
-unlocking**. Omarchy’s password screen often fails to use Bluetooth; USB is
-the reliable unlock path. `Fn+Ctrl+0` on the HHKB selects USB — `watch` then
-pulls mouse + DualUp input to whichever host has the cable.
+**Lock screen / greeter:** keep the HHKB USB cable in the machine you are
+unlocking. `Fn+Ctrl+0` selects USB — `watch` then pulls mouse + DualUp
+input to whichever host has the cable.
 
 ## Requirements
 
-- HHKB Studio (USB or Bluetooth; VID `04FE` / PID `0016`)
-- MX Master 3 / 3S / 4 on matching Easy-Switch channels
 - Python 3.9+
+- MX Master 3 / 3S / 4 on matching Easy-Switch channels
+- HHKB Studio is optional (VID `04FE` / PID `0016`)
+- DualUp is optional. USB HID `043e:9a39` — plug that cable into the
+  machine that should flip the monitor. macOS layout needs `displayplacer`;
+  Linux layout needs Hyprland `hyprctl`.
 - macOS: Xcode Command Line Tools (`clang` for helpers; `swiftc` for the menu bar)
 - Linux: `hidraw` + the udev rules below
-- DualUp hardware is optional. The USB helper **and** the OS layout helper
-  are in-tree (`make install`). Control is USB HID `043e:9a39` — plug that
-  cable into the machine that should flip the monitor. macOS layout needs
-  `displayplacer`; Linux layout needs Hyprland `hyprctl`.
 
 Pairing that works:
 
@@ -147,18 +110,16 @@ Pairing that works:
 | MX Master | Easy-Switch 1 | Mac |
 | MX Master | Easy-Switch 2 | Linux |
 
-If the HHKB USB cable stays in the Mac *and* you hop the keyboard to Bluetooth
-on Linux, the Mac may still enumerate a USB keyboard collection. The watcher
-then never fires. Bluetooth on both hosts; treat USB as charging, or unplug
-when you hop.
+If the HHKB USB cable stays in the Mac *and* you hop the keyboard to
+Bluetooth on Linux, the Mac may still enumerate a USB collection. The
+watcher then never fires. Bluetooth on both hosts; treat USB as charging,
+or unplug when you hop.
 
 ## Install
 
 ```bash
 git clone https://github.com/gabriel-laet/desk.git
 cd desk
-# or: git clone git@github.com:gabriel-laet/desk.git
-# typical checkout: ~/src/desk
 ```
 
 Put `~/.local/bin` on `PATH`. `git pull && make install` from the clone.
@@ -166,38 +127,40 @@ Put `~/.local/bin` on `PATH`. `git pull && make install` from the clone.
 `make install` writes:
 
 ```
-~/.local/bin/desk-switch                 # the CLI
-~/.local/bin/hhkb-mx-follow              # same program (legacy name)
-~/.local/lib/desk-switch/mxswitch        # mouse reference (TCC path — do not move)
-~/.local/lib/desk-switch/lgdualup        # display USB helper
-~/.local/lib/desk-switch/dualup-layout   # display OS layout (displayplacer / hyprctl)
-~/.local/lib/desk-switch/hhkb            # keyboard.presence reference
-~/.local/lib/desk-switch/alexa           # smarthome reference (wraps alexacli)
-~/.local/lib/desk-switch/kettle          # Fellow Stagg LAN appliance
-~/.local/lib/desk-switch/weather         # Open-Meteo ambient ° + altitude
-~/.local/lib/desk-switch/*.manifest.json # api_version: 1
+~/.local/bin/desk                        # the CLI
+~/.local/bin/desk-switch                 # deprecated alias → desk
+~/.local/bin/hhkb-mx-follow              # deprecated alias → desk
+~/.local/lib/desk/mxswitch               # mouse reference (TCC path — do not move)
+~/.local/lib/desk/lgdualup               # display USB helper
+~/.local/lib/desk/dualup-layout          # display OS layout (displayplacer / hyprctl)
+~/.local/lib/desk/hhkb                   # keyboard.presence reference
+~/.local/lib/desk/alexa                  # smarthome reference (wraps alexacli)
+~/.local/lib/desk/kettle                 # Fellow-style LAN kettle
+~/.local/lib/desk/weather                # Open-Meteo ambient ° + altitude
+~/.local/lib/desk/*.manifest.json        # api_version: 1
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
-~/.local/bin/kettle                      # compat shim → lib/ (optional; prefer desk-switch)
-~/.config/desk-switch/config.json        # first install only
+~/.local/bin/kettle                      # compat shim → lib/ (prefer `desk kettle`)
+~/.config/desk/config.json               # first install only
 ```
 
-Old configs under `~/.config/hhkb-mx-follow/` still load. Prefer
-`~/.config/desk-switch/config.json`.
+Config read order: `~/.config/desk/`, then `~/.config/desk-switch/`, then
+`~/.config/hhkb-mx-follow/`. Adapter libdir read order: `$DESK_LIB`,
+`$DESK_SWITCH_LIB`, `~/.local/lib/desk/`, then `~/.local/lib/desk-switch/`.
 
 ### macOS
 
 ```bash
 make install
-desk-switch status
+desk status
 ```
 
-Grant **Input Monitoring** to `~/.local/lib/desk-switch/mxswitch`
-(System Settings → Privacy & Security). The PATH shim is a shell script; TCC
-is on the real binary. `mxswitch --setup` opens that pane.
+Grant **Input Monitoring** to `~/.local/lib/desk/mxswitch`
+(System Settings → Privacy & Security). The PATH shim is a shell script;
+TCC is on the real binary. `mxswitch --setup` opens that pane.
 
-On this Mac, `adapters.hosts.follow_channel` is the *other* machine’s
-Easy-Switch slot (2 if the Mac is channel 1).
+`adapters.hosts.follow_channel` is the *other* machine’s Easy-Switch slot
+(2 if this Mac is channel 1).
 
 HHKB follow at login (existing unit name — do not rename if already loaded):
 
@@ -208,16 +171,17 @@ cp macos/local.hhkb-mx-follow.plist.example \
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hhkb-mx-follow.plist
 ```
 
-Log: `~/Library/Logs/hhkb-mx-follow.log`.
+The example plist now calls `desk watch`. Old units that still exec
+`hhkb-mx-follow` keep working via the alias. Log:
+`~/Library/Logs/hhkb-mx-follow.log`.
 
-Menu bar (optional, same actions as the Omarchy panel): see
-[macOS menu bar](#macos-menu-bar).
+Menu bar (optional): see [macOS menu bar](#macos-menu-bar).
 
 ### Linux
 
 ```bash
 make install
-desk-switch status
+desk status
 ```
 
 Mouse hidraw:
@@ -235,10 +199,10 @@ sudo cp adapters/lgdualup/linux/43-lg-dualup.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Set `adapters.hosts.this_host` to `linux` and `follow_channel` to `1` (the
-Mac). `make install` does that on a first-time Linux config.
+Set `adapters.hosts.this_host` to `linux` and `follow_channel` to `1`
+(the Mac). `make install` does that on a first-time Linux config.
 
-Watcher (existing unit name — `ExecStart` is still `hhkb-mx-follow watch`):
+Watcher (existing unit name):
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -249,12 +213,14 @@ journalctl --user -u hhkb-mx-follow -f
 ```
 
 `WantedBy=graphical-session.target` — starts with Hyprland/Omarchy.
+The unit runs `desk watch`; the `hhkb-mx-follow` alias still works.
 
 ## Omarchy plugin
 
 The plugin manifest stays at the git root (`manifest.json`, id
-`glaet.desk-switch`). The widget is `linux/omarchy/BarWidget.qml`. It only
-calls `desk-switch`. It does **not** run `make install`.
+`glaet.desk-switch`). The widget is `linux/omarchy/BarWidget.qml`. It
+calls `desk` (falls back to `desk-switch`, then `hhkb-mx-follow`). It
+does **not** run `make install`.
 
 On the Linux box:
 
@@ -263,54 +229,41 @@ make install                          # CLI + adapters first
 omarchy plugin add https://github.com/gabriel-laet/desk.git --enable
 ```
 
-That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places a
-widget on the **right** section. The strip title is quiet `bar_strip`
-(e.g. `LNX  PBP`) from `desk-switch status --json`. Dense `bar_label`
-(`LNX  kbU  mx2  PBP`) stays in JSON and in the click panel chips.
-`ui.tray.density: "chips"` paints `bar_label` in the strip. Slot order
-comes from the shared `ui` object (Mac settings write it; no Omarchy
-drag UI yet). `target_hint`
-is desk focus from the mouse Easy-Switch channel (cached / peer if the
-local probe misses). Click for:
+That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places
+a widget on the **right** section. The strip title is quiet `bar_strip`
+(e.g. `LNX  PBP`) from `desk status --json`. Dense `bar_label` stays in
+JSON and in the click panel chips. `ui.tray.density: "chips"` paints
+`bar_label` in the strip.
 
 | Button | Command |
 |---|---|
-| Refresh status | `desk-switch status --json` |
-| Switch to Mac | `desk-switch to mac` |
-| Switch to Linux | `desk-switch to linux` |
-| DualUp Full  ⌘⌥⇧F | `desk-switch full` — hidden unless DualUp is present or mode is known |
-| DualUp PBP  ⌘⌥⇧P | `desk-switch pbp` — uses `pbp_mode` from config; same visibility |
-| Auto layout  ⌘⌥U | `desk-switch layout` — re-applies full or PBP from the live display |
+| Refresh status | `desk status --json` |
+| Switch to Mac | `desk to mac` |
+| Switch to Linux | `desk to linux` |
+| DualUp Full  ⌘⌥⇧F | `desk full` — hidden unless DualUp is present or mode is known |
+| DualUp PBP  ⌘⌥⇧P | `desk pbp` — uses `pbp_mode` from config |
+| Auto layout  ⌘⌥U | `desk layout` — re-applies full or PBP from the live display |
 
-Polls about every 15s. Looks up `desk-switch` via `bash -lc` with
-`~/.local/bin` on `PATH` (falls back to `hhkb-mx-follow`).
+Polls about every 15s. Looks up `desk` via `bash -lc` with `~/.local/bin`
+on `PATH`.
 
 Already cloned this repo on the machine? Enable the checkout instead of
-re-adding, then `omarchy plugin validate .`.
-
-Without Omarchy:
-
-```bash
-make validate-plugin
-```
+re-adding, then `omarchy plugin validate .`. Without Omarchy:
+`make validate-plugin`.
 
 ### Omarchy menu
 
 Merge the keys in [`extensions/omarchy-menu.jsonc`](extensions/omarchy-menu.jsonc)
 into `~/.config/omarchy/extensions/omarchy-menu.jsonc`. Do not replace the
-file. Rows land under **Trigger → desk**: Status, Switch to Mac /
-Linux, DualUp Full / PBP (DualUp rows hide when the helper is missing).
+file. Rows land under **Trigger → desk**.
 
 ## macOS menu bar
 
 Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `slots`
-(composite `NSImage`) or quiet `bar_strip` (`MAC`/`LNX` plus a DualUp
-mark). Click for a modular HUD: host strip first, then each enabled
-slot once by `kind` (face / chip / toggle / mode) with actions scoped
-under that widget. **Configure tray** drag-reorders slots and writes
-`ui` in `~/.config/desk-switch/config.json` (Omarchy will share it).
-`ui.tray.density: "chips"` restores the dense `bar_label` title.
-Calls `desk-switch` only (PATH, then `~/.local/bin`).
+(composite `NSImage`) or quiet `bar_strip`. Click for a modular HUD:
+host strip first, then each enabled slot once by `kind`. **Configure
+tray** drag-reorders slots and writes `ui` in `~/.config/desk/config.json`.
+Calls `desk` (PATH, then `~/.local/bin`; falls back to `desk-switch`).
 macOS 13+. Ad-hoc signed, not App Store.
 
 ```bash
@@ -320,11 +273,9 @@ make install-menubar         # ~/Applications/DeskSwitchBar.app
 open -a DeskSwitchBar
 ```
 
-`xcode-select --install` if `swiftc` is missing. Refresh every ~15s and
-again when the panel opens. DualUp rows show Karabiner shortcuts already
-bound on this desk: **⌘⌥⇧F** full, **⌘⌥⇧P** PBP, **⌘⌥U** auto layout.
-Those keys should run `desk-switch full` / `pbp` / `layout` (USB + OS
-layout), not bare `dualup-layout`.
+Refresh every ~15s and again when the panel opens. DualUp rows show
+Karabiner-style shortcuts: **⌘⌥⇧F** full, **⌘⌥⇧P** PBP, **⌘⌥U** auto
+layout. Those keys should run `desk full` / `pbp` / `layout`.
 
 Login item:
 
@@ -337,65 +288,57 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.desk-switch-bar.pl
 ## CLI
 
 ```bash
-desk-switch status              # HHKB / mouse / adapters (text)
-desk-switch status --json
-desk-switch status --json --local  # skip SSH peer peek
-desk-switch status --hint       # MAC / LNX / ?  (same as: desk-switch hint)
-desk-switch to mac              # mouse + DualUp input if configured
-desk-switch to linux
-desk-switch to linux --mouse-only
-desk-switch switch mac          # same as `to mac`
-desk-switch switch 2            # mouse only, Easy-Switch 1|2|3
-desk-switch pbp                 # USB PBP + hdmi1/dp inputs + OS layout
-desk-switch pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
-desk-switch full                # USB full + OS layout (Mac 2880x2560@270 / Linux 2560x2880 t3)
-desk-switch layout              # re-apply full or PBP from the live DualUp geometry
-desk-switch watch               # HHKB leave → mouse away; USB appear → to this host
-desk-switch watch --dry-run
-desk-switch smarthome list      # Echo devices (and entities when that API works)
-desk-switch smarthome status    # light-oriented snapshot
-desk-switch smarthome on        # desk light on (Escritório: "acender a luz")
-desk-switch smarthome off       # desk light off (Escritório: "apagar a luz")
-desk-switch kettle status --json
-desk-switch kettle heat 93
-desk-switch kettle off
-desk-switch weather status --json
-desk-switch --version
+desk status              # HHKB / mouse / adapters (text)
+desk status --json
+desk status --json --local  # skip SSH peer peek
+desk status --hint       # MAC / LNX / ?  (same as: desk hint)
+desk to mac              # mouse + DualUp input if configured
+desk to linux
+desk to linux --mouse-only
+desk switch mac          # same as `to mac`
+desk switch 2            # mouse only, Easy-Switch 1|2|3
+desk pbp                 # USB PBP + hdmi1/dp inputs + OS layout
+desk pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
+desk full                # USB full + OS layout
+desk layout              # re-apply full or PBP from the live DualUp geometry
+desk watch               # HHKB leave → mouse away; USB appear → to this host
+desk watch --dry-run
+desk smarthome list      # devices (and entities when that API works)
+desk smarthome status    # light-oriented snapshot
+desk smarthome on        # desk light on
+desk smarthome off       # desk light off
+desk kettle status --json
+desk kettle heat 93
+desk kettle off
+desk weather status --json
+desk --version
 ```
 
 `watch` never touches DualUp. Use `to mac` / `to linux` (or a panel) for
 mouse + monitor together.
 
-`pbp` / `full` no-op with a message if the dualup adapter is missing. After
-a successful USB toggle, `pbp` assigns the cabling pair (Linux DisplayPort
-`dp` first, then Mac Studio `hdmi1`) and both commands apply OS layout.
-PBP Main/Sub assignment uses `lgdualup pbp-assign` (sub VCPs 0x55/0x5A plus
-a Main→swap→Main dance). Plain `input dp` cannot change the sub window
-(it stays HDMI2). After the USB toggle (and PBP assign), both `full` and
-`pbp` wait `layout_settle_s` (default 0.5s) so EDID can settle, then apply
-OS layout. Layout retries ~8s while EDID catches up. On macOS the helper
-applies the verbose displayplacer profile (hz / color_depth / scaling /
-origin) and re-lists to confirm Resolution + Rotation — a 0 from
-displayplacer is not enough (full can stay `2560x2880` @ 0°).
-PBP layout is OS-specific (same on-screen half, different EDID naming):
+`pbp` / `full` no-op with a message if the dualup adapter is missing.
+After a successful USB toggle, `pbp` assigns the cabling pair (Linux
+DisplayPort `dp` first, then Mac `hdmi1`) and both commands apply OS
+layout. After the USB toggle (and PBP assign), both wait
+`layout_settle_s` (default 0.5s) so EDID can settle. Layout retries ~8s
+while EDID catches up.
 
 | Host | PBP | Full |
 |---|---|---|
-| macOS (displayplacer) | `2880x1280 @ 270°` (EDID may list `1280x2880` at 0°) | `2880x2560 @ 270°` (EDID may list `2560x2880` at 0°) |
-| Linux / Omarchy (`hyprctl`, typically `DP-2`) | `1280x2880@59.96` transform **3** | `2560x2880` transform **3** |
+| macOS (displayplacer) | `2880x1280 @ 270°` | `2880x2560 @ 270°` |
+| Linux / Hyprland (`hyprctl`) | `1280x2880` transform **3** | `2560x2880` transform **3** |
 
 Not `2880x1280` t3 (stretched) and not `1280x2880` t0 (wrong orientation).
-If the half mode is not in EDID yet, the helper exits 2 and `desk-switch`
-retries.
 Set `adapters.dualup.peer` to SSH layout-only to the other machine.
 
-Compat: `hhkb-mx-follow` is the same CLI. `mxswitch` / `lgdualup` on PATH
-exec the private helpers.
+Deprecated aliases: `desk-switch`, `hhkb-mx-follow`. `mxswitch` /
+`lgdualup` / `kettle` on PATH exec the private helpers.
 
 ## Config
 
 Edit [`config.example.json`](config.example.json) →
-`~/.config/desk-switch/config.json`.
+`~/.config/desk/config.json`.
 
 ```json
 {
@@ -414,26 +357,25 @@ Edit [`config.example.json`](config.example.json) →
       "enabled": true,
       "pbp_mode": "50-50",
       "switch_pbp": false,
-      "display_id": "9134432D-0196-4653-9712-EFCAF1980612",
       "inputs": { "mac": "hdmi1", "linux": "dp" }
     },
     "smarthome": {
       "enabled": true,
       "backend": "alexa",
-      "device": "Escritório"
+      "device": "DeviceName"
     },
     "kettle": {
       "enabled": true,
       "backend": "kettle",
-      "host": "192.168.3.36"
+      "host": "YOUR_HOST"
     },
     "weather": {
       "enabled": true,
       "backend": "weather",
-      "latitude": -23.5505,
-      "longitude": -46.6333,
-      "timezone": "America/Sao_Paulo",
-      "label": "São Paulo"
+      "latitude": 0,
+      "longitude": 0,
+      "timezone": "UTC",
+      "label": "Home"
     }
   },
   "ui": {
@@ -452,54 +394,35 @@ Edit [`config.example.json`](config.example.json) →
 
 | Key | Meaning |
 |---|---|
-| `adapters.mouse.backend` / `path` | Mouse adapter id or executable. Pin wins over libdir scan |
+| `adapters.mouse.backend` / `path` | Mouse adapter id or executable |
 | `adapters.keyboard.backend` / `path` | Keyboard.presence adapter (`hhkb` is the reference) |
-| `adapters.display` | Same role as `adapters.dualup` (legacy alias). `backend` / `path` pin the display adapter |
-| `adapters.smarthome` | Smart-home role. `backend` / `path` pin the adapter (`alexa` is the reference). Optional `device` is the Echo that hears light phrases |
-| `adapters.kettle` | Fellow Stagg LAN. Optional `host` (DHCP moves it). See [`adapters/kettle/`](adapters/kettle/) |
-| `adapters.weather` | Open-Meteo ambient. Optional `latitude` / `longitude` / `timezone` / `label`. See [`adapters/weather/`](adapters/weather/) |
+| `adapters.display` | Same role as `adapters.dualup` (legacy alias) |
+| `adapters.smarthome` | Smart-home role. Optional `device` is the speaker that hears light phrases |
+| `adapters.kettle` | Fellow-style LAN kettle. Set `host` (DHCP moves it). See [`adapters/kettle/`](adapters/kettle/) |
+| `adapters.weather` | Open-Meteo ambient. Set `latitude` / `longitude` / `timezone` / `label`. See [`adapters/weather/`](adapters/weather/) |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
-| `ui.tray.lights` | If true, `bar_strip` may include a `lights` on/off mark. Default omit — bars stay quiet |
-| `ui.tray.slots` | Order + show/hide + flavor. Objects `{id, enabled, kind?, show_altitude?}`. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
-| `ui.tray.slots[].kind` | Widget flavor (`face` / `chip` / `toggle` / `mode`). Adapters publish this; shells keep a small fallback registry |
-| `ui.tray.slots[].show_altitude` | Chip-slot pref (weather owns altitude). If false, core strips `780m` from that slot’s detail |
-| `ui.hud.show_faces` | If false, face-kind widgets skip the circular gauge |
-| `ui.hud.density` | `regular` (default) or `compact` |
+| `ui.tray.lights` | If true, `bar_strip` may include a lights on/off mark |
+| `ui.tray.slots` | Order + show/hide + flavor. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
 | `adapters.hosts.*.channel` | Easy-Switch slot for `to mac` / `to linux` |
-| `adapters.dualup.inputs.*` | DualUp input for that host. PBP uses Mac=`hdmi1`, Linux=`dp` when empty. `to mac\|linux` without `switch_pbp` leaves input alone if empty |
-| `adapters.dualup.switch_pbp` | If true, `to mac\|linux` also runs the PBP sequence (USB + inputs + layout) |
-| `adapters.dualup.pbp_mode` | Mode for `desk-switch pbp` and for `to` when `switch_pbp` is true |
+| `adapters.dualup.inputs.*` | DualUp input for that host. PBP uses Mac=`hdmi1`, Linux=`dp` when empty |
+| `adapters.dualup.switch_pbp` | If true, `to mac\|linux` also runs the PBP sequence |
+| `adapters.dualup.pbp_mode` | Mode for `desk pbp` and for `to` when `switch_pbp` is true |
 | `adapters.dualup.display_id` | macOS displayplacer UUID or Hyprland connector. Empty = detect DualUp |
 | `adapters.dualup.layout` | Apply OS resolution/rotation after USB (default true) |
-| `adapters.dualup.layout_settle_s` | Seconds to wait after USB (and PBP assign) before OS layout. Default 0.5. Full and PBP. |
+| `adapters.dualup.layout_settle_s` | Seconds to wait after USB before OS layout. Default 0.5 |
 | `adapters.dualup.peer` | Optional SSH host; runs `dualup-layout` there (no USB) |
-| `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance (`Fn+Ctrl+0`) as `to <this_host>` |
+| `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance as `to <this_host>` |
 | `poll_interval_s` / `absent_polls_required` | Watcher debounce (defaults 0.5s × 4 ≈ 2s) |
 
 Inputs the helper accepts: `usbc` / `usb-c` / `dp3`, `dp` / `dp1`, `dp2`,
 `hdmi1`, `hdmi2`, `auto`. List devices: `lgdualup --list` (or `--info`).
 
-PBP on `to mac|linux` stays off unless `switch_pbp` is true or a host entry
-has `"pbp": "…"`. `desk-switch full` / `pbp` always run the dualup adapter
-when the USB helper exists.
+Typical cabling: Mac = **HDMI1**, Linux = **DisplayPort (`dp`)**. Do not
+set Mac to `usbc`.
 
-Desk cabling: Mac Studio = **HDMI1**, Omarchy/Linux = **DisplayPort (`dp`)**.
-Do not set Mac to `usbc`.
-
-Confirmed desk layouts (same on-screen DualUp geometry, different EDID names):
-
-| Host | PBP | Full |
-|---|---|---|
-| macOS (displayplacer) | **`2880x1280 @ 270°`** (EDID may list `1280x2880` at 0°) | `2880x2560 @ 270°` (EDID may list `2560x2880` at 0°) |
-| Linux / Omarchy (`DP-2`) | **`1280x2880@59.96` transform 3** | `2560x2880` transform 3 |
-
-`2880x1280` t3 stretches; `1280x2880` t0 is the wrong orientation. If EDID
-has not published the half mode yet — or macOS accepted a layout apply
-without actually rotating — the helper exits 2 and `desk-switch` retries.
-macOS needs
-[displayplacer](https://github.com/jakehilborn/displayplacer)
+macOS needs [displayplacer](https://github.com/jakehilborn/displayplacer)
 (`brew install jakehilborn/jakehilborn/displayplacer`). Linux uses `hyprctl`.
 
 Legacy keys (`mxswitch`, `lgdualup`, `this_host`, `hosts`, `target_channel`)
@@ -507,9 +430,9 @@ still load. New installs write the adapters shape.
 
 ## Plug another adapter
 
-Core discovers adapters from `$DESK_SWITCH_LIB` (default
-`~/.local/lib/desk-switch/`) and `desk-switch-<id>` on PATH. A drop-in is
-an executable plus a manifest (`api_version: 1`):
+Core discovers adapters from `$DESK_LIB` (default `~/.local/lib/desk/`,
+with a read-fallback to `~/.local/lib/desk-switch/`) and `desk-<id>` on
+PATH. A drop-in is an executable plus a manifest (`api_version: 1`):
 
 ```json
 {
@@ -523,15 +446,14 @@ an executable plus a manifest (`api_version: 1`):
 Layout (first that works):
 
 ```
-~/.local/lib/desk-switch/unifying
-~/.local/lib/desk-switch/unifying.manifest.json
-# or: ~/.local/lib/desk-switch/unifying/unifying
-#     ~/.local/lib/desk-switch/unifying/manifest.json
-# or: desk-switch-unifying on PATH
+~/.local/lib/desk/unifying
+~/.local/lib/desk/unifying.manifest.json
+# or: ~/.local/lib/desk/unifying/unifying
+#     ~/.local/lib/desk/unifying/manifest.json
+# or: desk-unifying on PATH
 ```
 
-Pin if more than one mouse adapter is present (otherwise the reference
-`mxswitch` wins when installed; two non-reference ids need a pin):
+Pin if more than one mouse adapter is present:
 
 ```json
 {
@@ -541,92 +463,65 @@ Pin if more than one mouse adapter is present (otherwise the reference
 }
 ```
 
-`desk-switch to linux` then calls `unifying 2` (the Easy-Switch slot for
-Linux). `--info` should print `currently on N` so status can cache the
-channel. A worked example lives at [`examples/dummy-mouse/`](examples/dummy-mouse/).
+`desk to linux` then calls `unifying 2`. `--info` should print
+`currently on N` so status can cache the channel. A worked example lives
+at [`examples/dummy-mouse/`](examples/dummy-mouse/).
 
 Display adapters list `display.input` / `display.pbp` / `display.full` /
-`layout.apply`. Keyboard adapters list `keyboard.presence` and speak JSON
-from `info` (`present`, `usb`, `bluetooth`, `transport`). Smart-home
+`layout.apply`. Keyboard adapters list `keyboard.presence`. Smart-home
 adapters list `smarthome.list` / `smarthome.status` / `light.on` /
-`light.off` and speak JSON from `info` / `list` / `on` / `off`. Kettle
-adapters list `appliance.status` / `appliance.heat` / `appliance.off`.
-Weather adapters list `weather.status`.
+`light.off`. Kettle adapters list `appliance.status` / `appliance.heat` /
+`appliance.off`. Weather adapters list `weather.status`.
 
-## Alexa / smart-home (Mac first)
+## Alexa / smart-home
 
 The `alexa` adapter is a thin wrapper around [`alexacli`](https://github.com/buddyh/alexa-cli).
-desk-switch never talks to Amazon itself. Detail:
-[`adapters/alexa/`](adapters/alexa/).
+Core never talks to Amazon itself. Detail: [`adapters/alexa/`](adapters/alexa/).
 
-1. Install `alexacli` on the Mac (`brew install buddyh/tap/alexacli`).
-2. Authenticate once: `alexacli auth` (this desk uses domain `amazon.com`).
-   Credentials live in `~/.alexa-cli/config.json`.
-3. `make install` so `~/.local/lib/desk-switch/alexa` + its manifest land.
-4. Confirm Echo names: `desk-switch smarthome list` (Sala, Escritório).
+1. Install `alexacli` (`brew install buddyh/tap/alexacli` on a Mac).
+2. Authenticate once: `alexacli auth`. Credentials live in
+   `~/.alexa-cli/config.json`.
+3. `make install` so `~/.local/lib/desk/alexa` + its manifest land.
+4. Confirm device names: `desk smarthome list`.
+5. Pin `adapters.smarthome.device` to the speaker that should hear the
+   light phrases.
 
-`alexacli smarthome list` currently fails with an empty JSON parse on this
-desk. The adapter lists **Echo devices** via `alexacli devices` today and
-retries the entity list later without changing core.
+Spoken text must be only the light phrase (`acender a luz` /
+`apagar a luz` by default). Address the speaker with `-d DeviceName`,
+not by stuffing the room into the sentence. The adapter refuses an
+utterance that names the configured device.
 
-**Escritório desk light — safe phrases only.** Alexa routes by the Echo
-you address (`-d Escritório`), not by stuffing the room into the sentence.
-Spoken text must be exactly:
+Light state prefers a readable entity power flag when `alexacli sh list`
+returns one. Otherwise the adapter writes an optimistic last-commanded
+`on` / `off`. Bars omit the lights slot unless `ui.tray.lights` is on.
 
-| Action | Command | Utterance |
-|---|---|---|
-| On | `desk-switch smarthome on` | `acender a luz` |
-| Off | `desk-switch smarthome off` | `apagar a luz` |
+## Kettle + weather
 
-Do **not** say “acender a luz do escritório” / “apagar a luz do escritório”
-— that hits the wrong device. The adapter refuses an utterance that names
-the Echo.
-
-Light state in `status --json` / `slots` prefers a readable entity power
-flag when `alexacli sh list` actually returns one. On this desk that API
-is still empty (`lights_readable: false`), so the adapter writes an
-**optimistic** last-commanded `on` / `off` before the speak and keeps it
-across the next `status --json` poll. Amazon cannot report an external
-Alexa-app toggle until the entity list works. Bars omit the lights slot
-unless `ui.tray.lights` is on or the `lights` tray pref is enabled; an
-unknown state still paints `?` so On/Off stay available.
-
-## Kettle + weather (shared tray slots)
-
-Fellow Stagg LAN HTTP lives in [`adapters/kettle/`](adapters/kettle/).
+Fellow-style LAN HTTP lives in [`adapters/kettle/`](adapters/kettle/).
 Open-Meteo ambient ° + altitude lives in
 [`adapters/weather/`](adapters/weather/). Weather is **not** a kettle
 side-feed — it keeps working when the kettle host is down.
 
 ```bash
-desk-switch kettle status --json
-desk-switch kettle heat 93
-desk-switch kettle off
-desk-switch weather status --json
-desk-switch status --json   # adapters.kettle + adapters.weather + slots[]
+desk kettle status --json
+desk kettle heat 93
+desk kettle off
+desk weather status --json
+desk status --json   # adapters.kettle + adapters.weather + slots[]
 ```
 
-Typical kettle host on this desk: `192.168.3.36` (`adapters.kettle.host`).
-The Stagg CLI has **no auth** on port 80 — keep it on the LAN.
+Set `adapters.kettle.host` to `YOUR_HOST`. The Stagg CLI has **no auth**
+on port 80 — keep it on the LAN.
 
-`slots` is additive on `status --json`. `bar_label`, `bar_strip`, and
-existing `adapters.*` keys stay. Default extra order is weather →
-kettle → DualUp; `ui.tray.slots` reorders and hides (see
-[docs/ui-config.md](docs/ui-config.md)). DeskSwitchBar composites slot
-glyph+label pairs into **one** `NSImage` (nested SwiftUI `Image+Text`
-is flattened to a single symbol). The click panel paints each slot
-once by `kind`. Omarchy reads the same `slots` (modular QML later).
+`slots` is additive on `status --json`. Default extra order is weather →
+kettle → DualUp; `ui.tray.slots` reorders and hides.
 
-Optional `kettle` on PATH is a shim to `~/.local/lib/desk-switch/kettle`.
-Prefer `desk-switch kettle …`.
-
-If a leftover standalone `Kettle.app` / `glaet.fellow` from the old
-kettle checkout is still installed, quit it — DeskSwitchBar already
-paints that slot.
+Prefer `desk kettle …`. Optional `kettle` on PATH is a shim to
+`~/.local/lib/desk/kettle`.
 
 ## Troubleshooting
 
-**`desk-switch status` first.** Check `target_hint` / `bar_label`,
+**`desk status` first.** Check `target_hint` / `bar_label`,
 `hhkb_transport` (`usb` / `bluetooth` / `both` / `absent`), `hhkb_usb`,
 `mouse_channel` (live or cached), `adapters.mouse.available`,
 `adapters.dualup.available`, and whether DualUp USB was seen (`dualup_info`).
@@ -634,57 +529,44 @@ paints that slot.
 **Watcher never fires (HHKB USB ghost).** Mac still sees the HHKB over USB.
 That is now a *feature* when `follow_hhkb_usb` is on: USB appearance pulls
 the desk here instead of hopping the mouse away. To hop with BT only, unplug
-or use charge-only USB. Probe: macOS `ioreg` (IOUSB + IOHIDDevice Transport +
-`HHKB-Studio1`) and `hidutil list`; Linux `/sys/bus/hid/devices` bus
-`0003`=USB / `0005`=Bluetooth for `04FE:0016`. A probe error is treated as
-*present* so a flaky `hidutil` cannot steal the mouse. Sleep/wake clock jumps
-disarm until the HHKB is seen again.
+or use charge-only USB. A probe error is treated as *present* so a flaky
+`hidutil` cannot steal the mouse.
 
 **Bar shows `?` on Mac while Linux is focused.** The MX Master is on the
 Linux Easy-Switch channel, so Mac `mxswitch --info` fails (mouse asleep /
 other host). Status remembers the last live channel and, if
 `adapters.dualup.peer` (or `adapters.hosts.peer`) is set, peeks the peer
-over SSH (`status --json --local`). Bluetooth HHKB is detected by product
-name (`HHKB-Studio1`), not only hidutil VID/PID + usage 6.
+over SSH (`status --json --local` skips that).
 
 **Mouse does not hop (macOS Input Monitoring).** Grant it to
-`~/.local/lib/desk-switch/mxswitch`, not the shim. Click the mouse once if
+`~/.local/lib/desk/mxswitch`, not the shim. Click the mouse once if
 `--info` fails. After a reinstall the binary path changed — re-grant TCC.
 
-**Mouse hidraw denied (Linux).** udev rule `42-logitech-hidpp.rules`, user in
-`input`, then a new login.
+**Mouse hidraw denied (Linux).** udev rule `42-logitech-hidpp.rules`, user
+in `input`, then a new login.
 
-**DualUp no-op / not found.** The USB “LG Monitor Controls” cable (`043e:9a39`)
-must be in the **host running the command**. Typical desk: cable in the Mac,
-so `to linux` from the Mac flips the input; Linux cannot see the device.
-`make install` installs the helper; empty `adapters.dualup.inputs` means
-`to mac|linux` leaves the input alone. Linux also needs
-`43-lg-dualup.rules`. After PBP / full the host must also get the OS layout —
-Mac `2880x1280@270` / `2880x2560@270`, Linux `1280x2880` / `2560x2880`
-transform 3 (not t0, not `2880x1280` t3). `full` waits the same settle as
-PBP before calling displayplacer; if macOS stays `2560x2880` @ 0°, the
-helper retries (exit 2) instead of trusting displayplacer’s return code.
-If Linux PBP is stretched or rotated wrong, `make install` again. Set
-`adapters.dualup.display_id` (`DP-2` on Omarchy) if auto-detect misses
-the DualUp. Optional `adapters.dualup.peer` SSHes layout-only to the
-other machine.
+**DualUp no-op / not found.** The USB “LG Monitor Controls” cable
+(`043e:9a39`) must be in the **host running the command**. Empty
+`adapters.dualup.inputs` means `to mac|linux` leaves the input alone.
+After PBP / full the host must also get the OS layout. Optional
+`adapters.dualup.peer` SSHes layout-only to the other machine.
 
-**Panel / menu bar shows `?` or “desk-switch not found”.** CLI not installed,
-or GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in
-`~/.local/bin` directly. `make install` then `open -a DeskSwitchBar`.
+**Panel / menu bar shows `?` or “desk not found”.** CLI not installed, or
+GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in `~/.local/bin`
+directly (`desk`, then `desk-switch`). `make install` then
+`open -a DeskSwitchBar`.
 
 **Omarchy widget missing.** `make install` on Linux, then
-`omarchy plugin add … --enable`. The plugin checkout is not a substitute for
-the CLI.
+`omarchy plugin add … --enable`. The plugin checkout is not a substitute
+for the CLI.
 
 ## Credits
 
 Mouse channel switching is [mxswitch](https://github.com/marcocosta97/mxswitch)
-(MIT), vendored in `adapters/mxswitch/`. The follow
-idea — poll for the keyboard, then `ChangeHost` — is the same pattern as
+(MIT), vendored in `adapters/mxswitch/`. The follow idea — poll for the
+keyboard, then `ChangeHost` — is the same pattern as
 [logi_mx_auto_switch](https://github.com/omar16100/logi_mx_auto_switch) and
-[CleverSwitch](https://github.com/MikalaiBarysevich/CleverSwitch), which only
-speak Logitech-to-Logitech.
+[CleverSwitch](https://github.com/MikalaiBarysevich/CleverSwitch).
 
 ## License
 

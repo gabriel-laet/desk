@@ -1,8 +1,9 @@
 PREFIX ?= $(HOME)/.local
 BINDIR := $(PREFIX)/bin
-LIBDIR := $(PREFIX)/lib/desk-switch
+LIBDIR := $(PREFIX)/lib/desk
 CONFDIR := $(HOME)/.config/hhkb-mx-follow
-CONFDIR_NEW := $(HOME)/.config/desk-switch
+CONFDIR_OLD := $(HOME)/.config/desk-switch
+CONFDIR_NEW := $(HOME)/.config/desk
 UNAME := $(shell uname -s)
 APPDIR := $(HOME)/Applications
 MENUBAR_APP := DeskSwitchBar.app
@@ -31,12 +32,13 @@ lgdualup:
 endif
 
 # desk CLI + adapter helpers. Menubar is a separate macOS target.
-# Installed helper paths stay ~/.local/lib/desk-switch/<id> (TCC / shims).
+# Helpers install to ~/.local/lib/desk/<id> (legacy ~/.local/lib/desk-switch is still read).
 # Shells: macos/DeskSwitchBar + linux/omarchy (plugin manifest stays at git root).
 install: mxswitch lgdualup
-	install -d $(BINDIR) $(LIBDIR) $(CONFDIR) $(CONFDIR_NEW)
-	install -m 755 desk-switch.py $(BINDIR)/desk-switch
-	install -m 755 desk-switch.py $(BINDIR)/hhkb-mx-follow
+	install -d $(BINDIR) $(LIBDIR) $(CONFDIR) $(CONFDIR_OLD) $(CONFDIR_NEW)
+	install -m 755 desk.py $(BINDIR)/desk
+	install -m 755 scripts/desk-alias $(BINDIR)/desk-switch
+	install -m 755 scripts/desk-alias $(BINDIR)/hhkb-mx-follow
 ifeq ($(UNAME),Darwin)
 	install -m 755 mxswitch $(LIBDIR)/mxswitch
 	install -m 755 lgdualup $(LIBDIR)/lgdualup
@@ -56,10 +58,10 @@ endif
 	install -m 644 adapters/alexa/manifest.json $(LIBDIR)/alexa.manifest.json
 	install -m 644 adapters/kettle/manifest.json $(LIBDIR)/kettle.manifest.json
 	install -m 644 adapters/weather/manifest.json $(LIBDIR)/weather.manifest.json
-	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/mxswitch
-	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/lgdualup
-	install -m 755 scripts/desk-switch-adapter-shim $(BINDIR)/kettle
-	@if [ ! -f $(CONFDIR)/config.json ] && [ ! -f $(CONFDIR_NEW)/config.json ]; then \
+	install -m 755 scripts/desk-adapter-shim $(BINDIR)/mxswitch
+	install -m 755 scripts/desk-adapter-shim $(BINDIR)/lgdualup
+	install -m 755 scripts/desk-adapter-shim $(BINDIR)/kettle
+	@if [ ! -f $(CONFDIR)/config.json ] && [ ! -f $(CONFDIR_OLD)/config.json ] && [ ! -f $(CONFDIR_NEW)/config.json ]; then \
 		if [ "$(UNAME)" = Darwin ]; then \
 			sed -e 's#"this_host": "mac"#"this_host": "mac"#' \
 				-e 's#"follow_channel": 2#"follow_channel": 2#' \
@@ -69,13 +71,13 @@ endif
 				-e 's#"follow_channel": 2#"follow_channel": 1#' \
 				config.example.json > $(CONFDIR_NEW)/config.json; \
 		fi; \
-		cp $(CONFDIR_NEW)/config.json $(CONFDIR)/config.json; \
-		echo "wrote $(CONFDIR_NEW)/config.json — set adapters.dualup.inputs from desk-switch status / DualUp --list"; \
+		echo "wrote $(CONFDIR_NEW)/config.json — set adapters.dualup.inputs from desk status / DualUp --list"; \
 	fi
-	@echo "installed $(BINDIR)/desk-switch"
+	@echo "installed $(BINDIR)/desk"
+	@echo "  deprecated aliases: $(BINDIR)/desk-switch  $(BINDIR)/hhkb-mx-follow"
 	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb  $(LIBDIR)/alexa  $(LIBDIR)/kettle  $(LIBDIR)/weather"
 	@echo "  manifests: $(LIBDIR)/*.manifest.json"
-	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/kettle  $(BINDIR)/hhkb-mx-follow"
+	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/kettle"
 	@echo "Linux mouse hidraw: sudo cp adapters/mxswitch/linux/42-logitech-hidpp.rules /etc/udev/rules.d/"
 	@echo "Linux DualUp USB: sudo cp adapters/lgdualup/linux/43-lg-dualup.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger"
 ifeq ($(UNAME),Darwin)
@@ -83,7 +85,7 @@ ifeq ($(UNAME),Darwin)
 endif
 
 uninstall:
-	rm -f $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow $(BINDIR)/mxswitch $(BINDIR)/lgdualup $(BINDIR)/kettle
+	rm -f $(BINDIR)/desk $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow $(BINDIR)/mxswitch $(BINDIR)/lgdualup $(BINDIR)/kettle
 	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout $(LIBDIR)/hhkb $(LIBDIR)/alexa $(LIBDIR)/kettle $(LIBDIR)/weather
 	rm -f $(LIBDIR)/mxswitch.manifest.json $(LIBDIR)/lgdualup.manifest.json $(LIBDIR)/hhkb.manifest.json $(LIBDIR)/alexa.manifest.json
 	rm -f $(LIBDIR)/kettle.manifest.json $(LIBDIR)/weather.manifest.json
@@ -98,7 +100,7 @@ ifeq ($(UNAME),Darwin)
 		macos/DeskSwitchBar/DeskSwitchBar.swift
 	cp macos/DeskSwitchBar/Info.plist $(MENUBAR_BUILD)/Contents/Info.plist
 	printf 'APPL????' > $(MENUBAR_BUILD)/Contents/PkgInfo
-	codesign -s - --force $(MENUBAR_BUILD)
+	codesign -s - $(MENUBAR_BUILD)
 	@echo "built $(MENUBAR_BUILD)"
 else
 	@echo "DeskSwitchBar is macOS-only. Sources: macos/DeskSwitchBar/"

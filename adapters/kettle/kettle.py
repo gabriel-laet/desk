@@ -10,7 +10,7 @@ Out-of-process. Core never speaks Fellow HTTP.
     kettle host [ip]              # print or save ~/.config/kettle/host
 
 Wire: unauthenticated GET http://<ip>/cli?cmd=<command> on the LAN.
-Default / documented host on this desk: 192.168.3.36.
+Pin the host (`YOUR_HOST`); there is no baked-in LAN address.
 
 Capabilities: appliance.status / appliance.heat / appliance.off.
 
@@ -32,7 +32,7 @@ from pathlib import Path
 ADAPTER_ID = "kettle"
 ADAPTER_API_VERSION = 1
 CAPABILITIES = ["appliance.status", "appliance.heat", "appliance.off"]
-DEFAULT_HOST = "192.168.3.36"
+DEFAULT_HOST = ""
 DEFAULT_HEAT_C = "93"
 DEFAULT_TIMEOUT_S = 2.0
 CONTROL_TIMEOUT_S = 8.0
@@ -123,7 +123,7 @@ def resolve_host_spec(explicit: str = "", *, use_default: bool = False) -> str |
     saved = load_saved_host()
     if saved:
         return saved
-    if use_default:
+    if use_default and DEFAULT_HOST:
         return DEFAULT_HOST
     return None
 
@@ -514,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="", help="kettle IP or http://host[:port]")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--no-default-host", action="store_true", help="do not fall back to 192.168.3.36")
+    parser.add_argument("--no-default-host", action="store_true", help="do not invent a host when none is configured")
     parser.add_argument("--desk-switch-manifest", action="store_true")
     return parser
 

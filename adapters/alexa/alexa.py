@@ -16,9 +16,10 @@ Out-of-process. Core never talks to Amazon or `alexacli`.
     (optimistic, written before the speak) unless a later entity probe returns
     a readable power flag (`state_source=entity`).
 
-Desk light on the Escritório Echo: spoken text is ONLY `acender a luz` or
-`apagar a luz`. The room is selected with `-d Escritório` — never put
-"escritório" in the utterance (Alexa routes to the wrong device).
+Desk light: spoken text is ONLY the on/off phrase (defaults:
+`acender a luz` / `apagar a luz`). The speaker is selected with
+`-d DeviceName` — never put the device name in the utterance
+(Alexa routes to the wrong device).
 """
 
 from __future__ import annotations
@@ -37,8 +38,8 @@ ADAPTER_ID = "alexa"
 ADAPTER_API_VERSION = 1
 CAPABILITIES = ["smarthome.list", "smarthome.status", "light.on", "light.off"]
 
-# Reference desk: light is reached through the Escritório Echo.
-DEFAULT_DEVICE = "Escritório"
+# Pin adapters.smarthome.device to the speaker that hears the light phrases.
+DEFAULT_DEVICE = "DeviceName"
 DEFAULT_ON_PHRASE = "acender a luz"
 DEFAULT_OFF_PHRASE = "apagar a luz"
 DEFAULT_CLI = "alexacli"
@@ -64,12 +65,16 @@ def auth_config_path() -> Path:
 
 
 def cache_path() -> Path:
-    override = os.environ.get("DESK_SWITCH_ALEXA_CACHE")
+    override = os.environ.get("DESK_ALEXA_CACHE") or os.environ.get("DESK_SWITCH_ALEXA_CACHE")
     if override:
         return Path(override).expanduser()
     xdg = os.environ.get("XDG_CACHE_HOME")
     root = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
-    return root / "desk-switch" / CACHE_NAME
+    preferred = root / "desk" / CACHE_NAME
+    legacy = root / "desk-switch" / CACHE_NAME
+    if preferred.exists() or not legacy.exists():
+        return preferred
+    return legacy
 
 
 def which_cli(name: str) -> Path | None:

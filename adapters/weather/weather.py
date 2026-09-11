@@ -5,8 +5,9 @@ Out-of-process. First-class adapter — not a kettle side-feed.
 
     weather info | status          # JSON snapshot + tray slot
 
-Default location is São Paulo (America/Sao_Paulo). Elevation comes from
-the Open-Meteo forecast payload (or `adapters.weather.altitude_m`).
+Location comes from `--latitude` / `--longitude` / `--timezone` /
+`--label` (or the matching env / config). Elevation comes from the
+Open-Meteo forecast payload (or `adapters.weather.altitude_m`).
 Works with the kettle host down.
 
 Capabilities: weather.status.
@@ -27,10 +28,10 @@ from pathlib import Path
 ADAPTER_ID = "weather"
 ADAPTER_API_VERSION = 1
 CAPABILITIES = ["weather.status"]
-DEFAULT_LATITUDE = -23.5505
-DEFAULT_LONGITUDE = -46.6333
-DEFAULT_TIMEZONE = "America/Sao_Paulo"
-DEFAULT_LABEL = "São Paulo"
+DEFAULT_LATITUDE = 0.0
+DEFAULT_LONGITUDE = 0.0
+DEFAULT_TIMEZONE = "UTC"
+DEFAULT_LABEL = "Home"
 CACHE_NAME = "weather.json"
 CACHE_TTL_S = 600.0
 DEFAULT_TIMEOUT_S = 1.5
@@ -46,12 +47,16 @@ def manifest() -> dict:
 
 
 def cache_path() -> Path:
-    override = os.environ.get("DESK_SWITCH_WEATHER_CACHE")
+    override = os.environ.get("DESK_WEATHER_CACHE") or os.environ.get("DESK_SWITCH_WEATHER_CACHE")
     if override:
         return Path(override).expanduser()
     xdg = os.environ.get("XDG_CACHE_HOME")
     root = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
-    return root / "desk-switch" / CACHE_NAME
+    preferred = root / "desk" / CACHE_NAME
+    legacy = root / "desk-switch" / CACHE_NAME
+    if preferred.exists() or not legacy.exists():
+        return preferred
+    return legacy
 
 
 def weather_mood_title(wmo_code: int, is_day: bool) -> str:
@@ -231,7 +236,7 @@ def snapshot(
     if parsed is None:
         url = url_override
         if url is None:
-            url = os.environ.get("DESK_SWITCH_WEATHER_URL")
+            url = os.environ.get("DESK_WEATHER_URL") or os.environ.get("DESK_SWITCH_WEATHER_URL")
         if url == "":
             out["error"] = "weather fetch disabled"
             return out

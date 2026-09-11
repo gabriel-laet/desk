@@ -4,13 +4,14 @@
 [`gabriel-laet/desk`](https://github.com/gabriel-laet/desk). Fellow
 kettle lives at `adapters/kettle/`; weather at `adapters/weather/`.
 The former `gabriel-laet/kettle` repo was hard-deleted (historical
-links below are not live). CLI stays `desk-switch`.
+links below are not live). Taught CLI is **`desk`**
+(`desk-switch` / `hhkb-mx-follow` are deprecated aliases).
 **Extends:** [RFC 0001](0001-rust-core-and-adapters.md) — same pluggability
 north star; this RFC adds the product name, the kettle fold, and a
 generic slot tray / HUD.
 **Desk (reference, not a core assumption):** Mac Studio ↔ Omarchy/Linux,
-MX Master + optional LG DualUp + HHKB follow + Escritório Alexa light +
-Fellow Stagg EKG Pro on LAN (e.g. `192.168.3.36`)
+MX Master + optional LG DualUp + HHKB follow + Alexa desk light +
+Fellow Stagg EKG Pro on LAN (host pinned in config)
 
 One product: **desk**. Core orchestrates. Hardware and services plug in
 under `adapters/`. One Mac extra and one Omarchy tray paint the same
@@ -156,7 +157,7 @@ Alexa is present and correct as an adapter:
 | Capabilities | `smarthome.list`, `smarthome.status`, `light.on`, `light.off` |
 | CLI | `desk-switch smarthome list\|status\|on\|off` |
 | Auth | out-of-process `alexacli` (`~/.alexa-cli/config.json`, domain `amazon.com`) |
-| Desk light | spoken text **only** `acender a luz` / `apagar a luz`, Echo `-d Escritório` |
+| Desk light | spoken text **only** the on/off phrase, speaker selected with `-d DeviceName` |
 
 Core copies adapter JSON into `adapters.smarthome`. Bars stay quiet.
 
@@ -175,7 +176,7 @@ kettle (other repo)
 ```
 
 Wire: unauthenticated `GET http://<ip>/cli?cmd=<command>` on the LAN.
-Default / documented host on this desk: **`192.168.3.36`**. Discover
+Documented host is pinned as **`YOUR_HOST`**. Discover
 exists (`kettle discover --save`) because DHCP moves the kettle.
 Commands that matter for the fold: `status`, `heat <temp>`, `off`,
 `on`, `bar`, `host`, `discover`.
@@ -195,7 +196,7 @@ is **not** `desk-switch status --json`. Typical extras:
   "altitude_m": 780,
   "weather_c": 22,
   "weather_mood": "Rain",
-  "host": "192.168.3.36"
+  "host": "YOUR_HOST"
 }
 ```
 
@@ -235,7 +236,7 @@ If a file is hardware- or vendor-shaped, it lives under
 | LG DualUp + layout | **adapter** `lgdualup` | `adapters/lgdualup/` | same. May publish a `dualup` / `display` slot (`label: "PBP"`). | yes |
 | HHKB presence | **adapter** `hhkb` | `adapters/hhkb/` | same | yes |
 | Hosts / channels | **config** | `adapters.hosts` | same | yes |
-| Alexa / Escritório light | **adapter** `alexa` | `adapters/alexa/` | same. Role `smarthome`. No default tray slot. | yes |
+| Alexa desk light | **adapter** `alexa` | `adapters/alexa/` | same. Role `smarthome`. No default tray slot. | yes |
 | Fellow kettle (temp / mode / heat / off / discover / host) | **adapter** `kettle` | **other repo** `gabriel-laet/kettle` | **`adapters/kettle/`** | **fold** |
 | Mac extra + Watch HUD | **shell** | `macos/DeskSwitchBar/` **and** kettle `Kettle.app` | **one** Mac extra + one generic HUD under `shells/macos/` (paths can stay until a later move). Composite `NSImage` extra. | unify |
 | Omarchy tray / plugin | **shell** | `glaet.desk-switch` **and** kettle `glaet.fellow` | **one** plugin / tray. Same `slots`. Native Tron/hacker chrome is fine. | unify |
@@ -389,7 +390,7 @@ display). Shells only paint.
     "kettle": {
       "backend": "kettle",
       "available": true,
-      "host": "192.168.3.36",
+      "host": "YOUR_HOST",
       "temp_c": 65,
       "target_c": 96,
       "mode": "holding",
@@ -482,7 +483,7 @@ Manifest (`api_version: 1`), same file-drop rules as RFC 0001:
 }
 ```
 
-Core never names `192.168.3.36`, never `GET /cli`, never ships
+Core never names `YOUR_HOST`, never `GET /cli`, never ships
 Fellow mode enums as core types. LAN security warning (no auth on
 port 80) travels with the **adapter**, not the orchestrator.
 
@@ -631,7 +632,7 @@ not perform E and does not delete anything.
 - **Kettle LAN has no auth.** Anyone on the LAN can heat/off.
   Document on the adapter. Do not expose port 80. Core should not
   grow a Fellow HTTP client "to make status faster".
-- **DHCP.** `192.168.3.36` is an example, not a core constant.
+- **DHCP.** `YOUR_HOST` is an example, not a core constant.
   Discover + `~/.config/kettle/host` (or
   `~/.config/desk-switch/` equivalent) stay adapter-owned.
 - **Alexa utterances.** Already locked in `adapters/alexa`. Shells

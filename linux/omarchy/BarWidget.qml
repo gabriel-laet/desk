@@ -22,7 +22,7 @@ BarWidget {
   property string mouseHost: ""
   property string dualupMode: "unknown"
   property var slots: []
-  // Shared HUD/tray prefs from ~/.config/desk-switch/config.json (status.ui).
+  // Shared HUD/tray prefs from ~/.config/desk/config.json (status.ui).
   // Core already applies slot order / visibility / kind / per-slot altitude.
   // Mac writes this file. TODO: Omarchy drag-reorder settings UI — read
   // the same schema, do not fork it. Modular kind HUD is macOS-first.
@@ -211,7 +211,7 @@ BarWidget {
   }
 
   function runAction(args) {
-    actionProc.command = ["bash", "-lc", "export PATH=\"$HOME/.local/bin:$PATH\"; desk-switch " + args]
+    actionProc.command = ["bash", "-lc", "export PATH=\"$HOME/.local/bin:$PATH\"; if command -v desk >/dev/null; then desk " + args + "; elif command -v desk-switch >/dev/null; then desk-switch " + args + "; else hhkb-mx-follow " + args + "; fi"]
     if (actionProc.running)
       actionProc.running = false
     actionProc.running = true
@@ -232,7 +232,7 @@ BarWidget {
 
   Process {
     id: statusProc
-    command: ["bash", "-lc", "export PATH=\"$HOME/.local/bin:$PATH\"; if command -v desk-switch >/dev/null; then desk-switch status --json; elif command -v hhkb-mx-follow >/dev/null; then hhkb-mx-follow status --json; else echo '{\"target_hint\":\"\",\"bar_label\":\"desk\",\"lgdualup\":false}'; fi"]
+    command: ["bash", "-lc", "export PATH=\"$HOME/.local/bin:$PATH\"; if command -v desk >/dev/null; then desk status --json; elif command -v desk-switch >/dev/null; then desk-switch status --json; elif command -v hhkb-mx-follow >/dev/null; then hhkb-mx-follow status --json; else echo '{\"target_hint\":\"\",\"bar_label\":\"desk\",\"lgdualup\":false}'; fi"]
     stdout: StdioCollector {
       onStreamFinished: root.applyStatus(this.text)
     }

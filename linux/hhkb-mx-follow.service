@@ -1,10 +1,10 @@
 [Unit]
-Description=desk HHKB follow — desk-switch watch (push MX Master when the keyboard leaves)
+Description=desk HHKB follow — desk watch (push MX Master when the keyboard leaves)
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/python3 %h/.local/bin/hhkb-mx-follow watch
+ExecStart=/usr/bin/python3 %h/.local/bin/desk watch
 Restart=on-failure
 RestartSec=2
 

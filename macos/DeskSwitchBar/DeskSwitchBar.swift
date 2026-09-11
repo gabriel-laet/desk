@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-/// Menu-bar companion for desk (`desk-switch` CLI).
+/// Menu-bar companion for desk (`desk` CLI).
 /// Strip: quiet `bar_strip`, or a composite NSImage of `slots`
 /// (MenuBarExtra flattens nested Image+Text to one symbol — draw one image).
 /// HUD: modular widget flavors from `slots[].kind` (face / chip / toggle /
@@ -772,9 +772,9 @@ enum DeskSwitchCLI {
         var errorDescription: String? {
             switch self {
             case .missing:
-                return "desk-switch not found — run make install (PATH or ~/.local/bin)"
+                return "desk not found — run make install (PATH or ~/.local/bin)"
             case .timeout:
-                return "desk-switch timed out"
+                return "desk timed out"
             case .failed(let message):
                 return message
             }
@@ -783,13 +783,13 @@ enum DeskSwitchCLI {
 
     static func locate() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for name in ["desk-switch", "hhkb-mx-follow"] {
+        for name in ["desk", "desk-switch", "hhkb-mx-follow"] {
             let path = "\(home)/.local/bin/\(name)"
             if FileManager.default.isExecutableFile(atPath: path) {
                 return path
             }
         }
-        for name in ["desk-switch", "hhkb-mx-follow"] {
+        for name in ["desk", "desk-switch", "hhkb-mx-follow"] {
             if let found = which(name) {
                 return found
             }
@@ -1307,15 +1307,20 @@ struct DeskUIConfig: Equatable {
 enum DeskUIConfigStore {
     static func resolvePath(statusPath: String?) -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let preferred = home.appendingPathComponent(".config/desk-switch/config.json")
+        let preferred = home.appendingPathComponent(".config/desk/config.json")
         if let statusPath, !statusPath.isEmpty, statusPath != "(defaults)" {
             return URL(fileURLWithPath: statusPath)
         }
-        let legacy = home.appendingPathComponent(".config/hhkb-mx-follow/config.json")
-        if FileManager.default.isReadableFile(atPath: legacy.path),
-           !FileManager.default.isReadableFile(atPath: preferred.path)
-        {
-            return legacy
+        let legacySwitch = home.appendingPathComponent(".config/desk-switch/config.json")
+        let legacyFollow = home.appendingPathComponent(".config/hhkb-mx-follow/config.json")
+        if FileManager.default.isReadableFile(atPath: preferred.path) {
+            return preferred
+        }
+        if FileManager.default.isReadableFile(atPath: legacySwitch.path) {
+            return legacySwitch
+        }
+        if FileManager.default.isReadableFile(atPath: legacyFollow.path) {
+            return legacyFollow
         }
         return preferred
     }

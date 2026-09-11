@@ -2,8 +2,9 @@
 
 One JSON object, one file, both shells.
 
-**Path:** `~/.config/desk-switch/config.json` → `ui`  
-(same file as hosts / adapters; old `~/.config/hhkb-mx-follow/config.json` still loads)
+**Path:** `~/.config/desk/config.json` → `ui`  
+(same file as hosts / adapters; `~/.config/desk-switch/config.json` and
+`~/.config/hhkb-mx-follow/config.json` still load)
 
 Omarchy and macOS DeskSwitchBar read this schema. DeskSwitchBar can
 drag-reorder slots and write the file so you do not have to edit JSON
@@ -91,5 +92,5 @@ later pass — do not fork the schema.
 | Hand-edit / `config.example.json` | Same keys |
 | Omarchy | Reader only for now (TODO settings UI) |
 
-Core (`desk-switch.py`) is the composer: `collect_slots` honors order,
+Core (`desk.py`) is the composer: `collect_slots` honors order,
 visibility, kind, per-slot altitude, and faces before either shell paints.

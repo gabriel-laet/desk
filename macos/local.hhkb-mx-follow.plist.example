@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/YOU/.local/bin/hhkb-mx-follow</string>
+    <string>/Users/YOU/.local/bin/desk</string>
     <string>watch</string>
   </array>
   <key>RunAtLoad</key>

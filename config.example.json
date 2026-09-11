@@ -26,7 +26,7 @@
       "enabled": true,
       "pbp_mode": "50-50",
       "switch_pbp": false,
-      "display_id": "9134432D-0196-4653-9712-EFCAF1980612",
+      "display_id": "",
       "inputs": {
         "mac": "hdmi1",
         "linux": "dp"
@@ -35,20 +35,20 @@
     "smarthome": {
       "enabled": true,
       "backend": "alexa",
-      "device": "Escritório"
+      "device": "DeviceName"
     },
     "kettle": {
       "enabled": true,
       "backend": "kettle",
-      "host": "192.168.3.36"
+      "host": "YOUR_HOST"
     },
     "weather": {
       "enabled": true,
       "backend": "weather",
-      "latitude": -23.5505,
-      "longitude": -46.6333,
-      "timezone": "America/Sao_Paulo",
-      "label": "São Paulo"
+      "latitude": 0,
+      "longitude": 0,
+      "timezone": "UTC",
+      "label": "Home"
     }
   },
   "hhkb_vendor_id": 1278,

@@ -3,23 +3,21 @@
 Role: **`smarthome`**. Id: **`alexa`**. Core never calls Amazon or `alexacli`.
 
 ```
-~/.local/lib/desk-switch/alexa
-~/.local/lib/desk-switch/alexa.manifest.json
+~/.local/lib/desk/alexa
+~/.local/lib/desk/alexa.manifest.json
 ```
 
 ## Auth (Mac first)
 
 This adapter shells out to [`alexacli`](https://github.com/buddyh/alexa-cli).
-Gabriel’s Mac already has it authenticated:
 
 - config: `~/.alexa-cli/config.json`
-- domain: `amazon.com`
-- Echo devices: **Sala**, **Escritório**
+- domain: whatever `alexacli auth` stored
 
 ```bash
 brew install buddyh/tap/alexacli   # if needed
 alexacli auth                      # once; opens a browser
-alexacli devices                   # Sala, Escritório
+alexacli devices                   # confirm speaker names
 ```
 
 `ALEXA_CLI_CONFIG` overrides the config path (tests). `ALEXACLI` / `--cli`
@@ -31,39 +29,35 @@ overrides the binary.
 |---|---|---|
 | `list` | `smarthome.list` | `alexacli devices --json` |
 | `info` / `status` | `smarthome.status` | cache + auth/cli probe (`status` refreshes) |
-| `on` | `light.on` | `alexacli command "acender a luz" -d Escritório` |
-| `off` | `light.off` | `alexacli command "apagar a luz" -d Escritório` |
+| `on` | `light.on` | `alexacli command "<on phrase>" -d DeviceName` |
+| `off` | `light.off` | `alexacli command "<off phrase>" -d DeviceName` |
 
-`alexacli smarthome list` / `sh list` is attempted and recorded. On this
-desk it currently fails with an empty JSON parse and **does not expose
-light power**. `alexacli ask` can query in English prose but is too slow
-and language-fragile for the 15s tray poll. Until the entity list
+`alexacli smarthome list` / `sh list` is attempted and recorded. It often
+fails with an empty JSON parse and **does not expose light power**.
+`alexacli devices` and `alexacli command` work. Until the entity list
 returns a `powerState`, `lights[].state` is last commanded:
 
 - `on` / `off` write that state to the cache *before* the speak so a
-  concurrent `desk-switch status --json` (DeskSwitchBar poll / HUD
-  refresh) is honest.
+  concurrent `desk status --json` poll is honest.
 - A failed speak reverts the cache.
-- A device-list refresh will not clobber a newer command that landed
-  while `alexacli devices` was in flight.
 - When `sh list` later returns a light with `powerState`,
   `state_source` becomes `entity` and `lights_readable` is true.
 
 Do not expect an Alexa-app / physical-switch toggle to show on the tray
 until that entity read works.
 
-## Escritório desk light
+## Desk light
 
-Spoken text must be **only** `acender a luz` or `apagar a luz`. The Echo
-is selected with `-d Escritório`. Putting “escritório” in the utterance
-addresses the wrong device. The adapter refuses a phrase that names the
-Echo.
+Spoken text must be **only** the on/off phrase (defaults: `acender a luz`
+/ `apagar a luz`). The speaker is selected with `-d DeviceName`. Putting
+the device name in the utterance addresses the wrong device. The adapter
+refuses a phrase that names the configured Echo.
 
 ```bash
-desk-switch smarthome on
-desk-switch smarthome off
-desk-switch smarthome list
-desk-switch smarthome status --json
+desk smarthome on
+desk smarthome off
+desk smarthome list
+desk smarthome status --json
 ```
 
 Optional pin:
@@ -74,7 +68,7 @@ Optional pin:
     "smarthome": {
       "enabled": true,
       "backend": "alexa",
-      "device": "Escritório"
+      "device": "DeviceName"
     }
   }
 }
