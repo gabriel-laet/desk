@@ -12,6 +12,11 @@ Confirmed Omarchy modes (DP-2; matches Mac 2880x1280@270 / 2880x2560@270):
   full → 2560x2880, transform 3
   pbp  → 1280x2880, transform 3   (not 2880x1280 t3 / not 1280x2880 t0)
 
+Omarchy / Hyprland ≥0.55 Lua config is applied with
+``hyprctl eval 'hl.monitor({ … })'``. Hosts still on hyprlang fall back
+to ``hyprctl keyword monitor …``. A non-legacy keyword warning or a
+missing eval ``ok`` is a failure so the caller can retry.
+
 `--degree` overrides transform (0→0, 90→1, 180→2, 270→3) when set.
 
 Exit 0: layout applied (or hyprctl missing — skipped)
@@ -156,6 +161,53 @@ def pick_monitor(mons: list[dict], display_id: str) -> dict | None:
     return None
 
 
+def lua_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def lua_monitor_expr(name: str, mode: str, position: str, scale: str, transform: int) -> str:
+    return (
+        f"hl.monitor({{ output = {lua_quote(name)}, mode = {lua_quote(mode)}, "
+        f"position = {lua_quote(position)}, scale = {scale}, transform = {transform} }})"
+    )
+
+
+def keyword_monitor_spec(name: str, mode: str, position: str, scale: str, transform: int) -> str:
+    return f"{name},{mode},{position},{scale},transform,{transform}"
+
+
+def hypr_text(proc: subprocess.CompletedProcess) -> str:
+    return f"{proc.stdout or ''}\n{proc.stderr or ''}"
+
+
+def hypr_has_ok(text: str) -> bool:
+    return any(line.strip().lower() == "ok" for line in text.splitlines())
+
+
+def hypr_is_non_legacy(text: str) -> bool:
+    lowered = text.lower()
+    return "non-legacy" in lowered or "use eval" in lowered
+
+
+def hypr_apply_succeeded(proc: subprocess.CompletedProcess) -> bool:
+    """Keyword can exit 0 on Lua config while doing nothing — require a real ok."""
+    if proc.returncode != 0:
+        return False
+    text = hypr_text(proc)
+    if hypr_is_non_legacy(text):
+        return False
+    return hypr_has_ok(text)
+
+
+def print_hypr(proc: subprocess.CompletedProcess) -> None:
+    out = (proc.stdout or "").rstrip()
+    err = (proc.stderr or "").rstrip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr if proc.returncode else sys.stdout)
+
+
 def hz_for(mon: dict, res: str) -> str:
     for item in available_modes(mon):
         match = re.search(rf"{re.escape(res)}@([\d.]+)", str(item))
@@ -217,22 +269,30 @@ def main(argv: list[str] | None = None) -> int:
         scale = 1.0
     hz = hz_for(mon, res)
     scale_s = str(int(scale)) if scale == int(scale) else str(scale)
-    spec_s = f"{name},{res}@{hz},{x}x{y},{scale_s},transform,{transform}"
-    print(f"dualup-layout {args.mode} → {spec_s}")
+    mode_s = f"{res}@{hz}"
+    position = f"{x}x{y}"
+    expr = lua_monitor_expr(name, mode_s, position, scale_s, transform)
+    spec_s = keyword_monitor_spec(name, mode_s, position, scale_s, transform)
+    print(f"dualup-layout {args.mode} → {expr}")
+    try:
+        applied = run([hyprctl, "eval", expr], timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"dualup-layout: hyprctl apply failed: {exc}", file=sys.stderr)
+        return 2
+    print_hypr(applied)
+    if hypr_apply_succeeded(applied):
+        return 0
+
+    print(f"dualup-layout {args.mode} fallback → {spec_s}")
     try:
         applied = run([hyprctl, "keyword", "monitor", spec_s], timeout=8.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"dualup-layout: hyprctl apply failed: {exc}", file=sys.stderr)
         return 2
-    out = (applied.stdout or "").rstrip()
-    err = (applied.stderr or "").rstrip()
-    if out:
-        print(out)
-    if err:
-        print(err, file=sys.stderr if applied.returncode else sys.stdout)
-    if applied.returncode != 0:
-        return 2
-    return 0
+    print_hypr(applied)
+    if hypr_apply_succeeded(applied):
+        return 0
+    return 2
 
 
 if __name__ == "__main__":
