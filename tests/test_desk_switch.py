@@ -905,48 +905,135 @@ class DualupLayoutScriptTests(unittest.TestCase):
         self.assertIn("fallback", proc.stdout)
         self.assertIn(f"id:{self.DID} res:2880x2560 degree:270", proc.stdout)
 
-    def _write_hyprctl(self, bin_dir: Path, monitors_json: str) -> None:
+    def _write_hyprctl(
+        self,
+        bin_dir: Path,
+        monitors_json: str,
+        *,
+        eval_stdout: str = "ok\n",
+        eval_rc: int = 0,
+        keyword_stdout: str = "ok\n",
+        keyword_rc: int = 0,
+    ) -> None:
         hypr = bin_dir / "hyprctl"
         hypr.write_text(
             "#!/bin/sh\n"
-            "if [ \"$1\" = -j ] || [ \"$2\" = -j ]; then\n"
+            f"LOG={shlex.quote(str(bin_dir / 'hyprctl.log'))}\n"
+            'printf "%s\\n" "$*" >> "$LOG"\n'
+            'if [ "$1" = -j ] || [ "$2" = -j ]; then\n'
             f"cat <<'EOF'\n{monitors_json}\nEOF\n"
             "exit 0\n"
             "fi\n"
-            "echo \"keyword:$*\"\n"
+            'if [ "$1" = eval ]; then\n'
+            f"cat <<'EOF'\n{eval_stdout}EOF\n"
+            f"exit {eval_rc}\n"
+            "fi\n"
+            f"cat <<'EOF'\n{keyword_stdout}EOF\n"
+            f"exit {keyword_rc}\n"
         )
         hypr.chmod(0o755)
+
+    def _hypr_log(self, bin_dir: Path) -> str:
+        return (bin_dir / "hyprctl.log").read_text()
+
+    def _linux_monitors(self, width: int, height: int, modes: list[str]) -> str:
+        listed = ",".join(f'"{mode}"' for mode in modes)
+        return (
+            '[{"name":"DP-2","description":"LG Electronics LG SDQHD",'
+            f'"width":{width},"height":{height},"x":0,"y":0,"scale":1.0,'
+            '"refreshRate":59.96,"availableModes":['
+            f"{listed}]}}]"
+        )
 
     def test_linux_pbp_uses_1280x2880_transform_3(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
             self._write_hyprctl(
                 bin_dir,
-                '[{"name":"DP-2","description":"LG Electronics LG SDQHD",'
-                '"width":1280,"height":2880,"x":0,"y":0,"scale":1.0,'
-                '"refreshRate":59.96,"availableModes":['
-                '"1280x2880@59.96Hz","2880x1280@59.96Hz","2560x2880@59.96Hz"]}]',
+                self._linux_monitors(
+                    1280,
+                    2880,
+                    ["1280x2880@59.96Hz", "2880x1280@59.96Hz", "2560x2880@59.96Hz"],
+                ),
             )
             proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
+            log = self._hypr_log(bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertIn("DP-2,1280x2880@59.96,0x0,1,transform,3", proc.stdout)
+        self.assertIn(
+            'hl.monitor({ output = "DP-2", mode = "1280x2880@59.96", '
+            'position = "0x0", scale = 1, transform = 3 })',
+            proc.stdout,
+        )
+        self.assertIn("eval hl.monitor", log)
+        self.assertNotIn("keyword monitor", log)
         self.assertNotIn("2880x1280", proc.stdout)
-        self.assertNotIn("transform,0", proc.stdout)
+        self.assertNotIn("transform = 0", proc.stdout)
+        self.assertNotIn("fallback", proc.stdout)
 
     def test_linux_full_uses_2560x2880_transform_3(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
             self._write_hyprctl(
                 bin_dir,
-                '[{"name":"DP-2","description":"LG Electronics LG SDQHD",'
-                '"width":2560,"height":2880,"x":0,"y":0,"scale":1.0,'
-                '"refreshRate":59.96,"availableModes":['
-                '"2560x2880@59.96Hz","2880x2560@59.96Hz","1280x2880@59.96Hz"]}]',
+                self._linux_monitors(
+                    2560,
+                    2880,
+                    ["2560x2880@59.96Hz", "2880x2560@59.96Hz", "1280x2880@59.96Hz"],
+                ),
             )
             proc = self._run_script(self.LNX, ["full", "--id", "DP-2"], bin_dir)
+            log = self._hypr_log(bin_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertIn("DP-2,2560x2880@59.96,0x0,1,transform,3", proc.stdout)
+        self.assertIn(
+            'hl.monitor({ output = "DP-2", mode = "2560x2880@59.96", '
+            'position = "0x0", scale = 1, transform = 3 })',
+            proc.stdout,
+        )
+        self.assertIn("eval hl.monitor", log)
+        self.assertNotIn("keyword monitor", log)
         self.assertNotIn("2880x2560", proc.stdout)
+
+    def test_linux_falls_back_to_keyword_on_hyprlang(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_hyprctl(
+                bin_dir,
+                self._linux_monitors(1280, 2880, ["1280x2880@59.96Hz"]),
+                eval_stdout="unknown request\n",
+                eval_rc=1,
+            )
+            proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
+            log = self._hypr_log(bin_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn("fallback", proc.stdout)
+        self.assertIn("DP-2,1280x2880@59.96,0x0,1,transform,3", proc.stdout)
+        self.assertIn("keyword monitor", log)
+
+    def test_linux_non_legacy_keyword_is_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_hyprctl(
+                bin_dir,
+                self._linux_monitors(1280, 2880, ["1280x2880@59.96Hz"]),
+                eval_stdout="unknown request\n",
+                eval_rc=1,
+                keyword_stdout="keyword can't work with non-legacy parsers. Use eval.\n",
+                keyword_rc=0,
+            )
+            proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
+        self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
+
+    def test_linux_missing_ok_is_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_hyprctl(
+                bin_dir,
+                self._linux_monitors(1280, 2880, ["1280x2880@59.96Hz"]),
+                eval_stdout="",
+                keyword_stdout="",
+            )
+            proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
+        self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
 
     def test_linux_pbp_ignores_2560x1440_and_exits_2_without_half_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -960,6 +1047,39 @@ class DualupLayoutScriptTests(unittest.TestCase):
             proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
         self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
         self.assertNotIn("2560x1440", proc.stdout)
+
+
+class LinuxDualupLayoutUnitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = ROOT / "adapters" / "lgdualup" / "linux" / "dualup-layout"
+        loader = importlib.machinery.SourceFileLoader("dualup_layout_linux", str(path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        cls.ll = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.ll)
+
+    def test_lua_monitor_expr_matches_omarchy_eval(self) -> None:
+        self.assertEqual(
+            self.ll.lua_monitor_expr("DP-2", "1280x2880@59.96", "0x0", "1", 3),
+            'hl.monitor({ output = "DP-2", mode = "1280x2880@59.96", '
+            'position = "0x0", scale = 1, transform = 3 })',
+        )
+
+    def test_hypr_apply_treats_non_legacy_and_missing_ok_as_failure(self) -> None:
+        ok = subprocess.CompletedProcess([], 0, stdout="ok\n", stderr="")
+        silent = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        warning = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="keyword can't work with non-legacy parsers. Use eval.\n",
+            stderr="",
+        )
+        failed = subprocess.CompletedProcess([], 1, stdout="ok\n", stderr="")
+        self.assertTrue(self.ll.hypr_apply_succeeded(ok))
+        self.assertFalse(self.ll.hypr_apply_succeeded(silent))
+        self.assertFalse(self.ll.hypr_apply_succeeded(warning))
+        self.assertFalse(self.ll.hypr_apply_succeeded(failed))
 
 
 class MacosDualupLayoutUnitTests(unittest.TestCase):
