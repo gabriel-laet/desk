@@ -51,6 +51,15 @@
       "longitude": 0,
       "timezone": "UTC",
       "label": "Home"
+    },
+    "wallpaper": {
+      "enabled": false,
+      "landscape": "~/Pictures/wallpaper-landscape.jpg",
+      "portrait": "~/Pictures/wallpaper-portrait.jpg",
+      "exact_dir": "~/Pictures/wallpapers",
+      "exact_prefix": "desk",
+      "primary_output": "",
+      "outputs": {}
     }
   },
   "hhkb_vendor_id": 1278,
