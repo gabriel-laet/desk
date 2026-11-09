@@ -12,7 +12,7 @@ to a configured host, optionally follow an
 ```
 core     = config · status · watch · to/full/pbp/layout · adapter registry · slots
 adapters = mouse / keyboard / display / smarthome / kettle / weather / wallpaper
-shells   = macOS DeskSwitchBar + Omarchy tray — they paint `slots`, nothing else
+shells   = macOS DeskSwitchBar + Omarchy tray — they paint status and call `desk`
 ```
 
 Taught command: **`desk`**. LaunchAgent / systemd *unit filenames* can
@@ -257,16 +257,24 @@ omarchy plugin add https://github.com/gabriel-laet/desk.git --enable
 ```
 
 That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places
-a widget on the **right** section. The strip title is quiet `bar_strip`
-(e.g. `LNX  PBP`) from `desk status --json`. Dense `bar_label` stays in
-JSON and in the click panel chips. `ui.tray.density: "chips"` paints
-`bar_label` in the strip.
+a widget on the **right** section. The strip stays short. Quiet density
+paints the focus token and, when a named layout is active, that name
+(`TWR  work`, from `bar_strip.title`). `FULL` or `PBP` stands in when
+no named layout is set. Enabled slot labels follow the same token.
+`ui.tray.density: "chips"` paints `bar_label`, which leads with the
+same host and layout, then the keyboard and mouse marks.
+
+Buttons come from `desk status --json`. One switch button per
+`host_list` entry, so a third id such as `tower` shows up on its own.
+The focus target is marked (`host_list[].current`); when focus is
+unknown the mark is this host. Saved layouts are `layouts[]`. The
+active one is marked. Applying one runs `desk layout <name>`.
 
 | Button | Command |
 |---|---|
 | Refresh status | `desk status --json` |
-| Switch to Mac | `desk to mac` |
-| Switch to Linux | `desk to linux` |
+| Switch to `<host>` | `desk to <id>` — one button per configured host |
+| `<layout>` | `desk layout <name>` — one button per saved layout. Hidden when `layouts` is empty |
 | DualUp Full  ⌘⌥⇧F | `desk full` — hidden unless DualUp is present or mode is known |
 | DualUp PBP  ⌘⌥⇧P | `desk pbp` — uses `pbp_mode` from config |
 | Auto layout  ⌘⌥U | `desk layout` — re-applies full or PBP from the live display |
@@ -286,12 +294,17 @@ file. Rows land under **Trigger → desk**.
 
 ## macOS menu bar
 
-Native `MenuBarExtra`. Same job as the Omarchy panel: strip is `slots`
-(composite `NSImage`) or quiet `bar_strip`. Click for a modular HUD:
-host strip first, then each enabled slot once by `kind`. **Configure
-tray** drag-reorders slots and writes `ui` in `~/.config/desk/config.json`.
-Calls `desk` only (PATH, then `~/.local/bin`).
-macOS 13+. Ad-hoc signed, not App Store.
+Native `MenuBarExtra`. Same job as the Omarchy panel. The extra stays
+short: quiet density draws the focus token and the active layout name
+(`TWR  work`) in front of the slot glyphs. Chips density paints
+`bar_label` (host, layout, keyboard, mouse). Click for a modular HUD:
+one **Switch to** button per `host_list` entry (the current target is
+filled; a third id such as `tower` is just another button), then one
+button per saved layout (the active name is filled; `desk layout <name>`),
+then each enabled slot once by `kind`. Full / PBP / auto layout stay on
+the display slot. **Configure tray** drag-reorders slots and writes `ui`
+in `~/.config/desk/config.json`. Calls `desk` only (PATH, then
+`~/.local/bin`). macOS 13+. Ad-hoc signed, not App Store.
 
 ```bash
 make install                 # CLI first
@@ -328,7 +341,8 @@ desk switch 2            # mouse only, Easy-Switch 1|2|3
 desk pbp                 # USB PBP + hdmi1/dp inputs + OS layout
 desk pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
 desk full                # USB full + OS layout
-desk layout              # re-apply full or PBP from the live DualUp geometry
+desk layout <name>       # apply layouts.<name> (full host, or PBP top/bottom)
+desk layout              # re-apply full or PBP from the live display geometry
 desk watch               # HHKB leave → mouse away; USB appear → this host's channel
 desk watch --dry-run
 desk smarthome list      # devices (and entities when that API works)
@@ -494,7 +508,10 @@ A file that only names `mac` and `linux` (or only sets `target_channel`)
 keeps today's channels. Naming any other id does not invent a `linux` entry
 beside it. Two hosts on the same mouse channel is a config error.
 Tray slots stay weather, kettle, and the display mode; shells paint those.
-Status lists every host (`host_list`) and the focus token.
+Status lists every host (`host_list`, with `current` on the focus target)
+and every saved layout (`layouts`, with `active` on the one in use).
+The menu bar and the Omarchy panel build their switch and layout buttons
+from those lists.
 
 ```json
 {

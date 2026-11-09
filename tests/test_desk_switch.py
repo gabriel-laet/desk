@@ -327,11 +327,16 @@ class MenubarSourceTests(unittest.TestCase):
     def test_menubar_only_invokes_desk_switch(self) -> None:
         src = (ROOT / "macos" / "DeskSwitchBar" / "DeskSwitchBar.swift").read_text()
         self.assertIn('["status", "--json"]', src)
-        self.assertIn('["to", "mac"]', src)
-        self.assertIn('["to", "linux"]', src)
+        self.assertIn('["to", host.id]', src)
+        self.assertIn('["layout", layout.name]', src)
+        self.assertIn("host_list", src)
+        self.assertIn("layouts", src)
+        self.assertIn("activeLayout", src)
         self.assertIn('["full"]', src)
         self.assertIn('["pbp"]', src)
         self.assertIn('["layout"]', src)
+        self.assertNotIn('["to", "mac"]', src)
+        self.assertNotIn('["to", "linux"]', src)
         self.assertIn("⌘⌥⇧F", src)
         self.assertIn("⌘⌥⇧P", src)
         self.assertIn("⌘⌥U", src)
@@ -383,9 +388,18 @@ class BarWidgetSourceTests(unittest.TestCase):
         self.assertIn("bar_label", bar)
         self.assertIn("bar_strip", bar)
         self.assertIn("stripTitle", bar)
+        self.assertIn("host_list", bar)
+        self.assertIn("layouts", bar)
+        self.assertIn("active_layout", bar)
         self.assertIn("slots", bar)
         self.assertIn("slotsTitle", bar)
         self.assertIn("slots", panel)
+        self.assertIn("root.hosts", panel)
+        self.assertIn("root.layouts", panel)
+        self.assertIn("quoteArg", panel)
+        self.assertIn("hostTitle", panel)
+        self.assertNotIn('actionRequested("to mac")', panel)
+        self.assertNotIn('actionRequested("to linux")', panel)
         self.assertIn("uiConfig", bar)
         self.assertIn("uiConfig", panel)
         self.assertIn("TODO: Omarchy drag-reorder", bar)
@@ -1363,6 +1377,19 @@ class HintAndCacheTests(unittest.TestCase):
             }
         )
         self.assertEqual(label, "LNX  kbU  mx2~  PBP")
+        named = ds.format_bar_label(
+            {
+                "target_hint": "LNX",
+                "active_layout": "work",
+                "hhkb_usb": True,
+                "hhkb_bluetooth": False,
+                "hhkb_present": True,
+                "mouse_channel": 2,
+                "mouse_online": False,
+                "dualup_mode": "pbp",
+            }
+        )
+        self.assertEqual(named, "LNX  work  kbU  mx2~")
         no_hint = ds.format_bar_label(
             {
                 "target_hint": "?",
@@ -1376,9 +1403,18 @@ class HintAndCacheTests(unittest.TestCase):
         strip = ds.format_bar_strip(
             {"target_hint": "LNX", "dualup_mode": "pbp"}
         )
-        self.assertEqual(strip, {"focus": "LNX", "display": "pbp"})
+        self.assertEqual(strip["focus"], "LNX")
+        self.assertEqual(strip["display"], "pbp")
+        self.assertNotIn("layout", strip)
+        self.assertEqual(strip["title"], "LNX  PBP")
         self.assertEqual(ds.format_strip_title(strip), "LNX  PBP")
         self.assertEqual(ds.format_strip_title({"focus": "MAC"}), "MAC")
+        named_strip = ds.format_bar_strip(
+            {"target_hint": "TWR", "dualup_mode": "full", "active_layout": "work"}
+        )
+        self.assertEqual(named_strip["layout"], "work")
+        self.assertEqual(named_strip["title"], "TWR  work")
+        self.assertEqual(ds.format_strip_title(named_strip), "TWR  work")
 
     def test_mac_status_uses_cached_channel_and_bt_hhkb(self) -> None:
         cfg = {
@@ -3431,8 +3467,15 @@ class NHostTests(unittest.TestCase):
             {"this_host": "tower", "target_channel": 1, "hosts": cfg["hosts"]}
         )
         self.assertEqual(summary, "this_host=tower  follow_channel=1  mac=1  linux=2  tower=3")
+        marked = ds.host_list_for_status(cfg, target_id="linux")
+        self.assertEqual([item["id"] for item in marked if item["current"]], ["linux"])
+        fallback = ds.host_list_for_status(cfg, target_id=None)
+        self.assertEqual([item["id"] for item in fallback if item["current"]], ["tower"])
+        missing = ds.host_list_for_status(cfg, target_id="other")
+        self.assertEqual([item["id"] for item in missing if item["current"]], ["tower"])
         strip = ds.format_bar_strip({"target_hint": "TWR", "dualup_mode": "full"})
         self.assertEqual(strip["focus"], "TWR")
+        self.assertEqual(strip["title"], "TWR  FULL")
         self.assertEqual(ds.format_strip_title(strip), "TWR  FULL")
         label = ds.format_bar_label(
             {
@@ -3459,6 +3502,11 @@ class NHostTests(unittest.TestCase):
         self.assertEqual(state["target_hint"], "TWR")
         self.assertEqual(state["mouse_host"], "tower")
         self.assertEqual([item["id"] for item in state["host_list"]], ["mac", "linux", "tower"])
+        self.assertEqual(
+            [item["id"] for item in state["host_list"] if item.get("current")],
+            ["tower"],
+        )
+        self.assertEqual(state["layouts"], [])
         self.assertEqual(state["adapters"]["hosts"]["tower"]["channel"], 3)
         self.assertEqual(state["adapters"]["hosts"]["this_host"], "tower")
         self.assertEqual(state["dualup_inputs"]["tower"], "hdmi2")
@@ -4872,6 +4920,17 @@ class NamedLayoutTests(unittest.TestCase):
         ), mock.patch.object(ds, "invoke_weather", return_value=None):
             state = ds.collect_status(cfg, local_only=True)
         self.assertEqual(state["active_layout"], "work")
+        self.assertEqual(
+            [(item["name"], item["active"]) for item in state["layouts"]],
+            [("work", True), ("stack", False)],
+        )
+        self.assertEqual(
+            [item["id"] for item in state["host_list"] if item.get("current")],
+            ["mac"],
+        )
+        self.assertEqual(state["bar_strip"]["layout"], "work")
+        self.assertEqual(state["bar_strip"]["title"], "MAC  work")
+        self.assertEqual(state["bar_label"], "MAC  work  kb-  mx1")
         self.assertEqual(
             [(item["id"], item["mode"], item.get("host"), item["follow"]) for item in state["monitors"]],
             [("main", "full", "mac", True), ("side", "full", "linux", False)],

@@ -21,6 +21,9 @@ BarWidget {
   property bool mouseOnline: false
   property string mouseHost: ""
   property string dualupMode: "unknown"
+  property string activeLayout: ""
+  property var hosts: []
+  property var layouts: []
   property var slots: []
   // Shared HUD/tray prefs from ~/.config/desk/config.json (status.ui).
   // Core already applies slot order / visibility / kind / per-slot altitude.
@@ -70,6 +73,9 @@ BarWidget {
     panelLoader.item.mouseOnline = root.mouseOnline
     panelLoader.item.mouseHost = root.mouseHost
     panelLoader.item.dualupMode = root.dualupMode
+    panelLoader.item.activeLayout = root.activeLayout
+    panelLoader.item.hosts = root.hosts
+    panelLoader.item.layouts = root.layouts
     panelLoader.item.slots = root.slots
     panelLoader.item.uiConfig = root.uiConfig
   }
@@ -92,24 +98,50 @@ BarWidget {
     let mode = "unknown"
     let slots = []
     let uiConfig = {}
+    let layoutName = ""
+    let hosts = []
+    let layouts = []
+    let focus = ""
     if (raw.charAt(0) === "{") {
       try {
         const data = JSON.parse(raw)
-        hint = String(data.target_hint || "?")
-        label = String(data.bar_label || hint)
+        hint = String(data.target_hint || "")
+        if (hint === "?")
+          hint = ""
+        label = String(data.bar_label || hint || "desk")
         density = data.ui && data.ui.tray && data.ui.tray.density ? String(data.ui.tray.density) : "strip"
         const stripObj = data.bar_strip || {}
-        const focus = String(stripObj.focus || hint)
+        focus = String(stripObj.focus || hint || "")
+        if (focus === "?")
+          focus = ""
         const display = String(stripObj.display || "")
-        const stripParts = []
-        if (["MAC", "LNX"].indexOf(focus) !== -1)
-          stripParts.push(focus)
-        if (display === "pbp")
-          stripParts.push("PBP")
-        else if (display === "full")
-          stripParts.push("FULL")
-        strip = stripParts.length ? stripParts.join("  ") : (hint && hint !== "?" ? hint : "desk")
-        tooltip = String(data.bar_tooltip || ("desk — " + hint))
+        layoutName = String(stripObj.layout || "")
+        hosts = root.parseHosts(data)
+        layouts = root.parseLayouts(data)
+        if (!layoutName) {
+          for (let i = 0; i < layouts.length; i++) {
+            if (layouts[i] && layouts[i].active)
+              layoutName = String(layouts[i].name || "")
+          }
+        }
+        const coreTitle = String(stripObj.title || "")
+        if (coreTitle && coreTitle !== "?")
+          strip = coreTitle
+        else {
+          const stripParts = []
+          if (focus)
+            stripParts.push(focus)
+          if (layoutName)
+            stripParts.push(layoutName)
+          else if (display === "pbp")
+            stripParts.push("PBP")
+          else if (display === "full")
+            stripParts.push("FULL")
+          strip = stripParts.length ? stripParts.join("  ") : "desk"
+        }
+        if (!hint)
+          hint = focus
+        tooltip = String(data.bar_tooltip || ("desk — " + (hint || "desk")))
         dual = data.lgdualup === true
         if (data.adapters && data.adapters.dualup && data.adapters.dualup.available === true)
           dual = true
@@ -133,27 +165,40 @@ BarWidget {
         hint = ""
         label = "desk"
         strip = "desk"
+        layoutName = ""
+        hosts = []
+        layouts = []
       }
     } else if (raw.length > 0) {
       hint = raw.split(/\s+/)[0]
-      label = raw
-      strip = raw
+      if (hint === "?")
+        hint = ""
+      label = hint || "desk"
+      strip = hint || "desk"
     }
-    if (["MAC", "LNX"].indexOf(hint) === -1)
-      hint = ""
     if (!label || label === "?")
       label = hint
     if (!label)
       label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")
-    if (density !== "chips") {
+    if (density === "chips") {
+      strip = label || strip || "desk"
+    } else if (slots.length) {
       const slotTitle = root.slotsTitle(slots)
+      const head = []
+      if (focus)
+        head.push(focus)
+      else if (hint)
+        head.push(hint)
+      if (layoutName && !root.slotsHaveLabel(slots, layoutName))
+        head.push(layoutName)
+      const quiet = head.join("  ")
       if (slotTitle)
-        strip = slotTitle
-      else if (!strip || strip === "?")
-        strip = hint && hint !== "?" ? hint : (mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk"))
-    } else if (!label || label === "?") {
-      label = hint
+        strip = quiet ? (quiet + "  " + slotTitle) : slotTitle
+      else if (quiet)
+        strip = quiet
     }
+    if (!strip || strip === "?")
+      strip = hint || (layoutName || (mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")))
     root.hint = hint
     root.barLabel = label
     root.stripTitle = density === "chips" ? (label || strip || "desk") : strip
@@ -167,9 +212,69 @@ BarWidget {
     root.mouseOnline = online
     root.mouseHost = host
     root.dualupMode = mode
+    root.activeLayout = layoutName
+    root.hosts = hosts
+    root.layouts = layouts
     root.slots = slots
     root.uiConfig = uiConfig
     root.injectPanel()
+  }
+
+  function parseHosts(data) {
+    const list = data && Array.isArray(data.host_list) ? data.host_list : []
+    const hint = String((data && data.target_hint) || "")
+    const targetKnown = hint && hint !== "?"
+    const thisHost = String((data && data.this_host) || "")
+    const out = []
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i] || {}
+      const id = String(item.id || "")
+      if (!id)
+        continue
+      const itemHint = String(item.hint || id)
+      let current = false
+      if (item.current === true || item.current === false)
+        current = item.current === true
+      else if (targetKnown)
+        current = itemHint === hint || id === hint
+      else
+        current = id === thisHost
+      out.push({ id: id, hint: itemHint, current: current })
+    }
+    return out
+  }
+
+  function parseLayouts(data) {
+    const list = data && Array.isArray(data.layouts) ? data.layouts : []
+    const activeName = String((data && data.active_layout) || "")
+    const out = []
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i]
+      if (item && typeof item === "object") {
+        const name = String(item.name || "")
+        if (!name)
+          continue
+        const active = item.active === true || item.active === false ? item.active === true : name === activeName
+        out.push({ name: name, active: active })
+      } else if (item) {
+        const name = String(item)
+        if (name)
+          out.push({ name: name, active: name === activeName })
+      }
+    }
+    return out
+  }
+
+  function slotsHaveLabel(items, label) {
+    const want = String(label || "")
+    if (!want)
+      return false
+    const list = items || []
+    for (let i = 0; i < list.length; i++) {
+      if (String((list[i] || {}).label || "") === want)
+        return true
+    }
+    return false
   }
 
   function glyphMark(glyph) {

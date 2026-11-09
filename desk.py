@@ -997,6 +997,22 @@ def public_host_list(cfg: dict) -> list[dict]:
     return out
 
 
+def host_list_for_status(cfg: dict, *, target_id: str | None) -> list[dict]:
+    """Host buttons for shells. One `current` mark.
+
+    The mark is the host for the mouse channel when that id is configured.
+    Otherwise it is this host.
+    """
+    items = public_host_list(cfg)
+    ids = {str(item.get("id") or "") for item in items}
+    target = str(target_id or "").strip()
+    here = str(cfg.get("this_host") or "").strip()
+    mark = target if target in ids else here
+    for item in items:
+        item["current"] = bool(mark) and item.get("id") == mark
+    return items
+
+
 def format_host_summary(state: dict) -> str:
     """One status line: this host, follow channel, then every host's mouse channel."""
     hosts = state.get("hosts") if isinstance(state.get("hosts"), dict) else {}
@@ -2767,17 +2783,21 @@ def peek_peer_status(cfg: dict) -> dict | None:
 
 
 def format_bar_strip(state: dict) -> dict:
-    """Quiet strip model: focus + optional display mark. Shells only paint.
+    """Quiet strip model. Shells only paint.
 
-    `MAC` / `LNX` stay those tokens. Any other focused host keeps its hint
-    (or its id) so a third host is visible. Shells that only know the two
-    tokens still treat anything else as unknown.
+    `focus` is the target host token (`MAC`, `LNX`, or that host's hint).
+    `layout` is the active named layout when one is configured. `title`
+    is the short painted string: focus, then the layout name, or FULL/PBP
+    when no named layout is set.
     """
     hint = str(state.get("target_hint") or "?").strip() or "?"
     strip: dict[str, str] = {"focus": hint}
     mode = str(state.get("dualup_mode") or "unknown").lower()
     if mode in ("full", "pbp"):
         strip["display"] = mode
+    layout = str(state.get("active_layout") or "").strip()
+    if layout:
+        strip["layout"] = layout
     # Lights stay out of the default strip. Opt in with ui.tray.lights.
     if state.get("_tray_lights"):
         lights = ((state.get("adapters") or {}).get("smarthome") or {}).get("lights") or []
@@ -2789,6 +2809,7 @@ def format_bar_strip(state: dict) -> dict:
                     break
         if mark:
             strip["lights"] = mark
+    strip["title"] = format_strip_title(strip)
     return strip
 
 
@@ -2973,19 +2994,24 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
 
 
 def format_strip_title(strip: dict) -> str:
-    """Painted default strip: focus token plus PBP/FULL when a display mode is known."""
+    """Quiet strip: focus token, then the active layout name or FULL/PBP."""
     focus = str(strip.get("focus") or "?").strip()
     if focus == "?":
         focus = ""
-    display = str(strip.get("display") or "").lower()
-    mark = "PBP" if display == "pbp" else ("FULL" if display == "full" else "")
+    layout = str(strip.get("layout") or "").strip()
+    if layout:
+        mark = layout
+    else:
+        display = str(strip.get("display") or "").lower()
+        mark = "PBP" if display == "pbp" else ("FULL" if display == "full" else "")
     parts = [part for part in (focus, mark) if part]
     return "  ".join(parts) if parts else "desk"
 
 
 def format_bar_label(state: dict) -> str:
-    """Compact shared glyph for Omarchy + DeskSwitchBar: LNX  kbU  mx2  PBP."""
+    """Compact shared glyph: LNX  work  kbU  mx2, or LNX  kbU  mx2  PBP."""
     hint = str(state.get("target_hint") or "?").strip() or "?"
+    layout = str(state.get("active_layout") or "").strip()
     if state.get("hhkb_usb"):
         kb = "kbU"
     elif state.get("hhkb_bluetooth"):
@@ -3005,11 +3031,14 @@ def format_bar_label(state: dict) -> str:
     parts: list[str] = []
     if hint != "?":
         parts.append(hint)
+    if layout:
+        parts.append(layout)
     parts.extend([kb, mx])
-    if mode == "pbp":
-        parts.append("PBP")
-    elif mode == "full":
-        parts.append("FULL")
+    if not layout:
+        if mode == "pbp":
+            parts.append("PBP")
+        elif mode == "full":
+            parts.append("FULL")
     return "  ".join(parts) if parts else "desk"
 
 
@@ -3279,7 +3308,7 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         ),
         "target_channel": cfg["target_channel"],
         "hosts": cfg["hosts"],
-        "host_list": public_host_list(cfg),
+        "host_list": host_list_for_status(cfg, target_id=host_for_channel(cfg, channel)),
         "target_hint": hint,
         "target_hint_source": hint_source,
         "mxswitch": str(mouse_path or cfg.get("mxswitch") or "mxswitch"),
@@ -3295,15 +3324,21 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "dualup_usb": dual_usb,
         "dualup_inputs": inputs,
         "active_layout": active_layout,
+        "layouts": public_layout_list(cfg, active=known_layout),
         "monitors": assignment,
         "peer": peer,
         "adapters": adapters,
         "ui": format_public_ui(cfg),
     }
     state["_tray_lights"] = bool(cfg.get("_tray_lights"))
-    state["bar_label"] = format_bar_label(state)
+    # A stored name that is no longer in config stays on `active_layout`
+    # for the text status. The strip and the dense label only paint a
+    # layout the shell can apply.
+    paint = dict(state)
+    paint["active_layout"] = known_layout
+    state["bar_label"] = format_bar_label(paint)
     state["bar_tooltip"] = format_bar_tooltip(state)
-    state["bar_strip"] = format_bar_strip(state)
+    state["bar_strip"] = format_bar_strip(paint)
     state["slots"] = collect_slots(state, cfg)
     state.pop("_tray_lights", None)
     return state
@@ -3614,6 +3649,15 @@ def layouts_config(cfg: dict) -> dict:
     if isinstance(candidate, dict):
         return normalize_layouts({"adapters": {"layouts": candidate}})
     return {}
+
+
+def public_layout_list(cfg: dict, active: str | None = None) -> list[dict]:
+    """Named layouts for shells. `active` is the one `desk layout` last applied."""
+    current = str(active or "").strip()
+    names = list(layouts_config(cfg))
+    if current not in names:
+        current = ""
+    return [{"name": name, "active": name == current} for name in names]
 
 
 def _normalize_instance(monitor_id: str, raw: dict, *, legacy: bool) -> dict:

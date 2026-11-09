@@ -3,10 +3,11 @@ import Foundation
 import SwiftUI
 
 /// Menu-bar companion for desk (`desk` CLI).
-/// Strip: quiet `bar_strip`, or a composite NSImage of `slots`
-/// (MenuBarExtra flattens nested Image+Text to one symbol — draw one image).
-/// HUD: modular widget flavors from `slots[].kind` (face / chip / toggle /
-/// mode) plus a host strip. Actions stay scoped under their widget.
+/// Strip: short focus token plus the active layout name (`bar_strip.title`).
+/// When slot glyphs are showing, that token is drawn into the same NSImage
+/// (MenuBarExtra flattens nested Image+Text to one symbol).
+/// HUD: one switch button per configured host, named layouts, then slot
+/// flavors from `slots[].kind`. Actions stay scoped under their widget.
 
 @main
 struct DeskSwitchBarApp: App {
@@ -27,15 +28,22 @@ struct MenuBarLabel: View {
 
     var body: some View {
         Group {
-            if model.visibleSlots.isEmpty {
-                Text(model.stripTitle)
+            if model.ui.trayDensity == "chips" || model.visibleSlots.isEmpty {
+                Text(model.ui.trayDensity == "chips" ? model.barLabel : model.stripTitle)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-            } else {
-                Image(nsImage: MenuBarStatusItemRenderer.image(for: model.visibleSlots, compact: model.ui.compact))
-                    .renderingMode(.original)
                     .help(model.summary)
-                    .accessibilityLabel(model.slotAccessibility)
-                    .id(model.slotSetID)
+            } else {
+                Image(
+                    nsImage: MenuBarStatusItemRenderer.image(
+                        prefix: model.menuPrefix,
+                        slots: model.visibleSlots,
+                        compact: model.ui.compact
+                    )
+                )
+                .renderingMode(.original)
+                .help(model.summary)
+                .accessibilityLabel(model.slotAccessibility)
+                .id(model.slotSetID + "|" + model.menuPrefix)
             }
         }
     }
@@ -63,18 +71,18 @@ enum SlotGlyphMap {
 }
 
 enum MenuBarStatusItemRenderer {
-    private static var cache: ([TraySlot], Bool, NSImage)?
+    private static var cache: (String, [TraySlot], Bool, NSImage)?
 
-    static func image(for slots: [TraySlot], compact: Bool = false) -> NSImage {
-        if let cache, cache.0 == slots, cache.1 == compact {
-            return cache.2
+    static func image(prefix: String, slots: [TraySlot], compact: Bool = false) -> NSImage {
+        if let cache, cache.0 == prefix, cache.1 == slots, cache.2 == compact {
+            return cache.3
         }
-        let image = draw(slots, compact: compact)
-        cache = (slots, compact, image)
+        let image = draw(prefix: prefix, slots: slots, compact: compact)
+        cache = (prefix, slots, compact, image)
         return image
     }
 
-    private static func draw(_ slots: [TraySlot], compact: Bool) -> NSImage {
+    private static func draw(prefix: String, slots: [TraySlot], compact: Bool) -> NSImage {
         let point: CGFloat = compact ? 12 : 13
         let symbolConfig = NSImage.SymbolConfiguration(pointSize: point, weight: .semibold)
         let textFont = NSFont.monospacedDigitSystemFont(ofSize: point, weight: .semibold)
@@ -85,9 +93,14 @@ enum MenuBarStatusItemRenderer {
         let glyphTemp: CGFloat = 3
         let pairGap: CGFloat = compact ? 6 : 8
 
+        let prefixText = NSAttributedString(string: prefix, attributes: textAttrs)
+        let prefixSize = prefix.isEmpty ? NSSize.zero : prefixText.size()
         var measured: [(icon: NSImage, text: NSAttributedString)] = []
-        var width: CGFloat = 0
-        var height: CGFloat = 18
+        var width: CGFloat = prefixSize.width
+        var height: CGFloat = max(18, prefixSize.height)
+        if !prefix.isEmpty, !slots.isEmpty {
+            width += pairGap
+        }
         for (index, slot) in slots.enumerated() {
             let icon = NSImage(systemSymbolName: SlotGlyphMap.symbolName(for: slot.glyph), accessibilityDescription: nil)?
                 .withSymbolConfiguration(symbolConfig)
@@ -106,6 +119,13 @@ enum MenuBarStatusItemRenderer {
         let image = NSImage(size: size)
         image.lockFocus()
         var x: CGFloat = 0
+        if !prefix.isEmpty {
+            prefixText.draw(at: NSPoint(x: x, y: (size.height - prefixSize.height) / 2))
+            x += prefixSize.width
+            if !slots.isEmpty {
+                x += pairGap
+            }
+        }
         for (index, item) in measured.enumerated() {
             if index > 0 {
                 x += pairGap
@@ -140,6 +160,9 @@ final class DeskSwitchModel: ObservableObject {
     @Published var dualUpAvailable = false
     @Published var lastLine = ""
     @Published var slots: [TraySlot] = []
+    @Published var hosts: [DeskHost] = []
+    @Published var layouts: [DeskLayout] = []
+    @Published var activeLayout = ""
     @Published var ui = DeskUIConfig.defaults
     @Published var configPath = ""
     @Published var showingSettings = false
@@ -152,14 +175,33 @@ final class DeskSwitchModel: ObservableObject {
         visibleSlots.map { "\($0.id):\($0.kind):\($0.glyph):\($0.label)" }.joined(separator: "|")
     }
 
+    /// Host token, plus the layout name when the display slot is not already showing it.
+    var menuPrefix: String {
+        var parts: [String] = []
+        if !hint.isEmpty {
+            parts.append(hint)
+        }
+        if !activeLayout.isEmpty, !visibleSlots.contains(where: { $0.label == activeLayout }) {
+            parts.append(activeLayout)
+        }
+        return parts.joined(separator: "  ")
+    }
+
     var slotAccessibility: String {
-        visibleSlots.map { "\($0.label)" }.joined(separator: ", ")
+        var parts: [String] = []
+        if !menuPrefix.isEmpty {
+            parts.append(menuPrefix)
+        }
+        parts.append(contentsOf: visibleSlots.map { $0.label })
+        return parts.joined(separator: ", ")
     }
 
     var focusLabel: String {
-        if !hint.isEmpty { return hint }
-        if !barLabel.isEmpty { return barLabel }
-        return "desk"
+        let host = hint.isEmpty ? "desk" : hint
+        if activeLayout.isEmpty {
+            return host
+        }
+        return "\(host)  \(activeLayout)"
     }
 
     private var timer: Timer?
@@ -192,6 +234,9 @@ final class DeskSwitchModel: ObservableObject {
                     self.peerLine = parsed.peerLine
                     self.dualUpAvailable = parsed.dualUpAvailable
                     self.slots = parsed.slots
+                    self.hosts = parsed.hosts
+                    self.layouts = parsed.layouts
+                    self.activeLayout = parsed.activeLayout
                     self.ui = parsed.ui.merging(live: parsed.slots)
                     self.configPath = parsed.configPath
                     self.lastLine = ""
@@ -208,6 +253,9 @@ final class DeskSwitchModel: ObservableObject {
                     self.peerLine = ""
                     self.dualUpAvailable = false
                     self.slots = []
+                    self.hosts = []
+                    self.layouts = []
+                    self.activeLayout = ""
                     self.ui = DeskUIConfig.defaults
                     self.configPath = ""
                 }
@@ -319,6 +367,17 @@ struct DeskPanel: View {
     @ViewBuilder
     private var deskHome: some View {
         HostWidget(model: model)
+        if !model.layouts.isEmpty {
+            WidgetCard(title: "Layouts") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.layouts) { layout in
+                        DeskActionButton(title: layout.name, filled: layout.active) {
+                            model.run(["layout", layout.name])
+                        }
+                    }
+                }
+            }
+        }
         ForEach(model.visibleSlots) { slot in
             SlotHUD(model: model, slot: slot)
         }
@@ -415,12 +474,13 @@ struct HostWidget: View {
                 }
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
-                HStack(spacing: 8) {
-                    DeskActionButton(title: "Switch to Mac", filled: model.hint == "MAC") {
-                        model.run(["to", "mac"])
-                    }
-                    DeskActionButton(title: "Switch to Linux", filled: model.hint == "LNX") {
-                        model.run(["to", "linux"])
+                if !model.hosts.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.hosts) { host in
+                            DeskActionButton(title: host.switchTitle, filled: host.current) {
+                                model.run(["to", host.id])
+                            }
+                        }
                     }
                 }
             }
@@ -925,6 +985,28 @@ struct TraySlot: Identifiable, Equatable {
     }
 }
 
+struct DeskHost: Identifiable, Equatable {
+    var id: String
+    var hint: String
+    var current: Bool
+
+    var switchTitle: String {
+        let name: String
+        if let first = id.first {
+            name = String(first).uppercased() + id.dropFirst()
+        } else {
+            name = id
+        }
+        return "Switch to \(name)"
+    }
+}
+
+struct DeskLayout: Identifiable, Equatable {
+    var name: String
+    var active: Bool
+    var id: String { name }
+}
+
 struct StatusSnapshot {
     var hint = ""
     var barLabel = "desk"
@@ -936,6 +1018,9 @@ struct StatusSnapshot {
     var peerLine = ""
     var dualUpAvailable = false
     var slots: [TraySlot] = []
+    var hosts: [DeskHost] = []
+    var layouts: [DeskLayout] = []
+    var activeLayout = ""
     var ui = DeskUIConfig.defaults
     var configPath = ""
 
@@ -951,14 +1036,14 @@ struct StatusSnapshot {
               let data = text.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            let first = text.split(whereSeparator: { $0.isWhitespace }).first
-            let hint = ["MAC", "LNX"].contains(first.map(String.init) ?? "") ? String(first!) : ""
+            let token = text.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+            let hint = token.isEmpty || token == "?" ? "" : token
             let title = hint.isEmpty ? "desk" : hint
             return StatusSnapshot(hint: hint, barLabel: title, stripTitle: title, summary: text.isEmpty ? "Refresh to probe HHKB / MX / DualUp" : text)
         }
 
-        var hint = String(describing: obj["target_hint"] ?? "")
-        if !["MAC", "LNX"].contains(hint) {
+        var hint = obj["target_hint"] as? String ?? ""
+        if hint == "?" {
             hint = ""
         }
 
@@ -980,22 +1065,39 @@ struct StatusSnapshot {
         }
         var stripFocus = hint
         var stripDisplay = ""
+        var stripLayout = ""
+        var stripTitleFromCore = ""
         if let strip = obj["bar_strip"] as? [String: Any] {
             let focus = strip["focus"] as? String ?? ""
-            if ["MAC", "LNX"].contains(focus) {
+            if !focus.isEmpty, focus != "?" {
                 stripFocus = focus
             }
             stripDisplay = (strip["display"] as? String ?? "").lowercased()
+            stripLayout = strip["layout"] as? String ?? ""
+            stripTitleFromCore = strip["title"] as? String ?? ""
         }
+        let thisHost = obj["this_host"] as? String ?? ""
+        let hosts = parseHosts(obj["host_list"], hint: stripFocus, thisHost: thisHost)
+        let activeFromList = (obj["layouts"] as? [Any])?.compactMap { item -> String? in
+            guard let row = item as? [String: Any], row["active"] as? Bool == true else { return nil }
+            let name = row["name"] as? String ?? ""
+            return name.isEmpty ? nil : name
+        }.first
+        let activeLayout = stripLayout.isEmpty ? (activeFromList ?? "") : stripLayout
+        let layouts = parseLayouts(obj["layouts"], activeName: activeLayout)
         let stripTitle: String
         if density == "chips" {
             stripTitle = barLabel
+        } else if !stripTitleFromCore.isEmpty, stripTitleFromCore != "?" {
+            stripTitle = stripTitleFromCore
         } else {
             var parts: [String] = []
-            if ["MAC", "LNX"].contains(stripFocus) {
+            if !stripFocus.isEmpty, stripFocus != "?" {
                 parts.append(stripFocus)
             }
-            if stripDisplay == "pbp" {
+            if !activeLayout.isEmpty {
+                parts.append(activeLayout)
+            } else if stripDisplay == "pbp" {
                 parts.append("PBP")
             } else if stripDisplay == "full" {
                 parts.append("FULL")
@@ -1020,7 +1122,18 @@ struct StatusSnapshot {
 
         let channel = intValue(obj, "mouse_channel")
         let host = (obj["mouse_host"] as? String ?? "").lowercased()
-        let dest = host == "linux" ? "LNX" : (host == "mac" ? "MAC" : (host.isEmpty ? "?" : host.uppercased()))
+        let dest: String
+        if let match = hosts.first(where: { $0.id == host }) {
+            dest = match.hint
+        } else if host == "linux" {
+            dest = "LNX"
+        } else if host == "mac" {
+            dest = "MAC"
+        } else if host.isEmpty {
+            dest = "?"
+        } else {
+            dest = host.uppercased()
+        }
         let online = obj["mouse_online"] as? Bool ?? false
         let mouseValue: String
         if let channel {
@@ -1040,12 +1153,15 @@ struct StatusSnapshot {
         let modeKnown = mode == "pbp" || mode == "full"
         let modeLabel = mode == "pbp" ? "PBP" : (mode == "full" ? "FULL" : "unknown")
         dual = dual || modeKnown
-        var macIn = "hdmi1"
-        var lnxIn = "dp"
+        var inputBits: [String] = []
         if let inputs = obj["dualup_inputs"] as? [String: Any] {
-            if let mac = inputs["mac"] as? String, !mac.isEmpty { macIn = mac }
-            if let linux = inputs["linux"] as? String, !linux.isEmpty { lnxIn = linux }
+            for key in inputs.keys.sorted() {
+                if let value = inputs[key] as? String, !value.isEmpty {
+                    inputBits.append("\(key)=\(value)")
+                }
+            }
         }
+        let dualDetail = inputBits.isEmpty ? modeLabel : "\(modeLabel) · \(inputBits.joined(separator: " "))"
 
         var peerLine = ""
         if let peer = obj["peer"] as? [String: Any] {
@@ -1075,20 +1191,62 @@ struct StatusSnapshot {
         let ui = DeskUIConfig.parse(obj["ui"]).merging(live: slots)
         let configPath = obj["config"] as? String ?? ""
 
+        let shownHint = !hint.isEmpty ? hint : (stripFocus == "?" ? "" : stripFocus)
         return StatusSnapshot(
-            hint: hint,
+            hint: shownHint,
             barLabel: barLabel,
             stripTitle: stripTitle,
             summary: summary,
             hhkbLine: "HHKB  \(hhkbValue)",
             mouseLine: "MX  \(mouseValue)",
-            dualLine: "DU  \(modeLabel) · mac=\(macIn) linux=\(lnxIn)",
+            dualLine: "DU  \(dualDetail)",
             peerLine: peerLine,
             dualUpAvailable: dual,
             slots: slots,
+            hosts: hosts,
+            layouts: layouts,
+            activeLayout: activeLayout,
             ui: ui,
             configPath: configPath
         )
+    }
+
+    static func parseHosts(_ raw: Any?, hint: String, thisHost: String) -> [DeskHost] {
+        guard let items = raw as? [Any] else { return [] }
+        let targetKnown = !hint.isEmpty && hint != "?"
+        var hosts: [DeskHost] = []
+        for item in items {
+            guard let obj = item as? [String: Any] else { continue }
+            let id = obj["id"] as? String ?? ""
+            guard !id.isEmpty else { continue }
+            let itemHint = (obj["hint"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? id
+            let current: Bool
+            if let flag = obj["current"] as? Bool {
+                current = flag
+            } else if targetKnown {
+                current = itemHint == hint || id == hint
+            } else {
+                current = id == thisHost
+            }
+            hosts.append(DeskHost(id: id, hint: itemHint, current: current))
+        }
+        return hosts
+    }
+
+    static func parseLayouts(_ raw: Any?, activeName: String) -> [DeskLayout] {
+        guard let items = raw as? [Any] else { return [] }
+        var layouts: [DeskLayout] = []
+        for item in items {
+            if let obj = item as? [String: Any] {
+                let name = obj["name"] as? String ?? ""
+                guard !name.isEmpty else { continue }
+                let active = (obj["active"] as? Bool) ?? (name == activeName)
+                layouts.append(DeskLayout(name: name, active: active))
+            } else if let name = item as? String, !name.isEmpty {
+                layouts.append(DeskLayout(name: name, active: name == activeName))
+            }
+        }
+        return layouts
     }
 }
 

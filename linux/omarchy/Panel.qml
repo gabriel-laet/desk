@@ -22,6 +22,9 @@ Panel {
   property bool mouseOnline: false
   property string mouseHost: ""
   property string dualupMode: "unknown"
+  property string activeLayout: ""
+  property var hosts: []
+  property var layouts: []
   property var slots: []
   property var uiConfig: ({})
 
@@ -68,23 +71,67 @@ Panel {
     return "absent"
   }
 
+  function hostHint(id) {
+    const list = root.hosts || []
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i] || {}
+      if (String(item.id || "") === id && item.hint)
+        return String(item.hint)
+    }
+    if (id === "linux")
+      return "LNX"
+    if (id === "mac")
+      return "MAC"
+    if (!id)
+      return "?"
+    return String(id).toUpperCase()
+  }
+
+  function hostTitle(id) {
+    const text = String(id || "")
+    if (!text.length)
+      return "Switch"
+    return "Switch to " + text.charAt(0).toUpperCase() + text.slice(1)
+  }
+
+  function quoteArg(value) {
+    return "'" + String(value).replace(/'/g, "'\\''") + "'"
+  }
+
+  function focusTitle() {
+    const host = root.hint || (root.dualupMode === "pbp" ? "PBP" : (root.dualupMode === "full" ? "FULL" : "desk"))
+    if (root.activeLayout)
+      return "Desk → " + host + "  " + root.activeLayout
+    return "Desk → " + host
+  }
+
   function mouseChip() {
     const data = parsedStatus()
     const channel = data && data.mouse_channel != null ? data.mouse_channel : root.mouseChannel
-    const host = data && data.mouse_host ? String(data.mouse_host).toUpperCase() : String(root.mouseHost || "").toUpperCase()
+    const hostId = data && data.mouse_host ? String(data.mouse_host) : String(root.mouseHost || "")
     const online = data ? data.mouse_online === true : root.mouseOnline
     if (channel == null)
       return "missing"
-    const dest = host === "LINUX" ? "LNX" : (host === "MAC" ? "MAC" : host || "?")
-    return "ch " + channel + " → " + dest + (online ? " online" : " cached")
+    return "ch " + channel + " → " + root.hostHint(hostId) + (online ? " online" : " cached")
   }
 
   function dualChip() {
     const data = parsedStatus()
     const mode = data && data.dualup_mode ? String(data.dualup_mode) : root.dualupMode
-    const inputs = data && data.dualup_inputs ? data.dualup_inputs : { "mac": "hdmi1", "linux": "dp" }
+    const inputs = data && data.dualup_inputs ? data.dualup_inputs : null
     const label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "unknown")
-    return label + " · mac=" + (inputs.mac || "hdmi1") + " linux=" + (inputs.linux || "dp")
+    const parts = []
+    if (inputs) {
+      const keys = Object.keys(inputs)
+      for (let i = 0; i < keys.length; i++) {
+        const value = inputs[keys[i]]
+        if (value)
+          parts.push(keys[i] + "=" + value)
+      }
+    }
+    if (!parts.length)
+      return label
+    return label + " · " + parts.join(" ")
   }
 
   function peerChip() {
@@ -237,7 +284,7 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Desk → " + (root.hint || (root.dualupMode === "pbp" ? "PBP" : (root.dualupMode === "full" ? "FULL" : "desk")))
+          text: root.focusTitle()
           color: root.barForeground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.subtitle
@@ -343,14 +390,33 @@ Panel {
           onClicked: root.refreshRequested()
         }
 
-        DeskButton {
-          label: "Switch to Mac"
-          onClicked: root.actionRequested("to mac")
+        Repeater {
+          model: root.hosts || []
+          delegate: DeskButton {
+            label: (modelData.current ? "● " : "") + root.hostTitle(modelData.id)
+            current: modelData.current === true
+            onClicked: root.actionRequested("to " + root.quoteArg(modelData.id))
+          }
         }
 
-        DeskButton {
-          label: "Switch to Linux"
-          onClicked: root.actionRequested("to linux")
+        Text {
+          visible: root.layouts && root.layouts.length
+          width: parent.width
+          text: "Layouts"
+          color: root.barForeground
+          opacity: 0.65
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+        }
+
+        Repeater {
+          model: root.layouts || []
+          delegate: DeskButton {
+            label: (modelData.active ? "● " : "") + modelData.name
+            current: modelData.active === true
+            onClicked: root.actionRequested("layout " + root.quoteArg(modelData.name))
+          }
         }
 
         DeskButton {
@@ -399,18 +465,22 @@ Panel {
   component DeskButton: Rectangle {
     id: btn
     property string label: ""
+    property bool current: false
     signal clicked()
 
     width: parent ? parent.width : 200
     implicitHeight: labelText.implicitHeight + Style.space(10)
     radius: 6
-    color: Qt.rgba(1, 1, 1, mouse.containsMouse ? 0.14 : 0.07)
+    color: btn.current
+      ? Qt.rgba(1, 1, 1, mouse.containsMouse ? 0.28 : 0.20)
+      : Qt.rgba(1, 1, 1, mouse.containsMouse ? 0.14 : 0.07)
 
     Text {
       id: labelText
       anchors.centerIn: parent
       text: btn.label
       color: root.barForeground
+      font.bold: btn.current
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Style.font.subtitle
     }
