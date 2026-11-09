@@ -3617,9 +3617,15 @@ class KeyboardArrivalTests(unittest.TestCase):
                 cfg = ds.load_config()
         self.assertTrue(cfg["follow_keyboard_arrival"])
         self.assertTrue(cfg["follow_hhkb_usb"])
+        self.assertTrue(cfg["arrival_moves_display"])
         self.assertTrue(cfg["push_on_leave"])
         self.assertEqual(set(cfg["hosts"]), {"mac", "linux"})
-        for key in ("follow_keyboard_arrival", "follow_hhkb_usb", "push_on_leave"):
+        for key in (
+            "follow_keyboard_arrival",
+            "follow_hhkb_usb",
+            "arrival_moves_display",
+            "push_on_leave",
+        ):
             self.assertNotIn(key, cfg["hosts"])
 
     def test_three_hosts_default_push_off_and_explicit_override(self) -> None:
@@ -3642,8 +3648,10 @@ class KeyboardArrivalTests(unittest.TestCase):
             with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)):
                 cfg = ds.load_config()
         self.assertTrue(cfg["follow_keyboard_arrival"])
+        self.assertTrue(cfg["arrival_moves_display"])
         self.assertFalse(cfg["push_on_leave"])
         self.assertNotIn("push_on_leave", cfg["hosts"])
+        self.assertNotIn("arrival_moves_display", cfg["hosts"])
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "cfg.json"
@@ -3655,6 +3663,7 @@ class KeyboardArrivalTests(unittest.TestCase):
                                 "this_host": "mac",
                                 "push_on_leave": False,
                                 "follow_keyboard_arrival": False,
+                                "arrival_moves_display": False,
                                 "mac": {"channel": 1},
                                 "linux": {"channel": 2},
                             }
@@ -3668,7 +3677,9 @@ class KeyboardArrivalTests(unittest.TestCase):
                 legacy = ds.load_config()
         self.assertFalse(legacy["push_on_leave"])
         self.assertFalse(legacy["follow_keyboard_arrival"])
+        self.assertFalse(legacy["arrival_moves_display"])
         self.assertTrue(legacy["follow_hhkb_usb"])
+        self.assertNotIn("arrival_moves_display", legacy["hosts"])
         self.assertEqual(set(legacy["hosts"]), {"mac", "linux"})
 
     def test_bluetooth_arrival_runs_desk_to_this_host(self) -> None:
@@ -3691,6 +3702,67 @@ class KeyboardArrivalTests(unittest.TestCase):
         ]
         self._run(cfg, samples, mouse=fake_mouse, monitor=fake_monitor)
         self.assertEqual(seen, [("mouse", 3), ("display", "tower", False)])
+
+    def test_arrival_can_leave_displays_where_they_are(self) -> None:
+        cfg = self._watch_cfg(arrival_moves_display=False)
+        seen: list[tuple] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            seen.append(("mouse", channel))
+            return 0
+
+        def fake_monitor(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            seen.append(("display", host, mouse_only))
+            return 0
+
+        samples = [
+            _presence(),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        self._run(cfg, samples, mouse=fake_mouse, monitor=fake_monitor)
+        self.assertEqual(seen, [("mouse", 3), ("display", "tower", True)])
+        with mock.patch.object(ds, "run") as run:
+            self.assertEqual(ds.switch_monitor(cfg, "tower", mouse_only=True), 0)
+        run.assert_not_called()
+
+    def test_arrival_plan_keeps_layout_empty_for_a_later_change(self) -> None:
+        cfg = self._watch_cfg(arrival_moves_display=False)
+        plan = ds.arrival_plan(cfg)
+        self.assertEqual(plan["host"], "tower")
+        self.assertTrue(plan["mouse"])
+        self.assertEqual(plan["displays"], "leave")
+        self.assertIsNone(plan["layout"])
+        self.assertEqual(ds.arrival_plan(self._watch_cfg())["displays"], "move")
+
+        plan["layout"] = "pbp-top"
+        seen: list[str] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            seen.append(f"mouse:{channel}")
+            return 0
+
+        def fake_monitor(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            seen.append(f"display:{host}:{mouse_only}")
+            return 0
+
+        buf = io.StringIO()
+        with mock.patch.object(ds, "switch_mouse", side_effect=fake_mouse), mock.patch.object(
+            ds, "switch_monitor", side_effect=fake_monitor
+        ), mock.patch("sys.stdout", buf):
+            rc = ds.apply_arrival(cfg, plan, dry_run=False, reason="keyboard arrived")
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, ["mouse:3"])
+        self.assertIn("arrival layout pbp-top is not available yet", buf.getvalue())
+        self.assertIn("leaving displays unchanged", buf.getvalue())
+
+        typed = io.StringIO()
+        with mock.patch.object(ds, "switch_mouse", side_effect=fake_mouse), mock.patch.object(
+            ds, "switch_monitor", side_effect=fake_monitor
+        ), mock.patch("sys.stdout", typed):
+            rc = ds.cmd_to(cfg, "tower")
+        self.assertEqual(rc, 0)
+        self.assertIn("display:tower:False", seen)
 
     def test_arrival_ignores_a_short_drop_and_runs_again_after_a_real_leave(self) -> None:
         cfg = self._watch_cfg()

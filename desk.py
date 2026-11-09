@@ -90,6 +90,7 @@ HOST_MAP_META = {
     "follow_channel",
     "follow_hhkb_usb",
     "follow_keyboard_arrival",
+    "arrival_moves_display",
     "push_on_leave",
     "peer",
     "watch",
@@ -223,6 +224,7 @@ def load_config() -> dict:
         "pbp_mode": "50-50",
         "follow_hhkb_usb": True,
         "follow_keyboard_arrival": True,
+        "arrival_moves_display": True,
         "push_on_leave": None,
         "hosts": {
             "mac": {"channel": 1},
@@ -665,6 +667,8 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     cfg["follow_hhkb_usb"] = True if follow_usb is None else follow_usb
     follow_arrival = _cfg_bool(user, hosts_ad, "follow_keyboard_arrival")
     cfg["follow_keyboard_arrival"] = True if follow_arrival is None else follow_arrival
+    moves_display = _cfg_bool(user, hosts_ad, "arrival_moves_display")
+    cfg["arrival_moves_display"] = True if moves_display is None else moves_display
     # None until the host map is resolved: 3+ hosts default this off.
     cfg["push_on_leave"] = _cfg_bool(user, hosts_ad, "push_on_leave")
 
@@ -2993,6 +2997,7 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "hhkb_transport": probe.get("transport") or "absent",
         "follow_hhkb_usb": bool(cfg.get("follow_hhkb_usb", True)),
         "follow_keyboard_arrival": bool(cfg.get("follow_keyboard_arrival", True)),
+        "arrival_moves_display": arrival_moves_display(cfg),
         "push_on_leave": (
             default_push_on_leave(cfg)
             if cfg.get("push_on_leave") is None
@@ -3052,7 +3057,8 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
     print(
         f"follow        : arrival={str(bool(state.get('follow_keyboard_arrival'))).lower()}  "
         f"usb={str(bool(state.get('follow_hhkb_usb'))).lower()}  "
-        f"push_on_leave={str(bool(state.get('push_on_leave'))).lower()}"
+        f"push_on_leave={str(bool(state.get('push_on_leave'))).lower()}  "
+        f"arrival_moves_display={str(bool(state.get('arrival_moves_display', True))).lower()}"
     )
     print(f"target_hint   : {state['target_hint']}  source={state.get('target_hint_source', '?')}")
     print(f"bar           : {state.get('bar_label', state['target_hint'])}")
@@ -3155,17 +3161,73 @@ def watch_usb_rising_edge(last_usb: bool | None, usb_now: bool, follow_usb: bool
     return bool(usb_now), fire
 
 
-def _watch_pull_here(cfg: dict, dry_run: bool, *, reason: str) -> None:
-    """Run `desk to <this_host>` once for a keyboard edge."""
-    here = str(cfg["this_host"])
-    here_channel = host_channel(cfg, here)
+def arrival_moves_display(cfg: dict) -> bool:
+    """Whether keyboard arrival may change display inputs. Default on."""
+    raw = cfg.get("arrival_moves_display", True)
+    if raw is None:
+        return True
+    return bool(raw)
+
+
+def arrival_plan(cfg: dict) -> dict:
+    """What a keyboard arrival on this host is allowed to change.
+
+    The mouse always follows. Displays move only when
+    `arrival_moves_display` is on, because a desk often shows two hosts
+    at once (one per monitor, or PBP).
+
+    `layout` is the slot for a later named arrangement: which host is on
+    which monitor, or a PBP top/bottom pair. It stays None until that
+    exists. A set layout is applied instead of the blanket input switch,
+    so arrival does not also send every display to this host.
+    """
+    return {
+        "host": str(cfg.get("this_host") or ""),
+        "mouse": True,
+        "displays": "move" if arrival_moves_display(cfg) else "leave",
+        "layout": None,
+    }
+
+
+def apply_named_arrival_layout(cfg: dict, name: str) -> int:
+    """Apply one named arrangement. The body is intentionally empty.
+
+    A later change owns the inputs: per-monitor host assignment, or PBP
+    top/bottom. This must not grow into "switch every display to the
+    host that just saw the keyboard." `cfg` is what that lookup will read.
+    """
+    print(f"arrival layout {name} is not available yet — leaving displays unchanged")
+    return 0
+
+
+def apply_arrival(cfg: dict, plan: dict, *, dry_run: bool, reason: str) -> int:
+    """Run one arrival plan. Mouse first, then either a layout or displays."""
+    host = str(plan.get("host") or cfg.get("this_host") or "")
+    channel = host_channel(cfg, host)
+    layout = plan.get("layout") or None
+    move_displays = plan.get("displays") == "move" and not layout
     if dry_run:
-        log(f"dry-run: {reason} — would desk to {here} (channel {here_channel})")
-        return
-    log(f"{reason} — desk → {here} (channel {here_channel})")
-    rc = cmd_to(cfg, here)
-    if rc != 0:
-        log(f"follow to {here} failed (rc={rc})")
+        if layout:
+            detail = f"layout {layout}"
+        elif move_displays:
+            detail = "mouse + displays"
+        else:
+            detail = "mouse only"
+        log(f"dry-run: {reason} — would desk to {host} (channel {channel}, {detail})")
+        return 0
+    log(f"{reason} — desk → {host} (channel {channel})")
+    if layout:
+        print(f"desk → {host} (MX channel {channel})")
+        rc = switch_mouse(cfg, channel) if plan.get("mouse", True) else 0
+        return rc or apply_named_arrival_layout(cfg, str(layout))
+    return cmd_to(cfg, host, mouse_only=not move_displays)
+
+
+def _watch_pull_here(cfg: dict, dry_run: bool, *, reason: str) -> None:
+    """Run the arrival plan once for a keyboard edge."""
+    rc = apply_arrival(cfg, arrival_plan(cfg), dry_run=dry_run, reason=reason)
+    if rc != 0 and not dry_run:
+        log(f"follow to {cfg.get('this_host')} failed (rc={rc})")
 
 
 def _watch_push_leave(cfg: dict, dry_run: bool, dest: int, retries: int, retry_delay: float) -> None:
@@ -3212,6 +3274,7 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
         f"watching keyboard → desk to {here} "
         f"(dry_run={dry_run}, every {interval}s, absent×{need}, "
         f"follow_keyboard_arrival={follow_arrival}, follow_hhkb_usb={follow_usb}, "
+        f"arrival_moves_display={arrival_moves_display(cfg)}, "
         f"push_on_leave={push_leave}, follow_channel={dest})"
     )
     armed = False

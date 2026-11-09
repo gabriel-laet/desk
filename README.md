@@ -57,9 +57,8 @@ keyboard arrives on this host     (Bluetooth or USB, after the leave debounce)
 desk to <this host>
         ├─ mouse → this host's channel
         │     local adapter, else SSH relay_hosts when the device is absent
-        ├─ display input → this host's input
-        │     pre_switch, then the local adapter, else the same relay
-        └─ OS layout, when this hop is a PBP / full change
+        └─ display input → this host's input, when arrival_moves_display
+              (default on; off leaves every monitor where it is)
 
 keyboard leaves this host
         │
@@ -91,6 +90,17 @@ bar fields (`target_hint`, `bar_label`, `bar_strip`, HHKB / mouse /
 DualUp probes). New shells paint `slots`. Lights stay out of the strip
 unless `ui.tray.lights` is true. Slot order and HUD prefs live in `ui`
 — see [docs/ui-config.md](docs/ui-config.md).
+
+A desk often shows two hosts at once: one on the main monitor and another
+on a second, or both in PBP. `adapters.hosts.arrival_moves_display` (default
+true) chooses whether arrival changes display inputs. Set it false and
+arrival only brings the mouse; the monitors stay. `desk to <host>` typed
+at the command line still changes the display. Named layouts — which
+monitor shows which host, PBP top and bottom — are not selected yet.
+Arrival builds a small plan (`mouse`, `displays`, `layout`). `layout`
+stays empty, and the blanket input switch runs only when `displays` is
+`move`. A later change can fill `layout` and apply that arrangement
+instead of sending every input to this host.
 
 A rising USB sample is the legacy `follow_hhkb_usb` edge: it also runs
 `desk to` this host when the keyboard was already connected over Bluetooth.
@@ -419,6 +429,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.hosts.this_host` | This machine's id. Any id in the host map. Default is `mac` on macOS and `linux` on Linux |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to when the keyboard leaves, if `push_on_leave` is on |
 | `adapters.hosts.follow_keyboard_arrival` | If true (default), `watch` runs `desk to <this_host>` when the keyboard arrives on any transport, after the same debounce as a leave |
+| `adapters.hosts.arrival_moves_display` | If true (default), that arrival also switches display inputs. False leaves every monitor where it is (mixed layouts, PBP) and still moves the mouse. `desk to` from the command line is unchanged |
 | `adapters.hosts.push_on_leave` | If true, a confirmed leave pushes the mouse to `follow_channel`. Default true for one or two hosts, false for three or more |
 | `adapters.hosts.<id>.channel` | Mouse channel for that host. `mouse_channel` is the same field. `desk to <id>` uses it |
 | `adapters.hosts.<id>.keyboard_slot` | Opaque keyboard slot stored for the keyboard adapter |
@@ -450,8 +461,10 @@ relays use. `this_host` on that machine is the same id.
 
 With three or more hosts the keyboard is the only driver. The machine
 that sees it arrive (Bluetooth slot or USB) runs `desk to` **this** id:
-mouse channel, display input, `pre_switch`, and the relay when the device
-is not on this host. Leaving does not push the mouse at `follow_channel`,
+mouse channel, and — when `arrival_moves_display` is on — display input,
+`pre_switch`, and the relay when the device is not on this host. Turn
+`arrival_moves_display` off when two hosts should stay on screen.
+Leaving does not push the mouse at `follow_channel`,
 because this host cannot know which of the others took the keyboard.
 `push_on_leave` stays available and defaults off once the map has three
 or more ids. A file that only names `mac` and `linux` still pushes on
