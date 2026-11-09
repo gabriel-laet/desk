@@ -20,6 +20,7 @@ import platform
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SYSTEM = platform.system()
@@ -271,14 +272,22 @@ def _ioreg(args: list[str]) -> str:
 
 
 def hhkb_probe_macos(vid: int, pid: int) -> dict:
-    """Prefer ioreg (USB tree + HID Transport + BT name). hidutil VID/PID misses BT HHKB-Studio1."""
-    parsed = parse_ioreg_hhkb(
-        _ioreg(["-r", "-c", "IOHIDDevice", "-l", "-w", "0"]),
-        _ioreg(["-p", "IOUSB", "-l", "-w", "0"]),
-        _ioreg(["-r", "-c", "IOBluetoothDevice", "-l", "-w", "0"]),
-        vid,
-        pid,
+    """Prefer ioreg (USB tree + HID Transport + BT name). hidutil VID/PID misses BT HHKB-Studio1.
+
+    The three ioreg queries run together. hidutil is only the fallback when
+    ioreg has not already classed the keyboard as USB or Bluetooth — running
+    it on every poll made each Mac watch iteration longer than the sleep gap.
+    """
+    queries = (
+        ["-r", "-c", "IOHIDDevice", "-l", "-w", "0"],
+        ["-p", "IOUSB", "-l", "-w", "0"],
+        ["-r", "-c", "IOBluetoothDevice", "-l", "-w", "0"],
     )
+    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+        texts = list(pool.map(_ioreg, queries))
+    parsed = parse_ioreg_hhkb(texts[0], texts[1], texts[2], vid, pid)
+    if parsed.get("present") and (parsed.get("usb") or parsed.get("bluetooth")):
+        return parsed
     hidutil_unknown = False
     hidutil_text = ""
     try:

@@ -203,6 +203,16 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hhkb-mx-follow.pli
 The example plist calls `desk watch`. Log:
 `~/Library/Logs/hhkb-mx-follow.log`.
 
+That agent is the GUI session. Input Monitoring applies to adapters it
+runs, not to an SSH shell. `desk watch` listens on a user socket; a peer's
+mouse relay runs `desk session-run` over SSH, and the agent runs the
+adapter. After `make install`, reload the agent so the listener is the
+new process:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/local.hhkb-mx-follow
+```
+
 Menu bar (optional): see [macOS menu bar](#macos-menu-bar).
 
 ### Linux
@@ -597,19 +607,36 @@ guess one.
 
 The mouse adapter can send a host change only while the mouse is connected
 to the machine that runs it. `desk to` (and the leave-push, when that is
-on) runs the local adapter first. If it exits non-zero and the output says
+on) runs the local adapter first. If this process is not `desk watch`, and
+a watcher is listening, the local hop asks that watcher so the adapter
+runs in its session. If the adapter exits non-zero and the output says
 the device is absent (`not found`, or `No … found`), desk tries each relay
-host over SSH and stops at the first success:
+host over SSH and stops at the first success.
+
+Candidates stay in `relay_hosts` order, with two changes that do not drop
+anyone: a host that recently reported the mouse online is tried first
+(newest report wins; `desk status` records the local adapter and a
+reachable peer), and a peer that just failed to connect sinks for about
+two minutes. Mouse SSH uses a 2s connect timeout and one attempt, so an
+offline peer does not stall the hop.
 
 ```bash
-ssh -o BatchMode=yes -o ConnectTimeout=3 <ssh target> \
-  "$HOME/.local/lib/desk/<mouse adapter id> <channel>"
+ssh -o BatchMode=yes -o ConnectTimeout=2 -o ConnectionAttempts=1 <ssh target> \
+  'export PATH="$HOME/.local/bin:$PATH"; desk session-run -- $HOME/.local/lib/desk/<mouse adapter id> <channel>'
 ```
 
+`desk session-run` asks the peer's watcher to run the adapter. No watcher
+(or an older `desk` without the subcommand): the adapter runs directly.
 On success it prints `mouse channel <n> via <host>`. `adapters.mouse.relay_hosts`
-is the ordered list. When that key is omitted, `adapters.display.relay_hosts`
+is the configured list. When that key is omitted, `adapters.display.relay_hosts`
 is used, so one list can cover both devices. An explicit empty mouse list
 does not fall back. Other adapter errors stay on this host.
+
+An SSH shell that prints `Input Monitoring` did not see the device from
+the GUI session. That is not "mouse not on this host". The log names the
+session. A watcher answer that still cannot see the device is a real miss
+(`not found on <host>`), and the adapter's own line still says to wake
+the mouse and check Input Monitoring.
 
 Inputs the helper accepts: `usbc` / `usb-c` / `dp3`, `dp` / `dp1`, `dp2`,
 `hdmi1`, `hdmi2`, `auto`. List devices: `lgdualup --list` (or `--info`).
@@ -910,6 +937,11 @@ watcher) re-applies on hotplug, mode, and rotation.
 `mouse_channel` (live or cached), `adapters.mouse.available`,
 `adapters.dualup.available`, and whether DualUp USB was seen (`dualup_info`).
 
+**Watcher log repeats `clock gap` while the keyboard stays put.** A real
+sleep or wake still disarms until the keyboard is seen again. The gap is
+measured on the wait between polls, not on how long the probe or a relay
+took, so a slow iteration does not disarm by itself.
+
 **Watcher never fires (keyboard USB ghost).** This host still sees the
 keyboard over USB, so a Bluetooth hop does not look like a leave. With
 `follow_keyboard_arrival` (default) the host that actually sees the
@@ -924,9 +956,21 @@ other host). Status remembers the last live channel and, if
 `adapters.dualup.peer` (or `adapters.hosts.peer`) is set, peeks the peer
 over SSH (`status --json --local` skips that).
 
-**Mouse does not hop (macOS Input Monitoring).** Grant it to
-`~/.local/lib/desk/mxswitch`, not the shim. Click the mouse once if
-`--info` fails. After a reinstall the binary path changed — re-grant TCC.
+**Mouse does not hop (macOS Input Monitoring or SSH session).** Grant
+Input Monitoring to `~/.local/lib/desk/mxswitch`, not the shim. The grant
+belongs to the GUI session: `desk watch` under the launch agent can see
+the mouse, and an SSH shell often cannot, even when the same binary is
+allowed. Peers ask that agent (`desk session-run`). Reload it after
+install (`launchctl kickstart -k gui/$(id -u)/local.hhkb-mx-follow`).
+If the agent itself still cannot see the mouse, click the mouse once to
+wake it, and run `mxswitch --setup` if the binary path changed — re-grant
+TCC after a path change.
+
+**Mouse relay says `outside the GUI session`.** The peer's watcher is not
+running, or it is still the process from before this `desk` was installed.
+On macOS reload the launch agent above. The hop keeps trying the other
+hosts. `not found on <host>` from a watcher means that host really does
+not have the radio.
 
 **Mouse hidraw denied (Linux).** udev rule `42-logitech-hidpp.rules`, user
 in `input`, then a new login.
@@ -941,11 +985,14 @@ to the other machine. `pre_switch` on the target host runs first when you
 need that machine's outputs awake before the input changes.
 
 **Mouse not found on this host.** The mouse radio is on whichever machine
-it is paired to right now. `desk to` runs the mouse adapter locally, then
-each `adapters.mouse.relay_hosts` entry (or the display `relay_hosts` list
+it is paired to right now. `desk to` runs the mouse adapter locally (in
+the watcher session when one is listening), then each
+`adapters.mouse.relay_hosts` entry (or the display `relay_hosts` list
 when the mouse list is omitted) over SSH, and prints which host performed
-it. The host where the keyboard arrives is often not the host that still
-has the mouse, so that relay is what completes the hop.
+it. The host that last reported the mouse online is tried first. A peer
+that does not answer within the 2s connect timeout is skipped and tried
+later. The host where the keyboard arrives is often not the host that
+still has the mouse, so that relay is what completes the hop.
 
 **Panel / menu bar shows `?` or “desk not found”.** CLI not installed, or
 GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in `~/.local/bin`
