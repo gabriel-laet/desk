@@ -28,8 +28,12 @@ class HostMappingTests(unittest.TestCase):
         self.assertEqual(ds.normalize_host("macos"), "mac")
         self.assertEqual(ds.normalize_host("LNX"), "linux")
         self.assertEqual(ds.normalize_host("omarchy"), "linux")
+        self.assertEqual(ds.normalize_host("Tower"), "tower")
+        self.assertEqual(ds.normalize_host("windows"), "windows")
         with self.assertRaises(SystemExit):
-            ds.normalize_host("windows")
+            ds.normalize_host(" ")
+        with self.assertRaises(SystemExit):
+            ds.normalize_host("bad host")
 
     def test_legacy_target_channel_overrides_other_host(self) -> None:
         cfg = ds.resolve_hosts(
@@ -3177,6 +3181,337 @@ class DisplayRelayTests(unittest.TestCase):
             ["linux", "other", "mac"],
         )
         self.assertEqual(ds._coerce_relay_hosts("linux, mac"), ["linux", "mac"])
+
+
+class NHostTests(unittest.TestCase):
+    """Three configured hosts: parsing, to/relay, watch channel, legacy files."""
+
+    def _load(self, payload: dict, *, system: str = "Linux") -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(json.dumps(payload))
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)), mock.patch.object(
+                ds, "SYSTEM", system
+            ):
+                return ds.load_config()
+
+    def _three(self, *, this_host: str = "tower") -> dict:
+        return {
+            "adapters": {
+                "hosts": {
+                    "this_host": this_host,
+                    "follow_channel": 1,
+                    "order": ["mac", "linux", "tower"],
+                    "follow_hhkb_usb": True,
+                    "peer": "user@192.0.2.10",
+                    "mac": {"channel": 1, "input": "hdmi1", "ssh": "user@192.0.2.10"},
+                    "linux": {
+                        "mouse_channel": 2,
+                        "keyboard_slot": 2,
+                        "input": "dp",
+                        "ssh": "user@192.0.2.20",
+                    },
+                    "tower": {
+                        "channel": 3,
+                        "keyboard_slot": 3,
+                        "input": "hdmi2",
+                        "upstream": "usb-c",
+                        "ssh": "user@192.0.2.30",
+                        "pre_switch": "wake-outputs",
+                        "hint": "TWR",
+                    },
+                },
+                "display": {
+                    "relay_hosts": ["linux", "tower", "LNX", "mac"],
+                    "inputs": {"mac": "hdmi1", "linux": "dp", "tower": "hdmi2"},
+                },
+            }
+        }
+
+    def test_three_host_file_keeps_every_field(self) -> None:
+        cfg = self._load(self._three())
+        self.assertEqual(list(cfg["hosts"]), ["mac", "linux", "tower"])
+        self.assertEqual(cfg["this_host"], "tower")
+        self.assertEqual(cfg["target_channel"], 1)
+        self.assertTrue(cfg["follow_hhkb_usb"])
+        self.assertNotIn("follow_hhkb_usb", cfg["hosts"])
+        self.assertNotIn("peer", cfg["hosts"])
+        self.assertNotIn("order", cfg["hosts"])
+        tower = cfg["hosts"]["tower"]
+        self.assertEqual(tower["channel"], 3)
+        self.assertEqual(tower["mouse_channel"], 3)
+        self.assertEqual(tower["keyboard_slot"], 3)
+        self.assertEqual(tower["input"], "hdmi2")
+        self.assertEqual(tower["dualup_input"], "hdmi2")
+        self.assertEqual(tower["upstream"], "usb-c")
+        self.assertEqual(tower["ssh"], "user@192.0.2.30")
+        self.assertEqual(tower["pre_switch"], "wake-outputs")
+        self.assertEqual(tower["hint"], "TWR")
+        self.assertEqual(cfg["hosts"]["linux"]["channel"], 2)
+        self.assertEqual(cfg["hosts"]["linux"]["mouse_channel"], 2)
+        self.assertEqual(cfg["hosts"]["linux"]["keyboard_slot"], 2)
+        self.assertEqual(cfg["_display_relay_hosts"], ["linux", "tower", "mac"])
+        self.assertEqual(cfg["_peer"], "user@192.0.2.10")
+
+    def test_n_host_map_does_not_invent_linux(self) -> None:
+        payload = {
+            "adapters": {
+                "hosts": {
+                    "this_host": "mac",
+                    "mac": {"channel": 1},
+                    "tower": {"mouse_channel": 3, "ssh": "user@192.0.2.30"},
+                }
+            }
+        }
+        cfg = self._load(payload, system="Darwin")
+        self.assertEqual(list(cfg["hosts"]), ["mac", "tower"])
+        self.assertNotIn("linux", cfg["hosts"])
+        self.assertEqual(cfg["hosts"]["tower"]["channel"], 3)
+
+    def test_duplicate_channel_is_a_load_error(self) -> None:
+        payload = {
+            "adapters": {
+                "hosts": {
+                    "this_host": "mac",
+                    "mac": {"channel": 1},
+                    "tower": {"channel": 1},
+                }
+            }
+        }
+        with self.assertRaises(SystemExit) as caught:
+            self._load(payload)
+        self.assertIn("mouse channel 1", str(caught.exception))
+
+    def test_this_host_must_be_configured(self) -> None:
+        payload = {
+            "adapters": {
+                "hosts": {
+                    "this_host": "tower",
+                    "mac": {"channel": 1},
+                    "linux": {"channel": 2},
+                }
+            }
+        }
+        with self.assertRaises(SystemExit) as caught:
+            self._load(payload)
+        self.assertIn("this_host tower", str(caught.exception))
+
+    def test_default_detection_stays_mac_or_linux(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "none.json"
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (missing,)), mock.patch.object(
+                ds, "SYSTEM", "Darwin"
+            ):
+                mac = ds.load_config()
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (missing,)), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ):
+                linux = ds.load_config()
+        self.assertEqual(mac["this_host"], "mac")
+        self.assertEqual(linux["this_host"], "linux")
+        self.assertEqual(set(linux["hosts"]), {"mac", "linux"})
+
+    def test_legacy_single_field_still_sets_the_other_channel(self) -> None:
+        cfg = self._load({"this_host": "linux", "target_channel": 1})
+        self.assertEqual(cfg["this_host"], "linux")
+        self.assertEqual(cfg["hosts"]["mac"]["channel"], 1)
+        self.assertEqual(cfg["hosts"]["linux"]["channel"], 2)
+        partial = self._load({"this_host": "mac", "hosts": {"linux": 3}, "target_channel": 3})
+        self.assertEqual(partial["hosts"]["linux"]["channel"], 3)
+        self.assertEqual(partial["hosts"]["mac"]["channel"], 1)
+        self.assertEqual(ds.normalize_host("omarchy"), "linux")
+
+    def test_peer_string_is_the_ssh_target_when_ssh_is_absent(self) -> None:
+        payload = {
+            "adapters": {
+                "hosts": {
+                    "this_host": "mac",
+                    "mac": {"channel": 1},
+                    "linux": {"channel": 2},
+                    "tower": {"channel": 3, "peer": "user@192.0.2.30"},
+                }
+            }
+        }
+        cfg = self._load(payload)
+        self.assertEqual(ds.host_text(cfg, "tower", "ssh"), "user@192.0.2.30")
+        self.assertEqual(ds.host_channel(cfg, "TOWER"), 3)
+
+    def test_hint_and_status_list_every_host(self) -> None:
+        cfg = self._load(self._three())
+        self.assertEqual(ds.target_hint(cfg, 1, False), "MAC")
+        self.assertEqual(ds.target_hint(cfg, 2, False), "LNX")
+        self.assertEqual(ds.target_hint(cfg, 3, False), "TWR")
+        self.assertEqual(ds.target_hint(cfg, None, True), "TWR")
+        listed = ds.public_host_list(cfg)
+        self.assertEqual([item["id"] for item in listed], ["mac", "linux", "tower"])
+        self.assertEqual(listed[2]["hint"], "TWR")
+        self.assertEqual(listed[2]["channel"], 3)
+        self.assertEqual(listed[2]["input"], "hdmi2")
+        self.assertEqual(listed[2]["ssh"], "user@192.0.2.30")
+        summary = ds.format_host_summary(
+            {"this_host": "tower", "target_channel": 1, "hosts": cfg["hosts"]}
+        )
+        self.assertEqual(summary, "this_host=tower  follow_channel=1  mac=1  linux=2  tower=3")
+        strip = ds.format_bar_strip({"target_hint": "TWR", "dualup_mode": "full"})
+        self.assertEqual(strip["focus"], "TWR")
+        self.assertEqual(ds.format_strip_title(strip), "TWR  FULL")
+        label = ds.format_bar_label(
+            {
+                "target_hint": "TWR",
+                "hhkb_present": False,
+                "mouse_channel": 3,
+                "mouse_online": True,
+                "dualup_mode": "unknown",
+            }
+        )
+        self.assertTrue(label.startswith("TWR"))
+        slots = ds.collect_slots({"dualup_mode": "pbp", "adapters": {}}, cfg)
+        self.assertEqual([item["id"] for item in slots], ["dualup"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "cache_dir", return_value=Path(tmp)), mock.patch.object(
+                ds, "hhkb_probe", return_value=ds.empty_hhkb_probe()
+            ), mock.patch.object(ds, "mouse_info", return_value=("missing", None)), mock.patch.object(
+                ds, "which_adapter", return_value=None
+            ), mock.patch.object(ds, "lgdualup_path", return_value=None), mock.patch.object(
+                ds, "detect_dualup_mode", return_value="unknown"
+            ):
+                ds.save_mouse_cache(3)
+                state = ds.collect_status(cfg, local_only=True)
+        self.assertEqual(state["target_hint"], "TWR")
+        self.assertEqual(state["mouse_host"], "tower")
+        self.assertEqual([item["id"] for item in state["host_list"]], ["mac", "linux", "tower"])
+        self.assertEqual(state["adapters"]["hosts"]["tower"]["channel"], 3)
+        self.assertEqual(state["adapters"]["hosts"]["this_host"], "tower")
+        self.assertEqual(state["dualup_inputs"]["tower"], "hdmi2")
+        self.assertEqual(state["dualup_inputs"]["mac"], "hdmi1")
+        self.assertEqual(state["dualup_inputs"]["linux"], "dp")
+        self.assertIn("focus", state["bar_strip"])
+        self.assertEqual(state["bar_strip"]["focus"], "TWR")
+        self.assertIsInstance(state["slots"], list)
+
+    def test_to_and_relay_use_the_third_host(self) -> None:
+        cfg = self._load(self._three(this_host="mac"))
+        cfg["_bindings"] = {
+            "display": {
+                "id": "display-adapter",
+                "path": Path("/opt/desk/display-adapter"),
+                "source": "path",
+                "manifest": None,
+                "capabilities": ["display.input"],
+                "enabled": True,
+            }
+        }
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            joined = " ".join(cmd)
+            if cmd[0] == "ssh" and cmd[-1] == "wake-outputs":
+                return _proc(cmd, 0, "", "")
+            if cmd[:3] == ["/opt/desk/display-adapter", "input", "hdmi2"]:
+                return _proc(cmd, 1, "", "No display device found.\n")
+            if "192.0.2.30" in joined:
+                return _proc(cmd, 0, "switched\n", "")
+            return _proc(cmd, 1, "", "device not found\n")
+
+        buf = io.StringIO()
+        with mock.patch.object(ds, "switch_mouse", return_value=0) as mouse, mock.patch.object(
+            ds, "run", side_effect=fake_run
+        ), mock.patch("sys.stdout", buf), mock.patch("sys.stderr", io.StringIO()):
+            rc = ds.cmd_to(cfg, "tower")
+        self.assertEqual(rc, 0)
+        mouse.assert_called_once_with(cfg, 3)
+        text = buf.getvalue()
+        self.assertIn("desk → tower (MX channel 3)", text)
+        self.assertIn("pre_switch tower: wake-outputs", text)
+        self.assertIn("display input hdmi2 via tower", text)
+        self.assertNotIn("relay tower has no ssh target", text)
+        ssh_targets = [cmd[5] for cmd in calls if cmd and cmd[0] == "ssh"]
+        self.assertIn("user@192.0.2.30", ssh_targets)
+        self.assertTrue(any(cmd[-1] == "wake-outputs" for cmd in calls))
+
+    def test_watch_usb_uses_this_host_channel(self) -> None:
+        cfg = self._load(self._three())
+        probes = [
+            {
+                "present": True,
+                "usb": False,
+                "bluetooth": True,
+                "transport": "bluetooth",
+                "unknown": False,
+            },
+            {
+                "present": True,
+                "usb": True,
+                "bluetooth": False,
+                "transport": "usb",
+                "unknown": False,
+            },
+        ]
+        seen: list[tuple] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            seen.append(("mouse", channel))
+            return 0
+
+        def fake_monitor(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            seen.append(("monitor", host, mouse_only))
+            raise KeyboardInterrupt
+
+        with mock.patch.object(ds, "hhkb_probe", side_effect=probes), mock.patch.object(
+            ds, "switch_mouse", side_effect=fake_mouse
+        ), mock.patch.object(ds, "switch_monitor", side_effect=fake_monitor), mock.patch.object(
+            ds.time, "sleep"
+        ), mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                ds.cmd_watch(cfg, dry_run=False)
+        self.assertEqual(seen, [("mouse", 3), ("monitor", "tower", False)])
+
+    def test_argparse_choices_accept_configured_ids_and_aliases(self) -> None:
+        cfg = self._load(self._three(this_host="mac"))
+        parser = ds.build_parser(cfg)
+        self.assertEqual(parser.parse_args(["to", "tower"]).host, "tower")
+        self.assertEqual(parser.parse_args(["to", "Tower"]).host, "tower")
+        self.assertEqual(parser.parse_args(["to", "LNX"]).host, "lnx")
+        self.assertEqual(parser.parse_args(["to", "omarchy"]).host, "omarchy")
+        with mock.patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["to", "nope"])
+
+    def test_cli_to_third_host_is_not_rejected(self) -> None:
+        env = os.environ.copy()
+        env["PATH"] = "/usr/bin:/bin"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cfg_dir = home / ".config" / "desk"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(json.dumps(self._three(this_host="mac")))
+            env["HOME"] = str(home)
+            env["XDG_CACHE_HOME"] = str(home / "cache")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "desk.py"), "to", "tower", "--mouse-only"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            rejected = subprocess.run(
+                [sys.executable, str(ROOT / "desk.py"), "to", "nope"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            hinted = subprocess.run(
+                [sys.executable, str(ROOT / "desk.py"), "hint"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertIn("desk → tower (MX channel 3)", proc.stdout + proc.stderr)
+        self.assertNotIn("unknown host", (proc.stdout + proc.stderr).lower())
+        self.assertNotIn("relay tower has no ssh target", proc.stdout + proc.stderr)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("invalid choice", rejected.stderr)
+        self.assertIn(hinted.stdout.strip(), {"MAC", "LNX", "TWR", "?"})
 
 
 if __name__ == "__main__":
