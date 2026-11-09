@@ -18,11 +18,12 @@
  *     ./lgdualup input-sub <name>      (PBP Sub Input List)
  *     ./lgdualup swap                  (Main/Sub Screen Change)
  *     ./lgdualup pbp-assign <main> <sub>
- *     ./lgdualup pbp on|off|full|side|50-50|stacked|1|3|5
+ *     ./lgdualup pbp on|off|full|side|50-50|stacked|keep|1|3|5
  *     ./lgdualup get pbp
  *     ./lgdualup --read 0xD7
  *
- * Codes 0 and 2 are not sent. stacked comes from pbp_splits.
+ * Codes 0 and 2 are not sent. A read of 0 means PBP is on, not the
+ * split direction. stacked defaults to keep (do not write 0xD7).
  *
  * VCP 0xF4 @ 0x50 is Main only. After PBP the sub window stays HDMI2 unless
  * we write the sub VCPs (0x55 / 0x5A) and/or put the sub source on Main,
@@ -212,8 +213,9 @@ static int parse_input(const char *s, uint16_t *out) {
     return 0;
 }
 
-/* side defaults to 50-50 (5). stacked stays unset until config or --splits
- * names it. Codes 0 and 2 stretch this panel and are never stored. */
+/* side defaults to 50-50 (5). stacked < 0 means keep: do not write 0xD7.
+ * Codes 0 and 2 stretch this panel and are never stored. A read of 0 is
+ * "PBP on", not a split direction. */
 typedef struct {
     int stacked;
     int side;
@@ -259,7 +261,19 @@ static void apply_split_blob(const char *blob, int fatal) {
         char *start = key;
         while (*start == ' ')
             start++;
-        long value = strtol(eq + 1, NULL, 0);
+        const char *raw = eq + 1;
+        while (*raw == ' ')
+            raw++;
+        if ((!strncasecmp(raw, "keep", 4) &&
+             (raw[4] == '\0' || raw[4] == ',' || raw[4] == ' ')) ||
+            (!strncasecmp(raw, "null", 4) &&
+             (raw[4] == '\0' || raw[4] == ',' || raw[4] == ' '))) {
+            if (!strcasecmp(start, "stacked"))
+                g_splits.stacked = -1;
+            p = comma ? comma + 1 : p + strlen(p);
+            continue;
+        }
+        long value = strtol(raw, NULL, 0);
         note_split(start, value, fatal);
         p = comma ? comma + 1 : p + strlen(p);
     }
@@ -281,10 +295,17 @@ static void take_config_key(const char *json, const char *key) {
         }
         if (mark) {
             const char *v = p + strlen(pat);
-            while (*v && !isdigit((unsigned char)*v) && *v != '-')
+            while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r' || *v == ':')
                 v++;
-            if (*v)
-                note_split(key, strtol(v, NULL, 0), 0);
+            if (!strncmp(v, "null", 4) && !isalnum((unsigned char)v[4])) {
+                if (!strcmp(key, "stacked"))
+                    g_splits.stacked = -1;
+            } else {
+                char *end = NULL;
+                long num = strtol(v, &end, 0);
+                if (end != v && num != 0 && num != 2)
+                    note_split(key, num, 0);
+            }
         }
         p += strlen(pat);
     }
@@ -336,15 +357,12 @@ static int parse_pbp(const char *s, uint16_t *out) {
         *out = 0x03;
         return 1;
     }
+    if (!strcasecmp(s, "keep"))
+        return 1;
     if (!strcasecmp(s, "stacked") || !strcasecmp(s, "top-bottom") ||
         !strcasecmp(s, "tb")) {
-        if (g_splits.stacked < 0) {
-            fprintf(stderr,
-                    "pbp split \"stacked\" has no code. Set the picture in the OSD, "
-                    "run `lgdualup get pbp` or `lgdualup --read 0xD7`, and set "
-                    "pbp_splits.stacked to that value. Codes 0 and 2 are not sent.\n");
-            return 0;
-        }
+        if (g_splits.stacked < 0)
+            return 1;
         *out = (uint16_t)g_splits.stacked;
         return 1;
     }
@@ -360,6 +378,35 @@ static int parse_pbp(const char *s, uint16_t *out) {
     }
     fprintf(stderr, "unknown pbp mode: %s\n", s);
     return 0;
+}
+
+static int get_vcp(IOHIDDeviceRef dev, uint8_t addr, uint8_t vcp, uint16_t *value);
+
+/* keep: read 0xD7, never write it. 1 is full. Any other reading, including
+ * 0, means PBP is already on and is not a direction we can send. */
+static int pbp_keeps(const char *s) {
+    if (!s)
+        return 0;
+    if (!strcasecmp(s, "keep"))
+        return 1;
+    if (!strcasecmp(s, "stacked") || !strcasecmp(s, "top-bottom") ||
+        !strcasecmp(s, "tb"))
+        return g_splits.stacked < 0;
+    return 0;
+}
+
+static int keep_pbp(IOHIDDeviceRef dev) {
+    uint16_t cur = 0;
+    if (!get_vcp(dev, ADDR_PBP, VCP_PBP, &cur)) {
+        fprintf(stderr, "could not read PBP state (0xD7); not writing it\n");
+        return 1;
+    }
+    if (cur == 1) {
+        fprintf(stderr, "PBP is off; enable PBP 1:1 in the monitor OSD once\n");
+        return 1;
+    }
+    printf("pbp keep (0xD7=%u, not written)\n", cur);
+    return 1;
 }
 
 typedef struct {
@@ -471,9 +518,14 @@ static int print_vcp(IOHIDDeviceRef dev, uint8_t addr, uint8_t vcp, const char *
         return 0;
     }
     printf("%s 0x%02x @ 0x%02x = %u (0x%02x)\n", label, vcp, addr, value, value);
-    if (vcp == VCP_PBP && value != 1 && value != 3 && value != 5) {
+    if (vcp == VCP_PBP && (value == 0 || value == 2)) {
         fprintf(stderr,
-                "If this is the stacked picture, set pbp_splits.stacked to %u. "
+                "0xD7=%u means PBP is on, not which way the picture is split. "
+                "Do not send %u. stacked leaves 0xD7 unchanged; set PBP 1:1 in the OSD.\n",
+                value, value);
+    } else if (vcp == VCP_PBP && value != 1 && value != 3 && value != 5) {
+        fprintf(stderr,
+                "If this code is a real split, set pbp_splits to %u. "
                 "Codes 0 and 2 are not sent.\n",
                 value);
     }
@@ -523,9 +575,11 @@ int main(int argc, char **argv) {
             fprintf(stderr, "unknown pbp mode:\n");
             return 2;
         }
-        uint16_t ignore = 0;
-        if (!parse_pbp(argv[2], &ignore))
-            return 2;
+        if (!pbp_keeps(argv[2])) {
+            uint16_t ignore = 0;
+            if (!parse_pbp(argv[2], &ignore))
+                return 2;
+        }
     }
     if ((!strcmp(argv[1], "get") || !strcmp(argv[1], "--read")) && argc < 3) {
         fprintf(stderr, USAGE, argv[0]);
@@ -603,14 +657,18 @@ int main(int argc, char **argv) {
             printf("pbp-assign main=%s (0x%02x) sub=%s (0x%02x)\n",
                    argv[2], main_v, argv[3], sub_v);
     } else if (!strcmp(argv[1], "pbp") && argc >= 3) {
-        uint16_t val;
-        if (!parse_pbp(argv[2], &val)) {
-            lg_release(&t);
-            return 2;
+        if (pbp_keeps(argv[2])) {
+            ok = keep_pbp(t.dev);
+        } else {
+            uint16_t val;
+            if (!parse_pbp(argv[2], &val)) {
+                lg_release(&t);
+                return 2;
+            }
+            ok = send_vcp(t.dev, ADDR_PBP, VCP_PBP, val);
+            if (ok)
+                printf("pbp -> %s (0x%02x)\n", argv[2], val);
         }
-        ok = send_vcp(t.dev, ADDR_PBP, VCP_PBP, val);
-        if (ok)
-            printf("pbp -> %s (0x%02x)\n", argv[2], val);
     } else if ((!strcmp(argv[1], "get") || !strcmp(argv[1], "--read")) && argc >= 3) {
         uint8_t vcp = 0, addr = 0;
         if (!parse_vcp_arg(argv[2], &vcp, &addr)) {

@@ -705,6 +705,9 @@ class DualupAdapterTests(unittest.TestCase):
             self.assertIn("--read", src)
             self.assertIn("0x01", src)
             self.assertIn("not sent", src)
+            self.assertIn("PBP is off; enable PBP 1:1 in the monitor OSD once", src)
+            self.assertIn("not which way the picture is split", src)
+            self.assertNotIn("set pbp_splits.stacked to", src)
 
 
 class DualupLayoutScriptTests(unittest.TestCase):
@@ -1133,6 +1136,11 @@ class LinuxDualupLayoutUnitTests(unittest.TestCase):
             'position = "0x0", scale = 1, transform = 3 })',
         )
 
+    def test_keep_split_uses_stacked_geometry(self) -> None:
+        self.assertEqual(self.ll.split_kind("keep"), "stacked")
+        self.assertEqual(self.ll.split_kind("stacked"), "stacked")
+        self.assertEqual(self.ll.split_kind("side"), "side")
+
     def test_hypr_apply_treats_non_legacy_and_missing_ok_as_failure(self) -> None:
         ok = subprocess.CompletedProcess([], 0, stdout="ok\n", stderr="")
         silent = subprocess.CompletedProcess([], 0, stdout="", stderr="")
@@ -1176,6 +1184,10 @@ class MacosDualupLayoutUnitTests(unittest.TestCase):
             f"id:{self.DID} res:2880x2560 hz:60 color_depth:8 enabled:true "
             "scaling:off origin:(0,0) degree:270",
         )
+
+    def test_keep_split_uses_stacked_geometry(self) -> None:
+        self.assertEqual(self.ml.split_kind("keep"), "stacked")
+        self.assertEqual(self.ml.split_kind(""), "side")
 
     def test_layout_matches_requires_res_and_rotation(self) -> None:
         ok = (
@@ -4735,6 +4747,30 @@ class NamedLayoutTests(unittest.TestCase):
         self.assertEqual(layouts, [("mac", "pbp", "stacked"), ("linux", "pbp", "stacked")])
         self.assertNotIn("side", [step["monitor"] for step in stack])
 
+    def test_keep_split_does_not_send_a_zero_code(self) -> None:
+        cfg = self._cfg()
+        cfg["adapters"]["displays"]["main"]["pbp_splits"] = {"side": 5, "stacked": None}
+        cfg["layouts"]["stack"]["monitors"]["main"]["split"] = "stacked"
+        steps = ds.layout_apply_steps(cfg, "stack")
+        adapter = [step["args"] for step in steps if step["op"] == "adapter"]
+        self.assertEqual(adapter[0][:2], ["pbp", "stacked"])
+        blob = " ".join(adapter[0])
+        self.assertIn("stacked=keep", blob)
+        self.assertNotIn("stacked=0", blob)
+        self.assertEqual(adapter[1:], [["input-sub", "hdmi1"], ["input-main", "dp"]])
+        os_steps = [step for step in steps if step["op"] == "os-layout"]
+        self.assertEqual([step["split"] for step in os_steps], ["stacked", "stacked"])
+
+        cfg["layouts"]["stack"]["monitors"]["main"]["split"] = "keep"
+        kept = ds.layout_apply_steps(cfg, "stack")
+        kept_adapter = [step["args"] for step in kept if step["op"] == "adapter"]
+        self.assertEqual(kept_adapter[0][0:2], ["pbp", "keep"])
+        self.assertNotIn("0", kept_adapter[0])
+        self.assertEqual(
+            [step["split"] for step in kept if step["op"] == "os-layout"],
+            ["keep", "keep"],
+        )
+
     def test_arrival_is_noop_when_host_is_already_visible(self) -> None:
         cfg = self._cfg(_active_layout="work", this_host="linux")
         plan = ds.arrival_plan(cfg)
@@ -4847,12 +4883,21 @@ class NamedLayoutTests(unittest.TestCase):
 class LgdualupSplitTests(unittest.TestCase):
     SH = ROOT / "adapters" / "lgdualup" / "linux" / "lgdualup.sh"
 
-    def _run(self, *args: str, home: Path | None = None, config: dict | None = None) -> subprocess.CompletedProcess:
+    def _run(
+        self,
+        *args: str,
+        home: Path | None = None,
+        config: dict | None = None,
+        extra_env: dict | None = None,
+    ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         root = home or Path("/tmp")
         env["HOME"] = str(root)
         env["XDG_CONFIG_HOME"] = str(root / ".config")
         env.pop("LGDUALUP_PBP_SPLITS", None)
+        env.pop("LGDUALUP_FAKE_PBP_READ", None)
+        if extra_env:
+            env.update(extra_env)
         if config is not None:
             path = root / ".config" / "desk"
             path.mkdir(parents=True, exist_ok=True)
@@ -4864,7 +4909,7 @@ class LgdualupSplitTests(unittest.TestCase):
             env=env,
         )
 
-    def test_refuses_broken_codes_and_unconfigured_stacked(self) -> None:
+    def test_refuses_broken_codes_and_keeps_unconfigured_stacked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             for code in ("0", "2", "0x0", "0x2"):
@@ -4872,14 +4917,65 @@ class LgdualupSplitTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 2, proc.stderr)
                 self.assertIn("not sent", proc.stderr)
                 self.assertNotIn("hidraw", proc.stderr)
+            # stacked with no code is keep: it would read the panel, so a
+            # missing device is "not found", not "set this code".
             missing = self._run("pbp", "stacked", home=home)
-            self.assertEqual(missing.returncode, 2, missing.stderr)
-            self.assertIn("get pbp", missing.stderr)
-            self.assertIn("--read 0xD7", missing.stderr)
-            self.assertNotIn("hidraw", missing.stderr)
+            self.assertEqual(missing.returncode, 1, missing.stderr)
+            self.assertIn("found", missing.stderr.lower())
+            self.assertNotIn("set pbp_splits", missing.stderr)
             side = self._run("pbp", "side", home=home)
             self.assertEqual(side.returncode, 1, side.stderr)
             self.assertIn("found", side.stderr.lower())
+
+    def test_keep_reads_without_writing_and_hint_skips_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            on = self._run("pbp", "stacked", home=home, extra_env={"LGDUALUP_FAKE_PBP_READ": "0"})
+            self.assertEqual(on.returncode, 0, on.stderr)
+            self.assertIn("0xD7=0, not written", on.stdout)
+            self.assertNotIn("PBP is off", on.stderr)
+            self.assertNotIn("set pbp_splits.stacked to 0", on.stderr + on.stdout)
+            off = self._run("pbp", "keep", home=home, extra_env={"LGDUALUP_FAKE_PBP_READ": "1"})
+            self.assertEqual(off.returncode, 0, off.stderr)
+            self.assertIn("PBP is off; enable PBP 1:1 in the monitor OSD once", off.stderr)
+            self.assertNotIn("not written", off.stdout)
+            explicit = self._run(
+                "pbp",
+                "stacked",
+                home=home,
+                extra_env={"LGDUALUP_FAKE_PBP_READ": "0"},
+                config={
+                    "adapters": {
+                        "display": {"pbp_splits": {"stacked": None, "side": 5}}
+                    }
+                },
+            )
+            self.assertEqual(explicit.returncode, 0, explicit.stderr)
+            self.assertIn("not written", explicit.stdout)
+            hinted = self._run(
+                "--read",
+                "0xD7",
+                home=home,
+            )
+            # No panel: the hint is unit-tested through the sourced function.
+            self.assertNotEqual(hinted.returncode, 0)
+        env = os.environ.copy()
+        env["LGDUALUP_SOURCE_ONLY"] = "1"
+        env["HOME"] = "/tmp"
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source {shlex.quote(str(self.SH))}; pbp_read_hint 0; pbp_keep_result 0; pbp_keep_result 1',
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("not which way the picture is split", proc.stderr)
+        self.assertNotIn("set pbp_splits.stacked to 0", proc.stderr)
+        self.assertEqual([line for line in proc.stdout.splitlines() if line], ["on", "off"])
 
     def test_stacked_code_comes_from_config_or_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

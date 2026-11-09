@@ -3515,13 +3515,19 @@ def active_layout_name(cfg: dict) -> str | None:
 
 
 def _parse_pbp_splits(raw: object) -> dict:
-    """Opaque split-name → code map. The display adapter interprets it."""
-    out: dict[str, int] = {}
+    """Opaque split-name → code map. None means keep (do not write the split).
+
+    The display adapter interprets the codes. Core forwards them unchanged.
+    """
+    out: dict[str, int | None] = {}
     if not isinstance(raw, dict):
         return out
     for key, value in raw.items():
         name = str(key).strip().lower()
-        if not name or value in (None, ""):
+        if not name:
+            continue
+        if value is None or str(value).strip().lower() in ("", "keep", "null"):
+            out[name] = None
             continue
         try:
             out[name] = int(str(value), 0)
@@ -3534,7 +3540,8 @@ def _splits_blob(splits: dict) -> str:
     parts = []
     for key in sorted(splits):
         value = splits[key]
-        if value in (None, ""):
+        if value is None:
+            parts.append(f"{key}=keep")
             continue
         try:
             parts.append(f"{key}={int(value)}")

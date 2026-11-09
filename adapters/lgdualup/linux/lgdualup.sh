@@ -15,10 +15,10 @@
 # Main→swap→Main dance (0xF6). PBP/split is VCP 0xD7 @ 0x51.
 #
 # Known codes on this panel: 1 = off/full, 5 = 50-50 side by side,
-# 3 = 66/33 side by side. Codes 0 and 2 stretch the picture and are
-# never sent. The top/bottom (stacked) code is not hardcoded: set the
-# picture from the OSD, then `lgdualup get pbp` / `--read 0xD7`, and
-# put that value in pbp_splits.stacked.
+# 3 = 66/33 side by side. A read of 0 means PBP is on, not the split
+# direction, and sending 0 (or 2) stretches the picture — never send
+# them. `stacked` defaults to keep: do not write 0xD7. Set the 1:1
+# picture from the OSD. `pbp_splits.stacked` null is the same as keep.
 #
 # A get is a DDC/CI Get VCP Feature (opcode 0x01) in the same HID
 # wrapper as a set. The reply is opcode 0x02.
@@ -183,8 +183,15 @@ apply_splits() {
         key=${pair%%=*}
         value=${pair#*=}
         key=$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        value=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
         [ -n "$key" ] || continue
         case "$value" in
+            keep|null)
+                if [ "$key" = stacked ]; then
+                    SPLIT_STACKED=keep
+                fi
+                continue
+                ;;
             ''|*[!0-9xXa-fA-F]*) continue ;;
         esac
         value=$((value))
@@ -223,11 +230,19 @@ def walk(node):
     splits = node.get("pbp_splits")
     if isinstance(splits, dict):
         for key in ("stacked", "side"):
-            if key in splits and splits[key] not in (None, ""):
-                try:
-                    found[key] = int(str(splits[key]), 0)
-                except (TypeError, ValueError):
-                    pass
+            if key not in splits:
+                continue
+            raw = splits[key]
+            if raw is None or str(raw).strip().lower() in ("", "keep", "null"):
+                found[key] = None
+                continue
+            try:
+                number = int(str(raw), 0)
+            except (TypeError, ValueError):
+                continue
+            if number in (0, 2):
+                continue
+            found[key] = number
     for value in node.values():
         if isinstance(value, dict):
             walk(value)
@@ -247,7 +262,9 @@ parts = []
 for key in ("stacked", "side"):
     if key not in found:
         continue
-    if found[key] in (0, 2):
+    if found[key] is None:
+        if key == "stacked":
+            parts.append("stacked=keep")
         continue
     parts.append(f"{key}={found[key]}")
 if parts:
@@ -272,7 +289,57 @@ parse_input() {
     esac
 }
 
+# A read of 0xD7 == 1 is full. Anything else means PBP is already on.
+# The value is not the split direction: 0 is "on", and sending it stretches.
+pbp_keep_result() {
+    local value=${1:-}
+    if [ -z "$value" ]; then
+        echo unread
+        return 0
+    fi
+    if [ "$value" -eq 1 ]; then
+        echo off
+        return 0
+    fi
+    echo on
+}
+
+PBP_OFF_MSG='PBP is off; enable PBP 1:1 in the monitor OSD once'
+
+announce_keep() {
+    local value=$1 result
+    result=$(pbp_keep_result "$value")
+    case "$result" in
+        off) echo "$PBP_OFF_MSG" >&2 ;;
+        unread) echo "could not read PBP state (0xD7); not writing it" >&2 ;;
+        *) printf 'pbp keep (0xD7=%s, not written)\n' "$value" ;;
+    esac
+}
+
+# Hint for `get pbp`. A reading of 0 is "PBP on", not a code to store.
+pbp_read_hint() {
+    local value=$1
+    if [ "$value" -eq 0 ] || [ "$value" -eq 2 ]; then
+        echo "0xD7=${value} means PBP is on, not which way the picture is split. Do not send ${value}. stacked leaves 0xD7 unchanged; set PBP 1:1 in the OSD." >&2
+        return 0
+    fi
+    if [ "$value" -ne 1 ] && [ "$value" -ne 3 ] && [ "$value" -ne 5 ]; then
+        echo "If this code is a real split, set pbp_splits to ${value}. Codes 0 and 2 are not sent." >&2
+    fi
+}
+
+keep_pbp() {
+    local node=$1 value
+    if ! value=$(read_vcp "$node" $((0x51)) $((0xD7))); then
+        announce_keep ""
+        return 0
+    fi
+    announce_keep "$value"
+    return 0
+}
+
 # Names resolve through pbp_splits. 0 and 2 are refused even as raw numbers.
+# `keep`, and `stacked` with no code, do not write 0xD7.
 parse_pbp() {
     local key
     key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
@@ -280,12 +347,13 @@ parse_pbp() {
         off|none|solo|full) echo 1 ;;
         side|on|50|50/50|50-50) echo "$SPLIT_SIDE" ;;
         66|66/33|66-33) echo 3 ;;
+        keep) echo keep ;;
         stacked|top-bottom|tb)
-            if [ -z "$SPLIT_STACKED" ]; then
-                echo "pbp split \"stacked\" has no code. Set the picture in the OSD, run \`lgdualup get pbp\` or \`lgdualup --read 0xD7\`, and set pbp_splits.stacked to that value. Codes 0 and 2 are not sent." >&2
-                return 1
+            if [ -z "$SPLIT_STACKED" ] || [ "$SPLIT_STACKED" = keep ]; then
+                echo keep
+            else
+                echo "$SPLIT_STACKED"
             fi
-            echo "$SPLIT_STACKED"
             ;;
         *)
             if [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
@@ -355,6 +423,16 @@ main() {
     fi
 
     local cmd=${1:-}
+    # Tests inject a 0xD7 reading so `pbp keep` / `pbp stacked` can be
+    # checked without a monitor. A real run never sets this.
+    if [ "$cmd" = pbp ] && [ -n "${LGDUALUP_FAKE_PBP_READ+x}" ]; then
+        local fake_mode
+        fake_mode=$(parse_pbp "${2:-}") || exit 2
+        if [ "$fake_mode" = keep ]; then
+            announce_keep "$LGDUALUP_FAKE_PBP_READ"
+            exit 0
+        fi
+    fi
     case "$cmd" in
         --list)
             local n
@@ -462,8 +540,12 @@ main() {
                 echo "unknown pbp mode: ${2:-}" >&2
                 exit 2
             }
-            send_vcp "$node" $((0x51)) $((0xD7)) "$val" || exit 1
-            printf 'pbp -> %s (0x%02x)\n' "$2" "$val"
+            if [ "$val" = keep ]; then
+                keep_pbp "$node"
+            else
+                send_vcp "$node" $((0x51)) $((0xD7)) "$val" || exit 1
+                printf 'pbp -> %s (0x%02x)\n' "$2" "$val"
+            fi
             ;;
         get|--read)
             local which addr value label
@@ -481,11 +563,13 @@ main() {
                 exit 1
             fi
             printf '%s 0x%02x @ 0x%02x = %d (0x%02x)\n' "$label" "$which" "$addr" "$value" "$value"
-            if [ "$which" -eq $((0xD7)) ] && [ "$value" -ne 1 ] && [ "$value" -ne 3 ] && [ "$value" -ne 5 ]; then
-                echo "If this is the stacked picture, set pbp_splits.stacked to ${value}. Codes 0 and 2 are not sent." >&2
+            if [ "$which" -eq $((0xD7)) ]; then
+                pbp_read_hint "$value"
             fi
             ;;
     esac
 }
 
-main "$@"
+if [ "${LGDUALUP_SOURCE_ONLY:-}" != 1 ]; then
+    main "$@"
+fi

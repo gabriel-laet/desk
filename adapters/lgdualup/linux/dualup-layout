@@ -216,7 +216,7 @@ def print_hypr(proc: subprocess.CompletedProcess) -> None:
 
 def split_kind(raw: str) -> str:
     key = (raw or "").strip().lower()
-    if key in ("stacked", "stack", "top-bottom", "tb"):
+    if key in ("stacked", "stack", "top-bottom", "tb", "keep"):
         return "stacked"
     return "side"
 

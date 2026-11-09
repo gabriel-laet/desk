@@ -34,7 +34,8 @@
         "linux": "dp"
       },
       "pbp_splits": {
-        "side": 5
+        "side": 5,
+        "stacked": null
       }
     },
     "smarthome": {
