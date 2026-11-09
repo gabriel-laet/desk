@@ -3803,10 +3803,11 @@ def layout_retry_settings(cfg: dict) -> tuple[int, float]:
 def steps_for_monitor(cfg: dict, instance: dict, spec: dict) -> list[dict]:
     """USB and OS-layout steps for one monitor. No I/O.
 
-    PBP order is split, then the sub input (top), then the main input
-    (bottom), with a settle after each. Full mode leaves split mode
-    first when the adapter can, then selects the one input. OS layout
-    runs after the monitor is set, once per host shown on it.
+    PBP order is split, then the sub input (bottom), then the main input
+    (top). Top is Main Screen (Up); bottom is Sub Screen (Down). Sub is
+    sent first, then main, with a settle after each. Full mode leaves
+    split mode first when the adapter can, then selects the one input.
+    OS layout runs after the monitor is set, once per host shown on it.
     """
     mid = str(instance.get("id") or "")
     caps = instance_capabilities(instance)
@@ -3849,7 +3850,7 @@ def steps_for_monitor(cfg: dict, instance: dict, spec: dict) -> list[dict]:
             return steps
         split = str(spec.get("split") or "side").strip() or "side"
         panes: list[tuple[str, str, str, str]] = []
-        for role, key, verb in (("sub", "top", "input-sub"), ("main", "bottom", "input-main")):
+        for role, key, verb in (("sub", "bottom", "input-sub"), ("main", "top", "input-main")):
             host = str(spec.get(key) or "").strip()
             if not host:
                 steps.append(
