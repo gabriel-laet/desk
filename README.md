@@ -658,7 +658,9 @@ adapters list `wallpaper.apply`.
 `adapters.displays`, or `display` when the file still has one
 `adapters.display` / `adapters.dualup` object. Core does not know VCP
 codes. It asks the display adapter to select an input, and, for PBP,
-to set a split name and then the sub input and the main input.
+to set a split name, then the sub input, then the main input. The
+DualUp manual calls these Main Screen (Up) and Sub Screen (Down), so
+top is main and bottom is sub. Sub is still sent first.
 
 ```json
 {
@@ -701,7 +703,7 @@ to set a split name and then the sub input and the main input.
 that monitor's control link can send, so each command is tried locally
 and then on `relay_hosts`, and tried once more after the settle delay:
 the link moves when the input changes. PBP order is the split, then the
-top host as the sub input, then the bottom host as the main input, with
+bottom host as the sub input, then the top host as the main input, with
 `layout_settle_s` (default 0.5s) after each. When the monitor is set,
 OS layout runs on **every** host shown there — locally on this machine,
 over SSH (`ssh` or `peer`) on the others — via that host's

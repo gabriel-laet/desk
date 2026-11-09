@@ -4735,8 +4735,8 @@ class NamedLayoutTests(unittest.TestCase):
             [step["args"] for step in stack if step["op"] == "adapter"],
             [
                 ["pbp", "stacked", "--splits", "side=5,stacked=4"],
-                ["input-sub", "hdmi1"],
-                ["input-main", "dp"],
+                ["input-sub", "dp"],
+                ["input-main", "hdmi1"],
             ],
         )
         layouts = [
@@ -4757,7 +4757,7 @@ class NamedLayoutTests(unittest.TestCase):
         blob = " ".join(adapter[0])
         self.assertIn("stacked=keep", blob)
         self.assertNotIn("stacked=0", blob)
-        self.assertEqual(adapter[1:], [["input-sub", "hdmi1"], ["input-main", "dp"]])
+        self.assertEqual(adapter[1:], [["input-sub", "dp"], ["input-main", "hdmi1"]])
         os_steps = [step for step in steps if step["op"] == "os-layout"]
         self.assertEqual([step["split"] for step in os_steps], ["stacked", "stacked"])
 
@@ -4844,7 +4844,7 @@ class NamedLayoutTests(unittest.TestCase):
             self.assertEqual(calls[1], ["pbp", "stacked", "--splits", "side=5,stacked=4"])
             self.assertEqual(
                 calls[2:],
-                [["input-sub", "hdmi1"], ["input-main", "dp"]],
+                [["input-sub", "dp"], ["input-main", "hdmi1"]],
             )
             local = [cmd for cmd in ran if cmd and cmd[0].endswith("dualup-layout")]
             remote = [cmd for cmd in ran if cmd and cmd[0] == "ssh"]
