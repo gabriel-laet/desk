@@ -53,16 +53,17 @@ paints it without an `if kettle` / `if weather` branch.
 
 | Kind | Role | Typical slot | HUD module |
 |---|---|---|---|
-| `host` | Focus strip | *(shell-owned, not a tray slot)* | Desk → MAC/LNX · Switch Mac/Linux |
+| `host` | Focus strip | *(shell-owned, not a tray slot)* | Desk → focus hint and active layout · one Switch button per host |
 | `face` | Appliance gauge | `kettle` | Circular progress + scoped Heat/Off |
 | `chip` | Ambient | `weather` | ° + optional per-slot altitude / mood |
 | `mode` | Display | `dualup` | FULL/PBP + scoped Full / PBP / layout |
 | `toggle` | Light | `lights` | ON/OFF/? + scoped On/Off (HUD flips immediately) |
 
-macOS DeskSwitchBar is the reference HUD: host at the top, then enabled
-slots in `ui.tray.slots` order, each once, actions under that widget,
-Refresh / Configure tray / Quit at the bottom. The menu-bar extra stays
-a compact composite of the same enabled slots.
+macOS DeskSwitchBar is the reference HUD: host buttons at the top (one
+per configured host), then named layouts, then enabled slots in
+`ui.tray.slots` order, each once, actions under that widget, Refresh /
+Configure tray / Quit at the bottom. The menu-bar extra stays a short
+focus token plus the active layout name, then the same enabled slots.
 
 Omarchy stub-reads `kind` on the same JSON. A modular QML HUD is a
 later pass — do not fork the schema.
