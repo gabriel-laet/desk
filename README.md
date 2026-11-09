@@ -459,7 +459,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.display.relay_hosts` | Ordered host ids. When the local display adapter reports the device absent, try these peers and stop at the first success. `adapters.dualup.relay_hosts` is the same list. Each monitor can set its own |
 | `layouts` | Named arrangements. `desk layout <name>` applies one and stores it as `active_layout` |
 | `adapters.displays` | Map of monitor id → display instance. Absent: the single `adapters.display` object is monitor id `display` |
-| `pbp_splits` | On a DualUp instance. `side` defaults to 5. `stacked` is the code `lgdualup get pbp` prints. Codes 0 and 2 are not sent |
+| `pbp_splits` | On a DualUp instance. `side` defaults to 5 (written). `stacked` defaults to keep: null does not write `0xD7`. A number other than 0 or 2 is written. 0 and 2 are never sent |
 | `adapters.display.relay_path` | Optional remote executable. Default is `$HOME/.local/lib/desk/<adapter id>` |
 | `adapters.mouse.relay_hosts` | Ordered host ids for the mouse. When the local mouse adapter reports the device absent, try these and stop at the first success. When omitted, the display `relay_hosts` list is used |
 | `adapters.mouse.relay_path` | Optional remote mouse executable. Default is `$HOME/.local/lib/desk/<mouse adapter id>` |
@@ -715,34 +715,48 @@ The applied name is stored in `~/.local/state/desk/state.json`
 includes `active_layout` and `monitors`. The display slot's label is
 the layout name while one is active.
 
-### Reading the stacked PBP code
+### PBP split: keep the OSD picture
 
-On this DualUp, VCP `0xD7` at `0x51` is the picture split. `1` is full,
-`5` is 50-50 side by side, `3` is 66/33 side by side. `0` and `2`
-stretch the panel and are never sent. The top/bottom 1:1 code is not
-known ahead of time. Set that picture from the monitor's own menu, then
-read it from the machine that has the USB upstream:
+On this DualUp, VCP `0xD7` at `0x51` is not a reliable split direction.
+`1` is full (PBP off). `5` is 50-50 side by side. `3` is 66/33 side by
+side. With top/bottom 1:1 selected in the monitor menu, a read returns
+`0`. That `0` means PBP is on, not which way the picture is split, and
+**sending `0` (or `2`) stretches the panel**. Those two values are never
+written.
+
+`stacked` therefore defaults to **keep**. `split: "keep"`, or
+`pbp_splits.stacked: null`, is the same: do not write `0xD7`.
+
+- If the monitor already reads as PBP (the value is not `1`), desk only
+  sets the sub input, the main input, and the OS layout.
+- If it reads `1` (full), desk logs `PBP is off; enable PBP 1:1 in the
+  monitor OSD once`, still sets the inputs, and still does not write
+  `0xD7`.
+
+Set the 1:1 picture from the OSD once. After that, `desk layout` leaves
+it alone. Side-by-side is different: `split: "side"` still writes `5`.
+
+To see the raw reading, on the machine that holds the USB upstream:
 
 ```bash
 lgdualup get pbp
 lgdualup --read 0xD7
 ```
 
-Both send a DDC/CI get (opcode `0x01`) in the same HID wrapper as a
-set, and parse the reply (opcode `0x02`). The line looks like
-`pbp 0xD7 @ 0x51 = 4 (0x04)`. Put that number on the DualUp instance:
+Both send a DDC/CI get (opcode `0x01`) and parse the reply (opcode
+`0x02`). A line `pbp 0xD7 @ 0x51 = 0 (0x00)` is PBP on. Do not put `0`
+in `pbp_splits`. Only a value you have checked as a real direction
+(not `0` or `2`) belongs there:
 
 ```json
-"pbp_splits": { "stacked": 4, "side": 5 }
+"pbp_splits": { "stacked": null, "side": 5 }
 ```
 
-`desk layout` forwards the map as `--splits` and does not interpret it.
-Until `stacked` is set, `lgdualup pbp stacked` exits without writing.
-Side-by-side halves are 1280x2880 (the previous PBP default). Stacked
-halves are 2560x1440 with no rotation:
-`dualup-layout pbp --split stacked` uses Hyprland
-`2560x1440@59.95` transform 0, and displayplacer `res:2560x1440`
-`degree:0`.
+`desk layout` forwards that map as `--splits` and does not interpret
+it. Side-by-side halves are 1280x2880. Stacked and keep halves are
+2560x1440 with no rotation: `dualup-layout pbp --split stacked` (or
+`--split keep`) uses Hyprland `2560x1440@59.95` transform 0, and
+displayplacer `res:2560x1440` `degree:0`.
 
 ## Alexa / smart-home
 
