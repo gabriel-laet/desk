@@ -20,6 +20,8 @@
       "linux": {
         "channel": 2
       },
+      "follow_keyboard_arrival": true,
+      "arrival_moves_display": true,
       "follow_hhkb_usb": true
     },
     "dualup": {

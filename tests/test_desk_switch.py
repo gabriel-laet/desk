@@ -3514,6 +3514,697 @@ class NHostTests(unittest.TestCase):
         self.assertIn(hinted.stdout.strip(), {"MAC", "LNX", "TWR", "?"})
 
 
+def _presence(
+    *,
+    present: bool = False,
+    usb: bool = False,
+    bluetooth: bool = False,
+    unknown: bool = False,
+) -> dict:
+    if unknown:
+        transport = "unknown"
+    elif usb and bluetooth:
+        transport = "both"
+    elif usb:
+        transport = "usb"
+    elif bluetooth:
+        transport = "bluetooth"
+    elif present:
+        transport = "bluetooth"
+    else:
+        transport = "absent"
+    return {
+        "present": bool(present or unknown),
+        "usb": bool(usb) and not unknown,
+        "bluetooth": bool(bluetooth) and not unknown,
+        "transport": transport,
+        "unknown": bool(unknown),
+    }
+
+
+def _probe_script(samples: list[dict]):
+    """hhkb_probe side effect: yield samples, then stop the watcher."""
+    cursor = {"i": 0}
+
+    def _next(*_args, **_kwargs) -> dict:
+        index = cursor["i"]
+        if index >= len(samples):
+            raise KeyboardInterrupt
+        cursor["i"] = index + 1
+        return samples[index]
+
+    return _next
+
+
+class KeyboardArrivalTests(unittest.TestCase):
+    """Arrival pulls the desk. Leave-push stays on only for legacy maps."""
+
+    def _watch_cfg(self, **extra: object) -> dict:
+        cfg = {
+            "this_host": "tower",
+            "target_channel": 1,
+            "poll_interval_s": 0.01,
+            "absent_polls_required": 2,
+            "sleep_gap_s": 30,
+            "switch_retries": 1,
+            "switch_retry_delay_s": 0,
+            "switch_monitor": True,
+            "follow_keyboard_arrival": True,
+            "follow_hhkb_usb": False,
+            "push_on_leave": False,
+            "hosts": {
+                "mac": {"channel": 1, "dualup_input": "hdmi1"},
+                "linux": {"channel": 2, "dualup_input": "dp"},
+                "tower": {"channel": 3, "dualup_input": "hdmi2", "input": "hdmi2"},
+            },
+        }
+        cfg.update(extra)
+        return cfg
+
+    def _run(self, cfg: dict, samples: list[dict], *, mouse=None, monitor=None, cmd_to=None):
+        patches = [
+            mock.patch.object(ds, "hhkb_probe", side_effect=_probe_script(samples)),
+            mock.patch.object(ds.time, "sleep"),
+            mock.patch("sys.stdout", io.StringIO()),
+        ]
+        started = []
+        for patch in patches:
+            started.append(patch)
+            patch.__enter__()
+        if mouse is not None:
+            started.append(mock.patch.object(ds, "switch_mouse", side_effect=mouse))
+            started[-1].__enter__()
+        if monitor is not None:
+            started.append(mock.patch.object(ds, "switch_monitor", side_effect=monitor))
+            started[-1].__enter__()
+        if cmd_to is not None:
+            started.append(mock.patch.object(ds, "cmd_to", side_effect=cmd_to))
+            started[-1].__enter__()
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                ds.cmd_watch(cfg, dry_run=False)
+        finally:
+            for patch in reversed(started):
+                patch.__exit__(None, None, None)
+
+    def test_defaults_two_hosts_keep_push_and_arrival(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(json.dumps({"adapters": {"hosts": {"this_host": "mac"}}}))
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)), mock.patch.object(
+                ds, "default_this_host", return_value="mac"
+            ):
+                cfg = ds.load_config()
+        self.assertTrue(cfg["follow_keyboard_arrival"])
+        self.assertTrue(cfg["follow_hhkb_usb"])
+        self.assertTrue(cfg["arrival_moves_display"])
+        self.assertTrue(cfg["push_on_leave"])
+        self.assertEqual(set(cfg["hosts"]), {"mac", "linux"})
+        for key in (
+            "follow_keyboard_arrival",
+            "follow_hhkb_usb",
+            "arrival_moves_display",
+            "push_on_leave",
+        ):
+            self.assertNotIn(key, cfg["hosts"])
+
+    def test_three_hosts_default_push_off_and_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "hosts": {
+                                "this_host": "tower",
+                                "mac": {"channel": 1},
+                                "linux": {"channel": 2},
+                                "tower": {"channel": 3},
+                            }
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)):
+                cfg = ds.load_config()
+        self.assertTrue(cfg["follow_keyboard_arrival"])
+        self.assertTrue(cfg["arrival_moves_display"])
+        self.assertFalse(cfg["push_on_leave"])
+        self.assertNotIn("push_on_leave", cfg["hosts"])
+        self.assertNotIn("arrival_moves_display", cfg["hosts"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "hosts": {
+                                "this_host": "mac",
+                                "push_on_leave": False,
+                                "follow_keyboard_arrival": False,
+                                "arrival_moves_display": False,
+                                "mac": {"channel": 1},
+                                "linux": {"channel": 2},
+                            }
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)), mock.patch.object(
+                ds, "default_this_host", return_value="mac"
+            ):
+                legacy = ds.load_config()
+        self.assertFalse(legacy["push_on_leave"])
+        self.assertFalse(legacy["follow_keyboard_arrival"])
+        self.assertFalse(legacy["arrival_moves_display"])
+        self.assertTrue(legacy["follow_hhkb_usb"])
+        self.assertNotIn("arrival_moves_display", legacy["hosts"])
+        self.assertEqual(set(legacy["hosts"]), {"mac", "linux"})
+
+    def test_bluetooth_arrival_runs_desk_to_this_host(self) -> None:
+        cfg = self._watch_cfg()
+        seen: list[tuple] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            seen.append(("mouse", channel))
+            return 0
+
+        def fake_monitor(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            seen.append(("display", host, mouse_only))
+            return 0
+
+        samples = [
+            _presence(),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        self._run(cfg, samples, mouse=fake_mouse, monitor=fake_monitor)
+        self.assertEqual(seen, [("mouse", 3), ("display", "tower", False)])
+
+    def test_arrival_can_leave_displays_where_they_are(self) -> None:
+        cfg = self._watch_cfg(arrival_moves_display=False)
+        seen: list[tuple] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            seen.append(("mouse", channel))
+            return 0
+
+        def fake_monitor(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            seen.append(("display", host, mouse_only))
+            return 0
+
+        samples = [
+            _presence(),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        self._run(cfg, samples, mouse=fake_mouse, monitor=fake_monitor)
+        self.assertEqual(seen, [("mouse", 3), ("display", "tower", True)])
+        with mock.patch.object(ds, "run") as run:
+            self.assertEqual(ds.switch_monitor(cfg, "tower", mouse_only=True), 0)
+        run.assert_not_called()
+
+    def test_arrival_plan_keeps_layout_empty_for_a_later_change(self) -> None:
+        cfg = self._watch_cfg(arrival_moves_display=False)
+        plan = ds.arrival_plan(cfg)
+        self.assertEqual(plan["host"], "tower")
+        self.assertTrue(plan["mouse"])
+        self.assertEqual(plan["displays"], "leave")
+        self.assertIsNone(plan["layout"])
+        self.assertEqual(ds.arrival_plan(self._watch_cfg())["displays"], "move")
+
+        plan["layout"] = "pbp-top"
+        seen: list[str] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            seen.append(f"mouse:{channel}")
+            return 0
+
+        def fake_monitor(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            seen.append(f"display:{host}:{mouse_only}")
+            return 0
+
+        buf = io.StringIO()
+        with mock.patch.object(ds, "switch_mouse", side_effect=fake_mouse), mock.patch.object(
+            ds, "switch_monitor", side_effect=fake_monitor
+        ), mock.patch("sys.stdout", buf):
+            rc = ds.apply_arrival(cfg, plan, dry_run=False, reason="keyboard arrived")
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, ["mouse:3"])
+        self.assertIn("arrival layout pbp-top is not available yet", buf.getvalue())
+        self.assertIn("leaving displays unchanged", buf.getvalue())
+
+        typed = io.StringIO()
+        with mock.patch.object(ds, "switch_mouse", side_effect=fake_mouse), mock.patch.object(
+            ds, "switch_monitor", side_effect=fake_monitor
+        ), mock.patch("sys.stdout", typed):
+            rc = ds.cmd_to(cfg, "tower")
+        self.assertEqual(rc, 0)
+        self.assertIn("display:tower:False", seen)
+
+    def test_arrival_ignores_a_short_drop_and_runs_again_after_a_real_leave(self) -> None:
+        cfg = self._watch_cfg()
+        calls: list[str] = []
+
+        def fake_to(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            calls.append(host)
+            return 0
+
+        samples = [
+            _presence(),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),  # debounced arrival
+            _presence(present=True, bluetooth=True),
+            _presence(),  # shorter than absent_polls_required
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),  # still the last action
+            _presence(),
+            _presence(),  # confirmed leave, push_on_leave is off
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),  # pull again
+        ]
+        self._run(cfg, samples, cmd_to=fake_to)
+        self.assertEqual(calls, ["tower", "tower"])
+
+    def test_unknown_probe_is_not_an_arrival_or_a_leave(self) -> None:
+        cfg = self._watch_cfg(push_on_leave=True)
+        calls: list[str] = []
+        pushed: list[int] = []
+
+        def fake_to(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            calls.append(host)
+            return 0
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            pushed.append(channel)
+            return 0
+
+        samples = [
+            _presence(),
+            _presence(unknown=True),
+            _presence(unknown=True),
+            _presence(unknown=True),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        self._run(cfg, samples, cmd_to=fake_to, mouse=fake_mouse)
+        self.assertEqual(calls, ["tower"])
+        self.assertEqual(pushed, [])
+
+    def test_sleep_gap_sample_does_not_pull(self) -> None:
+        cfg = self._watch_cfg(sleep_gap_s=3)
+        calls: list[str] = []
+        clock = {"t": 0.0, "sleeps": 0}
+
+        def fake_time() -> float:
+            return clock["t"]
+
+        def fake_sleep(_interval: float) -> None:
+            clock["sleeps"] += 1
+            clock["t"] += 30
+            if clock["sleeps"] >= 2:
+                raise KeyboardInterrupt
+
+        def fake_to(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            calls.append(host)
+            return 0
+
+        samples = [
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        with mock.patch.object(ds, "hhkb_probe", side_effect=_probe_script(samples)), mock.patch.object(
+            ds.time, "time", side_effect=fake_time
+        ), mock.patch.object(ds.time, "sleep", side_effect=fake_sleep), mock.patch.object(
+            ds, "cmd_to", side_effect=fake_to
+        ), mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                ds.cmd_watch(cfg, dry_run=False)
+        self.assertEqual(calls, [])
+
+    def test_legacy_usb_edge_still_pulls_when_arrival_is_off(self) -> None:
+        cfg = self._watch_cfg(
+            this_host="mac",
+            follow_keyboard_arrival=False,
+            follow_hhkb_usb=True,
+            push_on_leave=True,
+            hosts={"mac": {"channel": 1}, "linux": {"channel": 2}},
+        )
+        calls: list[str] = []
+
+        def fake_to(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            calls.append(host)
+            return 0
+
+        usb_samples = [
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, usb=True),
+        ]
+        self._run(cfg, usb_samples, cmd_to=fake_to)
+        self.assertEqual(calls, ["mac"])
+
+        calls.clear()
+        bt_samples = [
+            _presence(),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        self._run(cfg, bt_samples, cmd_to=fake_to)
+        self.assertEqual(calls, [])
+
+    def test_two_host_leave_still_pushes_follow_channel(self) -> None:
+        cfg = self._watch_cfg(
+            this_host="mac",
+            target_channel=2,
+            follow_keyboard_arrival=True,
+            follow_hhkb_usb=True,
+            hosts={"mac": {"channel": 1}, "linux": {"channel": 2}},
+        )
+        del cfg["push_on_leave"]
+        pushed: list[int] = []
+        displays: list[str] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            pushed.append(channel)
+            return 0
+
+        def fake_monitor(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            displays.append(host)
+            return 0
+
+        samples = [
+            _presence(present=True, bluetooth=True),
+            _presence(),
+            _presence(),
+        ]
+        self._run(cfg, samples, mouse=fake_mouse, monitor=fake_monitor)
+        self.assertEqual(pushed, [2])
+        self.assertEqual(displays, [])
+
+    def test_three_host_leave_does_not_push_unless_asked(self) -> None:
+        cfg = self._watch_cfg(follow_keyboard_arrival=False, follow_hhkb_usb=False)
+        del cfg["push_on_leave"]
+        pushed: list[int] = []
+
+        def fake_mouse(conf: dict, channel: int) -> int:
+            pushed.append(channel)
+            return 0
+
+        samples = [
+            _presence(present=True, bluetooth=True),
+            _presence(),
+            _presence(),
+        ]
+        self._run(cfg, samples, mouse=fake_mouse)
+        self.assertEqual(pushed, [])
+
+        cfg["push_on_leave"] = True
+        samples = [
+            _presence(present=True, bluetooth=True),
+            _presence(),
+            _presence(),
+        ]
+        self._run(cfg, samples, mouse=fake_mouse)
+        self.assertEqual(pushed, [1])
+
+    def test_bluetooth_arrival_relays_mouse_and_switches_display(self) -> None:
+        cfg = self._watch_cfg(
+            _mouse_enabled=True,
+            _dualup_enabled=True,
+            _mouse_relay_hosts=["linux", "mac"],
+            _display_relay_hosts=["linux", "mac"],
+            _bindings={
+                "mouse": {
+                    "id": "mxswitch",
+                    "path": Path("/opt/desk/mxswitch"),
+                    "source": "path",
+                    "manifest": None,
+                    "capabilities": ["mouse.host_switch"],
+                },
+                "display": {
+                    "id": "display-adapter",
+                    "path": Path("/opt/desk/display-adapter"),
+                    "source": "path",
+                    "manifest": None,
+                    "capabilities": ["display.input"],
+                },
+            },
+        )
+        cfg["hosts"]["tower"]["pre_switch"] = "wake-outputs"
+        cfg["hosts"]["tower"]["ssh"] = "user@192.0.2.30"
+        cfg["hosts"]["linux"]["ssh"] = "user@192.0.2.20"
+        cfg["hosts"]["mac"]["ssh"] = "user@192.0.2.10"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            if cmd[:2] == ["/opt/desk/mxswitch", "3"]:
+                return _proc(cmd, 1, "", "No Logitech device supporting ChangeHost found.\n")
+            if cmd[0] == "ssh" and "mxswitch 3" in cmd[-1]:
+                return _proc(cmd, 0, "switched\n", "")
+            if cmd[:3] == ["sh", "-c", "wake-outputs"]:
+                return _proc(cmd, 0, "", "")
+            if cmd[:3] == ["/opt/desk/display-adapter", "input", "hdmi2"]:
+                return _proc(cmd, 0, "input ok\n", "")
+            return _proc(cmd, 1, "", "device not found\n")
+
+        samples = [
+            _presence(),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "hhkb_probe", side_effect=_probe_script(samples)), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds.time, "sleep"), mock.patch.object(
+                ds, "cache_dir", return_value=Path(tmp)
+            ), mock.patch("sys.stdout", buf), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(KeyboardInterrupt):
+                    ds.cmd_watch(cfg, dry_run=False)
+        text = buf.getvalue()
+        self.assertIn("mouse channel 3 via linux", text)
+        self.assertIn("display input hdmi2 via tower", text)
+        self.assertIn("pre_switch tower: wake-outputs", text)
+        self.assertEqual(calls[0][:2], ["/opt/desk/mxswitch", "3"])
+        self.assertEqual(calls[1][0], "ssh")
+        self.assertEqual(calls[1][5], "user@192.0.2.20")
+        self.assertTrue(calls[1][-1].endswith("mxswitch 3"))
+        self.assertEqual(calls[2], ["sh", "-c", "wake-outputs"])
+        self.assertEqual(calls[3], ["/opt/desk/display-adapter", "input", "hdmi2"])
+        self.assertEqual(len([cmd for cmd in calls if cmd[0] == "ssh"]), 1)
+
+
+class MouseRelayTests(unittest.TestCase):
+    """Mouse host change: local first, then relay_hosts, mock subprocess."""
+
+    def _cfg(self) -> dict:
+        return {
+            "this_host": "mac",
+            "target_channel": 2,
+            "_mouse_enabled": True,
+            "_mouse_relay_hosts": ["linux", "tower"],
+            "_bindings": {
+                "mouse": {
+                    "id": "mxswitch",
+                    "path": Path("/opt/desk/mxswitch"),
+                    "source": "path",
+                    "manifest": None,
+                    "capabilities": ["mouse.host_switch"],
+                }
+            },
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "user@192.0.2.10"},
+                "linux": {"channel": 2, "ssh": "user@192.0.2.20"},
+                "tower": {"channel": 3, "ssh": "user@192.0.2.30"},
+            },
+        }
+
+    def _switch(self, cfg: dict, steps: list, channel: int = 2) -> tuple[int, str, list[list[str]]]:
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            if not steps:
+                raise AssertionError(f"unexpected command: {cmd}")
+            step = steps.pop(0)
+            if isinstance(step, BaseException):
+                raise step
+            rc, out, err = step
+            return _proc(cmd, rc, out, err)
+
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "run", side_effect=fake_run), mock.patch.object(
+                ds, "cache_dir", return_value=Path(tmp)
+            ), mock.patch("sys.stdout", buf), mock.patch("sys.stderr", io.StringIO()):
+                rc = ds.switch_mouse(cfg, channel)
+        self.assertEqual(steps, [], f"unused script steps; calls={calls}")
+        return rc, buf.getvalue(), calls
+
+    def test_local_success_skips_relay(self) -> None:
+        rc, out, calls = self._switch(self._cfg(), [(0, "Switching to channel 2 ...\n", "")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [["/opt/desk/mxswitch", "2"]])
+        self.assertIn("mouse channel 2 via mac", out)
+        self.assertNotIn("trying", out)
+
+    def test_relay_order_stops_at_first_success(self) -> None:
+        rc, out, calls = self._switch(
+            self._cfg(),
+            [
+                (1, "", "No Logitech device supporting ChangeHost found.\n"),
+                (1, "", "device not found\n"),
+                (0, "switched\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0], ["/opt/desk/mxswitch", "2"])
+        self.assertEqual(
+            calls[1],
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "user@192.0.2.20",
+                "$HOME/.local/lib/desk/mxswitch 2",
+            ],
+        )
+        self.assertEqual(calls[2][5], "user@192.0.2.30")
+        self.assertTrue(calls[2][-1].endswith("mxswitch 2"))
+        self.assertEqual(len(calls), 3)
+        self.assertIn("mouse channel 2: not found on mac", out)
+        self.assertIn("mouse channel 2: not found on linux", out)
+        self.assertIn("mouse channel 2 via tower", out)
+        self.assertNotIn("via linux", out)
+
+    def test_timeout_falls_through_to_the_next_host(self) -> None:
+        rc, out, calls = self._switch(
+            self._cfg(),
+            [
+                (1, "", "not found\n"),
+                subprocess.TimeoutExpired(["ssh"], 12),
+                (0, "ok\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("relay linux failed", out)
+        self.assertIn("mouse channel 2 via tower", out)
+
+    def test_hard_error_stays_local(self) -> None:
+        rc, out, calls = self._switch(self._cfg(), [(2, "", "permission denied\n")])
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("trying", out)
+        self.assertNotIn("via ", out)
+
+    def test_display_relay_list_is_the_fallback(self) -> None:
+        cfg = self._cfg()
+        del cfg["_mouse_relay_hosts"]
+        cfg["_display_relay_hosts"] = ["tower", "linux"]
+        rc, out, calls = self._switch(
+            cfg,
+            [
+                (1, "", "not found\n"),
+                (0, "ok\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[1][5], "user@192.0.2.30")
+        self.assertIn("mouse channel 2 via tower", out)
+        self.assertNotIn("192.0.2.20", " ".join(" ".join(cmd) for cmd in calls))
+
+    def test_mouse_list_overrides_the_display_list(self) -> None:
+        cfg = self._cfg()
+        cfg["_mouse_relay_hosts"] = ["linux"]
+        cfg["_display_relay_hosts"] = ["tower"]
+        rc, out, calls = self._switch(
+            cfg,
+            [
+                (1, "", "not found\n"),
+                (0, "ok\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual([cmd[5] for cmd in calls if cmd[0] == "ssh"], ["user@192.0.2.20"])
+        self.assertIn("via linux", out)
+
+    def test_missing_binary_with_explicit_relay_uses_ssh(self) -> None:
+        cfg = self._cfg()
+        cfg["_bindings"]["mouse"]["path"] = None
+        rc, out, calls = self._switch(cfg, [(0, "ok\n", "")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "ssh")
+        self.assertEqual(calls[0][5], "user@192.0.2.20")
+        self.assertIn("adapter not available on mac", out)
+        self.assertIn("mouse channel 2 via linux", out)
+
+    def test_missing_binary_without_explicit_relay_does_not_ssh(self) -> None:
+        cfg = self._cfg()
+        del cfg["_mouse_relay_hosts"]
+        cfg["_display_relay_hosts"] = ["linux", "tower"]
+        cfg["_bindings"]["mouse"]["path"] = None
+        with mock.patch.object(ds, "run") as run:
+            with self.assertRaises(SystemExit):
+                ds.switch_mouse(cfg, 2)
+        run.assert_not_called()
+
+    def test_relay_path_override(self) -> None:
+        cfg = self._cfg()
+        cfg["_mouse_relay_path"] = "~/bin/mxswitch"
+        rc, _out, calls = self._switch(
+            cfg,
+            [(1, "", "not found\n"), (0, "ok\n", "")],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[1][-1], "~/bin/mxswitch 2")
+
+    def test_config_loads_mouse_relay_ahead_of_display_relay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "hosts": {
+                                "this_host": "mac",
+                                "mac": {"channel": 1, "ssh": "user@192.0.2.10"},
+                                "linux": {"channel": 2, "ssh": "user@192.0.2.20"},
+                                "tower": {"channel": 3, "ssh": "user@192.0.2.30"},
+                            },
+                            "mouse": {
+                                "relay_hosts": ["tower", "LNX", "linux"],
+                                "relay_path": "~/bin/mxswitch",
+                            },
+                            "display": {"relay_hosts": ["linux"]},
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)), mock.patch.object(
+                ds, "default_this_host", return_value="mac"
+            ):
+                cfg = ds.load_config()
+        self.assertEqual(cfg["_mouse_relay_hosts"], ["tower", "linux"])
+        self.assertEqual(cfg["_mouse_relay_path"], "~/bin/mxswitch")
+        self.assertEqual(cfg["_display_relay_hosts"], ["linux"])
+        self.assertEqual(ds.mouse_relay_host_ids(cfg), ["tower", "linux"])
+        self.assertFalse(cfg["push_on_leave"])
+        self.assertTrue(cfg["follow_keyboard_arrival"])
+
+        bare = dict(cfg)
+        del bare["_mouse_relay_hosts"]
+        self.assertEqual(ds.mouse_relay_host_ids(bare), ["linux"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
