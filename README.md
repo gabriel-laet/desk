@@ -2,11 +2,12 @@
 
 One CLI. Adapters do the hardware. Shells only paint.
 
-**desk** is a small orchestrator for a two-host desk: hop a Logitech MX
+**desk** is a small orchestrator for a desk of one or more hosts: hop a Logitech MX
 Master (and, if you want, an [LG DualUp](https://www.lg.com/us/monitors/lg-28mq780-b))
-between macOS and Linux, optionally follow an
+to a configured host, optionally follow an
 [HHKB Studio](https://happyhackingkb.com/), and hang extra tray slots
 (smart-home light, Fellow-style kettle, weather) off the same contract.
+`mac` and `linux` are the defaults. Any other id in `adapters.hosts` is a host too.
 
 ```
 core     = config · status · watch · to/full/pbp · adapter registry · slots
@@ -108,8 +109,10 @@ Pairing that works:
 |---|---|---|
 | HHKB | Fn+Ctrl+1 (or USB) | Mac |
 | HHKB | Fn+Ctrl+2 | Linux |
+| HHKB | Fn+Ctrl+3 | third host (`tower`) |
 | MX Master | Easy-Switch 1 | Mac |
 | MX Master | Easy-Switch 2 | Linux |
+| MX Master | Easy-Switch 3 | third host (`tower`) |
 
 If the HHKB USB cable stays in the Mac *and* you hop the keyboard to
 Bluetooth on Linux, the Mac may still enumerate a USB collection. The
@@ -288,9 +291,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.desk-switch-bar.pl
 desk status              # HHKB / mouse / adapters (text)
 desk status --json
 desk status --json --local  # skip SSH peer peek
-desk status --hint       # MAC / LNX / ?  (same as: desk hint)
+desk status --hint       # MAC / LNX / host hint / ?  (same as: desk hint)
 desk to mac              # mouse + display input if configured (relayed if needed)
 desk to linux
+desk to tower            # any id configured in adapters.hosts
 desk to linux --mouse-only
 desk switch mac          # same as `to mac`
 desk switch 2            # mouse only, Easy-Switch 1|2|3
@@ -298,7 +302,7 @@ desk pbp                 # USB PBP + hdmi1/dp inputs + OS layout
 desk pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
 desk full                # USB full + OS layout
 desk layout              # re-apply full or PBP from the live DualUp geometry
-desk watch               # HHKB leave → mouse away; USB appear → to this host
+desk watch               # HHKB leave → mouse away; USB appear → this host's channel
 desk watch --dry-run
 desk smarthome list      # devices (and entities when that API works)
 desk smarthome status    # light-oriented snapshot
@@ -311,8 +315,9 @@ desk weather status --json
 desk --version
 ```
 
-`watch` never touches DualUp. Use `to mac` / `to linux` (or a panel) for
-mouse + monitor together.
+`watch` never touches the display on keyboard leave. USB appearance runs
+`desk to <this_host>` (mouse + display input). Use `to <host>` (or a panel)
+for mouse + monitor together.
 
 `pbp` / `full` no-op with a message if the dualup adapter is missing.
 After a successful USB toggle, `pbp` assigns the cabling pair (Linux
@@ -399,9 +404,13 @@ Edit [`config.example.json`](config.example.json) →
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
 | `ui.tray.lights` | If true, `bar_strip` may include a lights on/off mark |
 | `ui.tray.slots` | Order + show/hide + flavor. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
-| `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
-| `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
-| `adapters.hosts.*.channel` | Easy-Switch slot for `to mac` / `to linux` |
+| `adapters.hosts.this_host` | This machine's id. Any id in the host map. Default is `mac` on macOS and `linux` on Linux |
+| `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to when the keyboard leaves |
+| `adapters.hosts.<id>.channel` | Mouse channel for that host. `mouse_channel` is the same field. `desk to <id>` uses it |
+| `adapters.hosts.<id>.keyboard_slot` | Opaque keyboard slot stored for the keyboard adapter |
+| `adapters.hosts.<id>.input` | Display input for `desk to <id>`. `adapters.display.inputs.<id>` is the same value |
+| `adapters.hosts.<id>.hint` | Short focus token. `mac` stays `MAC` and `linux` stays `LNX`; other ids use `hint` or the id |
+| `adapters.hosts.order` | Optional order for status. Default is key order. A file that only names `mac` and `linux` still loads those two |
 | `adapters.dualup.inputs.*` | Display input for that host (`adapters.display.inputs` is the same map). PBP uses Mac=`hdmi1`, Linux=`dp` when empty. `desk to` with neither this nor `hosts.<id>.dualup_input` / `hosts.<id>.input` says so and leaves the input unchanged |
 | `adapters.hosts.<id>.ssh` | Optional SSH target for that host (`user@192.0.2.10`). Relay and `pre_switch` use it |
 | `adapters.hosts.<id>.pre_switch` | Optional shell command run on that host before `desk to` changes its display input |
@@ -413,8 +422,51 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.dualup.layout` | Apply OS resolution/rotation after USB (default true) |
 | `adapters.dualup.layout_settle_s` | Seconds to wait after USB before OS layout. Default 0.5 |
 | `adapters.dualup.peer` | Optional SSH host; runs `dualup-layout` there (no USB) |
-| `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance as `to <this_host>` |
+| `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance as `to <this_host>`, on that host's own channel |
 | `poll_interval_s` / `absent_polls_required` | Watcher debounce (defaults 0.5s × 4 ≈ 2s) |
+
+### More than two hosts
+
+Host ids come from `adapters.hosts`. `mac` and `linux` stay valid, including
+aliases (`macos`, `omarchy`). A third id is just another entry: its channel,
+display input, `ssh`, and `pre_switch` are what `desk to <id>` and the
+display relay use. `this_host` on that machine is the same id. USB appearance
+runs `desk to` that id, so the mouse moves to **this** host's channel.
+
+A file that only names `mac` and `linux` (or only sets `target_channel`)
+keeps today's channels. Naming any other id does not invent a `linux` entry
+beside it. Two hosts on the same mouse channel is a config error.
+Tray slots stay weather, kettle, and the display mode; shells paint those.
+Status lists every host (`host_list`) and the focus token.
+
+```json
+{
+  "adapters": {
+    "hosts": {
+      "this_host": "tower",
+      "follow_channel": 1,
+      "order": ["mac", "linux", "tower"],
+      "mac": { "channel": 1, "input": "hdmi1", "ssh": "user@192.0.2.10" },
+      "linux": { "channel": 2, "input": "dp", "ssh": "user@192.0.2.20" },
+      "tower": {
+        "channel": 3,
+        "keyboard_slot": 3,
+        "input": "hdmi2",
+        "hint": "TWR",
+        "ssh": "user@192.0.2.30",
+        "pre_switch": "wake-outputs"
+      }
+    },
+    "display": {
+      "relay_hosts": ["mac", "linux", "tower"],
+      "inputs": { "mac": "hdmi1", "linux": "dp", "tower": "hdmi2" }
+    }
+  }
+}
+```
+
+`192.0.2.0/24` is documentation space. `mouse_channel` is accepted in place
+of `channel`. A per-host `peer` string is the SSH target when `ssh` is empty.
 
 ### Display input relay
 

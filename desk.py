@@ -5,7 +5,8 @@ Core orchestrates. Shells only paint. Hardware plugs in as adapters:
 
     mouse      — host hop (`mouse.host_switch`; reference: mxswitch)
     keyboard   — presence / follow (`keyboard.presence`; reference: hhkb)
-    hosts      — which machine is Mac vs Linux, channels, follow target
+    hosts      — configured host ids, channels, follow target
+                 (`mac` / `linux` stay the defaults; any other id is allowed)
     display    — input + PBP/full + OS layout (reference: lgdualup)
                  `adapters.dualup` is a legacy alias of `display`
     smarthome  — list devices + light on/off (reference: alexa)
@@ -22,6 +23,7 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
     desk status --json
     desk to mac
     desk to linux
+    desk to <host>         # any id configured under adapters.hosts
     desk switch 2          # mouse only, Easy-Switch channel
     desk switch mac        # same as: to mac
     desk pbp <mode>
@@ -82,6 +84,18 @@ HOST_ALIASES = {
     "lnx": "linux",
     "omarchy": "linux",
 }
+# Keys on adapters.hosts that are desk settings, not host entries.
+HOST_MAP_META = {
+    "this_host",
+    "follow_channel",
+    "follow_hhkb_usb",
+    "peer",
+    "watch",
+    "order",
+    "target_channel",
+}
+LEGACY_HOST_IDS = ("mac", "linux")
+HOST_ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]*")
 HINT_FOR_HOST = {"mac": "MAC", "linux": "LNX"}
 CHANNEL_RE = re.compile(r"currently on\s+(\d+)", re.I)
 
@@ -164,10 +178,20 @@ def default_this_host() -> str:
 
 
 def normalize_host(name: str) -> str:
+    """Canonical host id.
+
+    `mac` and `linux` keep their aliases (`macos`, `omarchy`, …). Any other
+    id is kept, lowercased. Empty names and names with spaces are rejected.
+    Whether the id is configured is checked later, against the host map.
+    """
     key = str(name).strip().lower()
-    if key not in HOST_ALIASES:
-        raise SystemExit(f"unknown host: {name} (try mac or linux)")
-    return HOST_ALIASES[key]
+    if not key:
+        raise SystemExit(f"unknown host: {name}")
+    if key in HOST_ALIASES:
+        return HOST_ALIASES[key]
+    if HOST_ID_RE.fullmatch(key):
+        return key
+    raise SystemExit(f"unknown host: {name}")
 
 
 def as_int(value: object, default: int) -> int:
@@ -225,6 +249,11 @@ def load_config() -> dict:
     user_hosts = user.get("hosts") if isinstance(user.get("hosts"), dict) else {}
     merged_hosts = {**user_hosts, **adapter_host_overrides(user)}
     cfg["hosts"] = resolve_hosts(cfg, merged_hosts)
+    if cfg["this_host"] not in cfg["hosts"]:
+        known = ", ".join(cfg["hosts"]) or "none"
+        raise SystemExit(
+            f"this_host {cfg['this_host']} is not configured in adapters.hosts ({known})"
+        )
     if isinstance(user.get("adapters"), dict):
         cfg["adapters"] = user["adapters"]
     return cfg
@@ -702,57 +731,213 @@ def adapter_host_overrides(user: dict) -> dict:
 
 
 def _host_entry(raw: object) -> dict:
+    """One host record. `channel` and `mouse_channel` are the same slot."""
+    if isinstance(raw, bool):
+        return {}
     if isinstance(raw, int):
-        return {"channel": raw}
-    if isinstance(raw, dict):
-        out = dict(raw)
-        if "channel" in out:
-            out["channel"] = as_int(out["channel"], 0)
-        return out
-    return {}
+        return {"channel": raw, "mouse_channel": raw}
+    if isinstance(raw, str) and str(raw).strip().lstrip("-").isdigit():
+        channel = int(str(raw).strip())
+        return {"channel": channel, "mouse_channel": channel}
+    if not isinstance(raw, dict):
+        return {}
+    out = dict(raw)
+    if out.get("channel") not in (None, ""):
+        out["channel"] = as_int(out["channel"], 0)
+    elif out.get("mouse_channel") not in (None, ""):
+        out["channel"] = as_int(out["mouse_channel"], 0)
+    if "channel" in out:
+        out["mouse_channel"] = out["channel"]
+    if out.get("keyboard_slot") not in (None, ""):
+        out["keyboard_slot"] = as_int(out["keyboard_slot"], 0)
+    for key in ("input", "upstream", "ssh", "pre_switch", "peer", "hint", "dualup_input"):
+        if out.get(key) is not None:
+            out[key] = str(out[key]).strip()
+    if not str(out.get("dualup_input") or "").strip() and str(out.get("input") or "").strip():
+        out["dualup_input"] = str(out["input"]).strip()
+    return out
 
 
-def resolve_hosts(cfg: dict, user_hosts: dict | None = None) -> dict:
-    """Merge configured host map with the documented Mac=1 / Linux=2 pairing.
-
-    `to mac` / `to linux` read hosts.*.channel. `watch` still uses
-    target_channel. If the user never named the other host, inherit
-    target_channel so a legacy one-field config keeps working.
-    """
-    this_host = normalize_host(cfg.get("this_host") or default_this_host())
-    other = "mac" if this_host == "linux" else "linux"
-    merged = {
-        "mac": {"channel": 1},
-        "linux": {"channel": 2},
-    }
-    named: set[str] = set()
-    if user_hosts is None:
-        supplied = cfg.get("hosts") if isinstance(cfg.get("hosts"), dict) else {}
+def _ordered_host_ids(ids: list[str], order_raw: object) -> list[str]:
+    """Apply optional `order`. Ids not listed keep their relative order at the end."""
+    if order_raw is None:
+        return list(ids)
+    if isinstance(order_raw, str):
+        requested = [part.strip() for part in order_raw.split(",")]
+    elif isinstance(order_raw, list):
+        requested = [str(part).strip() for part in order_raw]
     else:
-        supplied = user_hosts if isinstance(user_hosts, dict) else {}
-    for name, raw in supplied.items():
+        return list(ids)
+    known = set(ids)
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in requested:
+        if not name:
+            continue
         try:
             key = normalize_host(name)
         except SystemExit:
             continue
+        if key not in known or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    for key in ids:
+        if key not in seen:
+            out.append(key)
+    return out
+
+
+def _reject_duplicate_channels(hosts: dict) -> None:
+    seen: dict[int, str] = {}
+    for name, spec in hosts.items():
+        channel = _as_dict(spec).get("channel")
+        if not channel:
+            continue
+        channel_i = int(channel)
+        prev = seen.get(channel_i)
+        if prev is not None:
+            raise SystemExit(f"hosts {prev} and {name} both use mouse channel {channel_i}")
+        seen[channel_i] = name
+
+
+def resolve_hosts(cfg: dict, user_hosts: dict | None = None) -> dict:
+    """Merge the configured host map.
+
+    Host ids are whatever `adapters.hosts` names. `mac` and `linux` stay the
+    defaults, with their aliases, when the file is still that pair (or empty).
+    A map that names any other id does not invent `linux` beside it.
+
+    `channel` and `mouse_channel` are one slot. `to <id>` reads it. `watch`
+    on USB appearance uses this host's slot; leave still uses `target_channel`.
+    If a legacy two-host file never named the other host, that host inherits
+    `target_channel`.
+    """
+    this_host = normalize_host(cfg.get("this_host") or default_this_host())
+    if user_hosts is None:
+        supplied = cfg.get("hosts") if isinstance(cfg.get("hosts"), dict) else {}
+    else:
+        supplied = user_hosts if isinstance(user_hosts, dict) else {}
+
+    order_raw = supplied.get("order")
+    named: set[str] = set()
+    entries: dict[str, dict] = {}
+    order_keys: list[str] = []
+    for name, raw in supplied.items():
+        if str(name) in HOST_MAP_META:
+            continue
+        try:
+            key = normalize_host(str(name))
+        except SystemExit:
+            continue
         entry = _host_entry(raw)
-        merged[key] = {**merged.get(key, {}), **entry}
+        if key not in entries:
+            order_keys.append(key)
+        entries[key] = {**entries.get(key, {}), **entry}
         if "channel" in entry:
             named.add(key)
-    if other not in named and cfg.get("target_channel") is not None:
-        merged[other] = {
-            **merged[other],
-            "channel": as_int(cfg["target_channel"], merged[other]["channel"]),
+
+    legacy = set(order_keys).issubset(set(LEGACY_HOST_IDS))
+    if legacy:
+        merged = {
+            "mac": {"channel": 1, "mouse_channel": 1},
+            "linux": {"channel": 2, "mouse_channel": 2},
         }
+        for key in order_keys:
+            merged[key] = {**merged.get(key, {}), **entries[key]}
+        if this_host in LEGACY_HOST_IDS:
+            other = "mac" if this_host == "linux" else "linux"
+            if other not in named and cfg.get("target_channel") is not None:
+                channel = as_int(cfg["target_channel"], merged[other]["channel"])
+                merged[other] = {**merged[other], "channel": channel, "mouse_channel": channel}
+        merged = {key: merged[key] for key in _ordered_host_ids(list(merged), order_raw)}
+    else:
+        ordered = _ordered_host_ids(order_keys, order_raw)
+        merged = {key: entries[key] for key in ordered}
+    _reject_duplicate_channels(merged)
     return merged
 
 
+def host_spec(cfg: dict, host: str) -> tuple[str, dict]:
+    """Return `(id, entry)` for a configured host, or exit."""
+    host_id = normalize_host(host)
+    hosts = cfg.get("hosts") if isinstance(cfg.get("hosts"), dict) else {}
+    spec = hosts.get(host_id)
+    if not isinstance(spec, dict):
+        known = ", ".join(name for name, item in hosts.items() if isinstance(item, dict)) or "none"
+        raise SystemExit(f"unknown host: {host_id} (configured: {known})")
+    return host_id, spec
+
+
 def host_channel(cfg: dict, host: str) -> int:
-    host = normalize_host(host)
-    channel = (cfg.get("hosts") or {}).get(host, {}).get("channel")
+    host_id, spec = host_spec(cfg, host)
+    channel = spec.get("channel")
     if not channel:
-        raise SystemExit(f"no Easy-Switch channel configured for host {host}")
+        channel = spec.get("mouse_channel")
+    if not channel:
+        raise SystemExit(f"no Easy-Switch channel configured for host {host_id}")
     return int(channel)
+
+
+def host_hint(cfg: dict, host: str | None) -> str:
+    """Strip token. `mac` / `linux` stay `MAC` / `LNX`. Others use `hint` or the id."""
+    if not host:
+        return "?"
+    try:
+        host_id = normalize_host(str(host))
+    except SystemExit:
+        host_id = str(host).strip()
+    if host_id in HINT_FOR_HOST:
+        return HINT_FOR_HOST[host_id]
+    spec = _as_dict((cfg.get("hosts") or {}).get(host_id))
+    custom = str(spec.get("hint") or "").strip()
+    return custom or host_id
+
+
+def public_host_list(cfg: dict) -> list[dict]:
+    """Ordered host records for status. Additive; the host map itself stays a map."""
+    out: list[dict] = []
+    for name, raw in (cfg.get("hosts") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        spec = raw
+        item: dict = {
+            "id": name,
+            "channel": spec.get("channel"),
+            "hint": host_hint(cfg, name),
+        }
+        if spec.get("mouse_channel") not in (None, ""):
+            item["mouse_channel"] = spec.get("mouse_channel")
+        if spec.get("keyboard_slot") not in (None, ""):
+            item["keyboard_slot"] = spec.get("keyboard_slot")
+        display_input = str(spec.get("dualup_input") or spec.get("input") or "").strip()
+        if display_input:
+            item["input"] = display_input
+        for key in ("upstream", "ssh", "pre_switch", "peer"):
+            text = str(spec.get(key) or "").strip()
+            if text:
+                item[key] = text
+        out.append(item)
+    return out
+
+
+def format_host_summary(state: dict) -> str:
+    """One status line: this host, follow channel, then every host's mouse channel."""
+    hosts = state.get("hosts") if isinstance(state.get("hosts"), dict) else {}
+    this = state.get("this_host")
+    follow = state.get("target_channel")
+    if follow is None:
+        follow = hosts.get("follow_channel")
+    parts = [f"this_host={this}", f"follow_channel={follow}"]
+    names = [name for name in LEGACY_HOST_IDS if isinstance(hosts.get(name), dict)]
+    names.extend(
+        name
+        for name, spec in hosts.items()
+        if name not in HOST_MAP_META and name not in LEGACY_HOST_IDS and isinstance(spec, dict)
+    )
+    for name in names:
+        parts.append(f"{name}={_as_dict(hosts.get(name)).get('channel', '?')}")
+    return "  ".join(parts)
 
 
 def host_for_channel(cfg: dict, channel: int | None) -> str | None:
@@ -836,9 +1021,9 @@ def resolve_target_hint(
     ):
         host = host_for_channel(cfg, channel)
         if host:
-            return HINT_FOR_HOST.get(host, "?"), source
+            return host_hint(cfg, host), source
     if hhkb_present:
-        return HINT_FOR_HOST.get(cfg.get("this_host"), "?"), "hhkb"
+        return host_hint(cfg, str(cfg.get("this_host") or "")), "hhkb"
     return "?", "unknown"
 
 
@@ -1738,9 +1923,14 @@ def _host_id(host: str) -> str:
 
 
 def host_text(cfg: dict, host: str, key: str) -> str:
-    """String field on a host entry (`ssh`, `pre_switch`, …). Missing is empty."""
+    """String field on a host entry (`ssh`, `pre_switch`, …). Missing is empty.
+
+    `ssh` falls back to a per-host `peer` string so either name is the relay target.
+    """
     spec = _as_dict((cfg.get("hosts") or {}).get(_host_id(host)))
     value = spec.get(key)
+    if key == "ssh" and not (isinstance(value, str) and value.strip()):
+        value = spec.get("peer")
     if isinstance(value, str):
         return value.strip()
     return ""
@@ -1970,7 +2160,7 @@ def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
 
 
 def cmd_to(cfg: dict, host: str, *, mouse_only: bool = False) -> int:
-    dest_host = normalize_host(host)
+    dest_host, _spec = host_spec(cfg, host)
     channel = host_channel(cfg, dest_host)
     print(f"desk → {dest_host} (MX channel {channel})")
     rc = switch_mouse(cfg, channel)
@@ -2131,11 +2321,22 @@ def detect_dualup_mode(cfg: dict | None = None) -> str:
 
 
 def dualup_inputs_map(cfg: dict) -> dict:
+    """Display inputs. `mac` / `linux` keep their defaults so old keys stay.
+
+    Any other host is included only when an input is configured.
+    """
     hosts = cfg.get("hosts") or {}
     out = {}
     for host, default in PBP_INPUT_DEFAULTS.items():
         spec = _as_dict(hosts.get(host))
-        out[host] = str(spec.get("dualup_input") or "").strip() or default
+        configured = str(spec.get("dualup_input") or spec.get("input") or "").strip()
+        out[host] = configured or default
+    for host, spec in hosts.items():
+        if host in out:
+            continue
+        name = str(_as_dict(spec).get("dualup_input") or _as_dict(spec).get("input") or "").strip()
+        if name:
+            out[host] = name
     return out
 
 
@@ -2240,10 +2441,13 @@ def peek_peer_status(cfg: dict) -> dict | None:
 
 
 def format_bar_strip(state: dict) -> dict:
-    """Quiet strip model: focus + optional display mark. Shells only paint."""
-    hint = str(state.get("target_hint") or "?")
-    if hint not in HINT_FOR_HOST.values() and hint != "?":
-        hint = "?"
+    """Quiet strip model: focus + optional display mark. Shells only paint.
+
+    `MAC` / `LNX` stay those tokens. Any other focused host keeps its hint
+    (or its id) so a third host is visible. Shells that only know the two
+    tokens still treat anything else as unknown.
+    """
+    hint = str(state.get("target_hint") or "?").strip() or "?"
     strip: dict[str, str] = {"focus": hint}
     mode = str(state.get("dualup_mode") or "unknown").lower()
     if mode in ("full", "pbp"):
@@ -2435,9 +2639,9 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
 
 
 def format_strip_title(strip: dict) -> str:
-    """Painted default strip: MAC/LNX plus PBP/FULL when a display mode is known."""
-    focus = str(strip.get("focus") or "?")
-    if focus not in HINT_FOR_HOST.values():
+    """Painted default strip: focus token plus PBP/FULL when a display mode is known."""
+    focus = str(strip.get("focus") or "?").strip()
+    if focus == "?":
         focus = ""
     display = str(strip.get("display") or "").lower()
     mark = "PBP" if display == "pbp" else ("FULL" if display == "full" else "")
@@ -2447,9 +2651,7 @@ def format_strip_title(strip: dict) -> str:
 
 def format_bar_label(state: dict) -> str:
     """Compact shared glyph for Omarchy + DeskSwitchBar: LNX  kbU  mx2  PBP."""
-    hint = str(state.get("target_hint") or "?")
-    if hint not in HINT_FOR_HOST.values() and hint != "?":
-        hint = "?"
+    hint = str(state.get("target_hint") or "?").strip() or "?"
     if state.get("hhkb_usb"):
         kb = "kbU"
     elif state.get("hhkb_bluetooth"):
@@ -2467,7 +2669,7 @@ def format_bar_label(state: dict) -> str:
         mx = f"mx{channel}~"
     mode = str(state.get("dualup_mode") or "unknown").lower()
     parts: list[str] = []
-    if hint in HINT_FOR_HOST.values():
+    if hint != "?":
         parts.append(hint)
     parts.extend([kb, mx])
     if mode == "pbp":
@@ -2494,9 +2696,16 @@ def format_bar_tooltip(state: dict) -> str:
         mouse += " missing"
     dual = str(state.get("dualup_mode") or "unknown")
     inputs = state.get("dualup_inputs") or {}
+    input_bits = [
+        f"mac={inputs.get('mac', 'hdmi1')}",
+        f"linux={inputs.get('linux', 'dp')}",
+    ]
+    input_bits.extend(
+        f"{name}={value}" for name, value in inputs.items() if name not in ("mac", "linux")
+    )
     return (
         f"focus {state.get('target_hint', '?')} · HHKB {hhkb} · "
-        f"mouse {mouse} · DualUp {dual} mac={inputs.get('mac', 'hdmi1')} linux={inputs.get('linux', 'dp')}"
+        f"mouse {mouse} · DualUp {dual} {' '.join(input_bits)}"
     )
 
 
@@ -2591,8 +2800,7 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
         "hosts": {
             "this_host": cfg["this_host"],
             "follow_channel": cfg["target_channel"],
-            "mac": hosts.get("mac") or {},
-            "linux": hosts.get("linux") or {},
+            **{name: spec for name, spec in hosts.items() if isinstance(spec, dict)},
         },
         "display": dict(display),
         "dualup": dict(display),
@@ -2702,6 +2910,7 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "follow_hhkb_usb": bool(cfg.get("follow_hhkb_usb", True)),
         "target_channel": cfg["target_channel"],
         "hosts": cfg["hosts"],
+        "host_list": public_host_list(cfg),
         "target_hint": hint,
         "target_hint_source": hint_source,
         "mxswitch": str(mouse_path or cfg.get("mxswitch") or "mxswitch"),
@@ -2739,7 +2948,6 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
         return 0
     adapters = state.get("adapters") or {}
     mouse = adapters.get("mouse") or {}
-    hosts = adapters.get("hosts") or {}
     dual = adapters.get("dualup") or {}
     print(f"os            : {state['os']}")
     print(f"version       : {state['version']}")
@@ -2758,20 +2966,22 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
     if not mouse.get("enabled", True):
         mouse_state = "disabled"
     print(f"  mouse       : {mouse_state}  backend={mouse.get('backend', 'mxswitch')}  {mouse.get('path') or '-'}")
-    print(
-        f"  hosts       : this_host={hosts.get('this_host', state['this_host'])}  "
-        f"follow_channel={hosts.get('follow_channel', state['target_channel'])}  "
-        f"mac={_as_dict(hosts.get('mac')).get('channel', '?')}  "
-        f"linux={_as_dict(hosts.get('linux')).get('channel', '?')}"
-    )
+    print(f"  hosts       : {format_host_summary(state)}")
     dual_state = "available" if dual.get("available") else "missing"
     if not dual.get("enabled", True):
         dual_state = "disabled"
+    inputs = state.get("dualup_inputs") or {}
+    input_bits = [
+        f"mac={inputs.get('mac', 'hdmi1')}",
+        f"linux={inputs.get('linux', 'dp')}",
+    ]
+    input_bits.extend(
+        f"{name}={value}" for name, value in inputs.items() if name not in ("mac", "linux")
+    )
     print(
         f"  dualup      : {dual_state}  backend={dual.get('backend', 'lgdualup')}  "
         f"mode={state.get('dualup_mode', 'unknown')}  "
-        f"mac={state.get('dualup_inputs', {}).get('mac', 'hdmi1')}  "
-        f"linux={state.get('dualup_inputs', {}).get('linux', 'dp')}  "
+        f"{'  '.join(input_bits)}  "
         f"{dual.get('path') or '-'}"
     )
     home = adapters.get("smarthome") or {}
@@ -2890,11 +3100,15 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
         # Fn+Ctrl+0: USB rising edge pulls the whole desk to the machine with the cable.
         last_usb, follow_here = watch_usb_rising_edge(last_usb, usb_now, follow_usb)
         if follow_here:
-            here = cfg["this_host"]
+            here = str(cfg["this_host"])
+            here_channel = host_channel(cfg, here)
             if dry_run:
-                log(f"dry-run: HHKB USB appeared — would desk to {here}")
+                log(
+                    f"dry-run: HHKB USB appeared — would desk to {here} "
+                    f"(channel {here_channel})"
+                )
             else:
-                log(f"HHKB USB appeared — desk → {here}")
+                log(f"HHKB USB appeared — desk → {here} (channel {here_channel})")
                 rc = cmd_to(cfg, here)
                 if rc != 0:
                     log(f"USB follow to {here} failed (rc={rc})")
@@ -3067,7 +3281,31 @@ def cmd_weather(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
         return 1
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _lower_host_arg(value: str) -> str:
+    """Argparse type so `LNX` and `Tower` match configured ids."""
+    return str(value).strip().lower()
+
+
+def configured_host_choices(cfg: dict | None) -> list[str] | None:
+    """Argparse choices: configured ids, plus mac/linux aliases that resolve to one."""
+    if not isinstance(cfg, dict):
+        return None
+    hosts = cfg.get("hosts")
+    if not isinstance(hosts, dict) or not hosts:
+        return None
+    ids = [name for name, spec in hosts.items() if isinstance(spec, dict)]
+    if not ids:
+        return None
+    present = set(ids)
+    aliases = [
+        alias
+        for alias, canon in HOST_ALIASES.items()
+        if canon in present and alias not in present
+    ]
+    return ids + aliases
+
+
+def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="desk",
         description=__doc__,
@@ -3077,15 +3315,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
     status = sub.add_parser("status", help="show HHKB / mouse / DualUp state")
     status.add_argument("--json", action="store_true", help="machine-readable status")
-    status.add_argument("--hint", action="store_true", help="print MAC / LNX / ? only")
+    status.add_argument("--hint", action="store_true", help="print the focus token only")
     status.add_argument("--local", action="store_true", help="skip SSH peer peek")
-    sub.add_parser("hint", help="print MAC / LNX / ? (bar widget)")
+    sub.add_parser("hint", help="print the focus token (MAC, LNX, or that host's hint)")
     watch = sub.add_parser("watch", help="follow HHKB leave (mouse away) and USB appear (desk here)")
     watch.add_argument("--dry-run", action="store_true")
     sw = sub.add_parser("switch", help="push the mouse, or switch a whole desk")
-    sw.add_argument("target", nargs="?", help="Easy-Switch 1|2|3, or host mac|linux")
+    sw.add_argument("target", nargs="?", help="Easy-Switch 1|2|3, or a configured host id")
     to = sub.add_parser("to", help="switch mouse + optional display input to a host")
-    to.add_argument("host", help="mac or linux")
+    to.add_argument(
+        "host",
+        type=_lower_host_arg,
+        choices=configured_host_choices(cfg),
+        help="configured host id",
+    )
     to.add_argument("--mouse-only", action="store_true", help="do not change the display input")
     pbp = sub.add_parser("pbp", help="DualUp PBP: USB toggle, input pair, tilted OS layout")
     pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
@@ -3120,9 +3363,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
     cfg = load_config()
+    parser = build_parser(cfg)
+    args = parser.parse_args(argv)
     if args.cmd == "status":
         return cmd_status(cfg, as_json=args.json, hint_only=args.hint, local_only=args.local)
     if args.cmd == "hint":
