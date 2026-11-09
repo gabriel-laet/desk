@@ -65,7 +65,7 @@ Fn+Ctrl+2 on the HHKB          Fn+Ctrl+0 (HHKB → USB)
 desk to linux                 (or the Omarchy / macOS panel)
         │
         ├─ mouse adapter  → Linux channel
-        └─ dualup adapter → DualUp input (if configured + USB is on this host)
+        └─ display input  → local adapter, else SSH relay_hosts on "not found"
 
 desk pbp                      (or DualUp PBP in the menu bar / Omarchy panel)
         │
@@ -289,7 +289,7 @@ desk status              # HHKB / mouse / adapters (text)
 desk status --json
 desk status --json --local  # skip SSH peer peek
 desk status --hint       # MAC / LNX / ?  (same as: desk hint)
-desk to mac              # mouse + DualUp input if configured
+desk to mac              # mouse + display input if configured (relayed if needed)
 desk to linux
 desk to linux --mouse-only
 desk switch mac          # same as `to mac`
@@ -402,7 +402,11 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.hosts.this_host` | Machine you are on (`mac` / `linux`) |
 | `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to |
 | `adapters.hosts.*.channel` | Easy-Switch slot for `to mac` / `to linux` |
-| `adapters.dualup.inputs.*` | DualUp input for that host. PBP uses Mac=`hdmi1`, Linux=`dp` when empty |
+| `adapters.dualup.inputs.*` | Display input for that host (`adapters.display.inputs` is the same map). PBP uses Mac=`hdmi1`, Linux=`dp` when empty. `desk to` with neither this nor `hosts.<id>.dualup_input` / `hosts.<id>.input` says so and leaves the input unchanged |
+| `adapters.hosts.<id>.ssh` | Optional SSH target for that host (`user@192.0.2.10`). Relay and `pre_switch` use it |
+| `adapters.hosts.<id>.pre_switch` | Optional shell command run on that host before `desk to` changes its display input |
+| `adapters.display.relay_hosts` | Ordered host ids. When the local display adapter reports the device absent, try these peers and stop at the first success. `adapters.dualup.relay_hosts` is the same list |
+| `adapters.display.relay_path` | Optional remote executable. Default is `$HOME/.local/lib/desk/<adapter id>` |
 | `adapters.dualup.switch_pbp` | If true, `to mac\|linux` also runs the PBP sequence |
 | `adapters.dualup.pbp_mode` | Mode for `desk pbp` and for `to` when `switch_pbp` is true |
 | `adapters.dualup.display_id` | macOS displayplacer UUID or Hyprland connector. Empty = detect DualUp |
@@ -411,6 +415,57 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.dualup.peer` | Optional SSH host; runs `dualup-layout` there (no USB) |
 | `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance as `to <this_host>` |
 | `poll_interval_s` / `absent_polls_required` | Watcher debounce (defaults 0.5s × 4 ≈ 2s) |
+
+### Display input relay
+
+The display adapter can only run on the host that currently holds the
+monitor's control device (for the reference adapter, the USB upstream).
+`desk to <host>` still switches the mouse locally, then:
+
+1. If that host has `pre_switch`, run it before the input change. This
+   machine runs the command in a shell. Any other host runs it over SSH
+   so its outputs can wake and the monitor has a signal. A failed hook
+   is printed and `desk to` exits non-zero.
+2. Run the display adapter locally (`input <name>`).
+3. If that exits non-zero and the output says the device is absent
+   (`not found`, or `No … found`), try each `relay_hosts` id in order.
+   Stop at the first success. Other adapter errors stay on this host.
+
+The peer command is:
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=3 <ssh target> \
+  "$HOME/.local/lib/desk/<adapter id> input <name>"
+```
+
+`<adapter id>` is whichever display adapter is bound, so this is not
+specific to one monitor. On success desk prints `display input <name> via <host>`.
+
+```json
+{
+  "adapters": {
+    "hosts": {
+      "this_host": "mac",
+      "mac": { "channel": 1, "ssh": "user@192.0.2.10" },
+      "linux": {
+        "channel": 2,
+        "ssh": "user@192.0.2.20",
+        "pre_switch": "wake-outputs"
+      }
+    },
+    "display": {
+      "backend": "lgdualup",
+      "relay_hosts": ["linux", "mac"],
+      "inputs": { "mac": "hdmi1", "linux": "dp" }
+    }
+  }
+}
+```
+
+`192.0.2.0/24` is documentation space. Use your own SSH targets. Omit
+`relay_hosts` when the control device stays on the machine that runs
+`desk to`. A target with no input configured prints that and does not
+guess one.
 
 Inputs the helper accepts: `usbc` / `usb-c` / `dp3`, `dp` / `dp1`, `dp2`,
 `hdmi1`, `hdmi2`, `auto`. List devices: `lgdualup --list` (or `--info`).
@@ -541,11 +596,14 @@ over SSH (`status --json --local` skips that).
 **Mouse hidraw denied (Linux).** udev rule `42-logitech-hidpp.rules`, user
 in `input`, then a new login.
 
-**DualUp no-op / not found.** The USB “LG Monitor Controls” cable
-(`043e:9a39`) must be in the **host running the command**. Empty
-`adapters.dualup.inputs` means `to mac|linux` leaves the input alone.
-After PBP / full the host must also get the OS layout. Optional
-`adapters.dualup.peer` SSHes layout-only to the other machine.
+**Display input not found.** The control device is only on the host that
+holds the monitor's USB upstream. `desk to` runs the display adapter
+locally, then each `adapters.display.relay_hosts` entry over SSH, and
+prints which host performed it. A target with no display input configured
+says so and leaves the input unchanged. After PBP / full the host must
+also get the OS layout. Optional `adapters.dualup.peer` SSHes layout-only
+to the other machine. `pre_switch` on the target host runs first when you
+need that machine's outputs awake before the input changes.
 
 **Panel / menu bar shows `?` or “desk not found”.** CLI not installed, or
 GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in `~/.local/bin`
