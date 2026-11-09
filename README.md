@@ -11,7 +11,7 @@ to a configured host, optionally follow an
 
 ```
 core     = config · status · watch · to/full/pbp/layout · adapter registry · slots
-adapters = mouse / keyboard / display / smarthome / kettle / weather / wallpaper
+adapters = mouse / keyboard / display / smarthome / kettle / weather / wallpaper / hardware
 shells   = macOS DeskSwitchBar + Omarchy tray — they paint status and call `desk`
 ```
 
@@ -38,6 +38,7 @@ The host where the keyboard arrives runs `desk to` itself.
 | **kettle** | kettle | Fellow-style kettle on the LAN (heat / off / status) |
 | **weather** | weather | Open-Meteo ambient ° + altitude |
 | **wallpaper** | wallpaper | Per-output image from aspect or exact resolution. Off unless enabled |
+| **hardware** | hardware | LAN JSON per-host CPU, memory, GPU, and optional AI limits. Off unless enabled |
 
 Pin with `adapters.<role>.backend` / `path`, or drop a binary +
 `*.manifest.json` in `~/.local/lib/desk/` (`$DESK_LIB`). Third parties
@@ -166,6 +167,7 @@ Put `~/.local/bin` on `PATH`. `git pull && make install` from the clone.
 ~/.local/lib/desk/kettle                 # Fellow-style LAN kettle
 ~/.local/lib/desk/weather                # Open-Meteo ambient ° + altitude
 ~/.local/lib/desk/wallpaper              # per-output wallpaper (off unless enabled)
+~/.local/lib/desk/hardware               # LAN hardware metrics (off unless enabled)
 ~/.local/lib/desk/*.manifest.json        # api_version: 1
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
@@ -363,6 +365,7 @@ desk kettle status --json
 desk kettle heat 93
 desk kettle off
 desk weather status --json
+desk hardware status --json   # no-op unless adapters.hardware.enabled
 desk wallpaper apply     # no-op unless adapters.wallpaper.enabled
 desk wallpaper status --json
 desk --version
@@ -439,6 +442,16 @@ Edit [`config.example.json`](config.example.json) →
       "exact_prefix": "desk",
       "primary_output": "",
       "outputs": {}
+    },
+    "hardware": {
+      "enabled": false,
+      "backend": "hardware",
+      "url": "http://metrics.local/api/hardware",
+      "poll_seconds": 5,
+      "timeout_seconds": 1.5,
+      "host_map": {},
+      "extra_hosts": [],
+      "show": ["cpu_temp_c", "cpu_pct", "mem_pct", "gpu_pct", "gpu_temp_c"]
     }
   },
   "ui": {
@@ -447,7 +460,8 @@ Edit [`config.example.json`](config.example.json) →
       "slots": [
         { "id": "weather", "enabled": true, "kind": "chip", "show_altitude": true },
         { "id": "kettle", "enabled": true, "kind": "face" },
-        { "id": "dualup", "enabled": true, "kind": "mode" }
+        { "id": "dualup", "enabled": true, "kind": "mode" },
+        { "id": "hardware", "enabled": false, "kind": "table" }
       ]
     },
     "hud": { "show_faces": true, "density": "regular" }
@@ -464,6 +478,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.kettle` | Fellow-style LAN kettle. Set `host` (DHCP moves it). See [`adapters/kettle/`](adapters/kettle/) |
 | `adapters.weather` | Open-Meteo ambient. Set `latitude` / `longitude` / `timezone` / `label`. See [`adapters/weather/`](adapters/weather/) |
 | `adapters.wallpaper` | Optional per-output images. Off unless `enabled` is true. See [Wallpaper](#wallpaper) |
+| `adapters.hardware` | Optional LAN metrics. Off unless `enabled` is true. See [Hardware](#hardware) |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
 | `ui.tray.lights` | If true, `bar_strip` may include a lights on/off mark |
 | `ui.tray.slots` | Order + show/hide + flavor. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
@@ -694,7 +709,7 @@ Display adapters list `display.input` / `display.pbp` / `display.full` /
 adapters list `smarthome.list` / `smarthome.status` / `light.on` /
 `light.off`. Kettle adapters list `appliance.status` / `appliance.heat` /
 `appliance.off`. Weather adapters list `weather.status`. Wallpaper
-adapters list `wallpaper.apply`.
+adapters list `wallpaper.apply`. Hardware adapters list `hardware.status`.
 
 ## Named layouts
 
@@ -849,6 +864,85 @@ kettle → DualUp; `ui.tray.slots` reorders and hides.
 
 Prefer `desk kettle …`. Optional `kettle` on PATH is a shim to
 `~/.local/lib/desk/kettle`.
+
+## Hardware
+
+Optional. Nothing is fetched unless `adapters.hardware.enabled` is true
+and `url` is an `http://` or `https://` URL. Core does not bake in an
+address. The reference adapter reads one JSON document and ignores
+unknown keys.
+
+```bash
+desk hardware status --json
+desk status --json   # adapters.hardware + a hardware slot when the tray slot is on
+```
+
+```json
+{
+  "adapters": {
+    "hardware": {
+      "enabled": true,
+      "url": "http://metrics.local/api/hardware",
+      "poll_seconds": 5,
+      "timeout_seconds": 1.5,
+      "stale_seconds": 30,
+      "host_map": { "endpoint-id": "linux" },
+      "extra_hosts": ["nas"],
+      "show": ["cpu_temp_c", "cpu_pct", "mem_pct", "gpu_pct", "gpu_temp_c"]
+    }
+  },
+  "ui": {
+    "tray": {
+      "slots": [
+        { "id": "hardware", "enabled": true, "kind": "table" }
+      ]
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | false | Fetch and publish `adapters.hardware` |
+| `url` | empty | LAN endpoint. Example: `http://metrics.local/api/hardware`. No auth |
+| `poll_seconds` | 5 | How long a sample stays fresh before a background refresh |
+| `timeout_seconds` | 1.5 | Socket timeout for that refresh |
+| `stale_seconds` | 30 | Hosts whose `last_seen` is older than this are marked stale |
+| `host_map` | `{}` | Endpoint host id → desk host id. Unlisted ids stay as they are |
+| `extra_hosts` | `[]` | Ids to show that are not desk hosts, such as a NAS |
+| `show` | cpu temp, cpu %, mem %, gpu %, gpu temp | Metric keys to put in the table. Nulls are left out, not drawn as 0 |
+| `ui.tray.slots` `hardware` | off | The bar token and the click-panel table exist only when this slot is enabled |
+
+The endpoint looks like `{"hosts": {"linux": {"online": true, "last_seen": "...", "cpu_pct": 1, "mem_pct": 9.9, "cpu_temp_c": 38.3, "gpu_pct": null}}, "updated_at": "..."}`. A host may also carry `ai`:
+
+```json
+{
+  "updated_at": "2026-11-09T22:56:12Z",
+  "tools": [
+    {
+      "id": "tool-a",
+      "name": "Tool A",
+      "plan": "pro",
+      "limit_used_pct": 80,
+      "today_tokens": 1500,
+      "today_cost_usd": 0.4,
+      "limits": [{ "label": "weekly", "used_pct": 71, "resets_at": "2026-11-15T00:00:00Z" }]
+    }
+  ],
+  "llama": { "running": true, "model": "local", "tok_s": 40, "slots_busy": 1, "slots_total": 4 }
+}
+```
+
+Any of those fields may be null or missing. Which tools appear is up to the endpoint. Desk does not special-case tool ids.
+
+`desk status` reads the last sample from the desk state directory and, when that sample is older than `poll_seconds`, starts a refresh in the background. It does not wait on the socket. `desk watch` does not fetch hardware at all. A down endpoint keeps the previous sample and marks `reachable` false.
+
+Shells paint the slot only when it is enabled:
+
+- **Menu bar and Omarchy strip.** One compact token for the focused host: its CPU temperature when that metric is present (for example `38°`), plus the highest `limit_used_pct` across that host's tools (for example `38° 80%`). No per-host dump. `bar_strip` stays the focus token and the display mark.
+- **Click panel, both shells.** A table of CPU %, memory %, CPU temp, and GPU % / temp for each desk host and each `extra_hosts` id. A missing metric is an em dash. `offline` follows `online: false`. `stale` follows `last_seen`. Under the table, each host with AI data lists its tools (name, plan, the highest limit and its reset time, today's tokens and cost when those numbers are present) and a llama line (model, tok/s, slots busy/total) when `llama.running` is true.
+
+Detail: [`adapters/hardware/`](adapters/hardware/).
 
 ## Wallpaper
 

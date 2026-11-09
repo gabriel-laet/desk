@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "glaet.desk-switch",
   "name": "desk",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Gabriel Laet",
   "license": "MIT",
-  "description": "desk tray: paint slots from desk status --json (mouse, DualUp, HHKB, kettle, weather).",
+  "description": "desk tray: paint slots from desk status --json (mouse, DualUp, HHKB, kettle, weather, hardware).",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "linux/omarchy/BarWidget.qml"

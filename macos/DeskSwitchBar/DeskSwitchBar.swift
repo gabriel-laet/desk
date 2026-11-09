@@ -26,6 +26,12 @@ struct DeskSwitchBarApp: App {
 struct MenuBarLabel: View {
     @ObservedObject var model: DeskSwitchModel
 
+    /// Slots with a label paint the menu bar. An empty label stays in the
+    /// click panel (a metrics table) without adding a strip token.
+    private var barSlots: [TraySlot] {
+        model.visibleSlots.filter { !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
     var body: some View {
         Group {
             if model.ui.trayDensity == "chips" || model.visibleSlots.isEmpty {
@@ -36,7 +42,7 @@ struct MenuBarLabel: View {
                 Image(
                     nsImage: MenuBarStatusItemRenderer.image(
                         prefix: model.menuPrefix,
-                        slots: model.visibleSlots,
+                        slots: barSlots,
                         compact: model.ui.compact
                     )
                 )
@@ -65,6 +71,7 @@ enum SlotGlyphMap {
         case "display.full": return "rectangle"
         case "light.on": return "lightbulb.fill"
         case "light.off": return "lightbulb"
+        case "cpu": return "cpu"
         default: return glyph.isEmpty ? "circle" : glyph
         }
     }
@@ -360,8 +367,12 @@ struct DeskPanel: View {
             }
         }
         .padding(12)
-        .frame(width: 300)
+        .frame(width: panelWidth)
         .onAppear { model.refresh() }
+    }
+
+    private var panelWidth: CGFloat {
+        model.visibleSlots.contains(where: { WidgetKind.resolve($0) == .table }) ? 360 : 300
     }
 
     @ViewBuilder
@@ -402,6 +413,7 @@ enum WidgetKind: String {
     case toggle
     case mode
     case host
+    case table
 
     /// v1 id→kind map when an older snapshot omits `kind`. Prefer the
     /// published token so a new adapter does not need a shell change.
@@ -411,6 +423,7 @@ enum WidgetKind: String {
         "dualup": .mode,
         "lights": .toggle,
         "host": .host,
+        "hardware": .table,
     ]
 
     static func resolve(kind: String, id: String = "", face: Bool = false) -> WidgetKind {
@@ -505,9 +518,68 @@ struct SlotHUD: View {
                 ChipFlavor(slot: slot)
             case .chip:
                 ChipFlavor(slot: slot)
+            case .table:
+                TableFlavor(slot: slot)
             }
         }
         .accessibilityLabel(slot.chipTitle)
+    }
+}
+
+struct TableFlavor: View {
+    let slot: TraySlot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !slot.rows.isEmpty {
+                metrics
+            } else if !slot.label.isEmpty {
+                ChipFlavor(slot: slot)
+            }
+            if !slot.aiText.isEmpty {
+                Text(slot.aiText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var metrics: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if !slot.columns.isEmpty {
+                HStack(spacing: 4) {
+                    Text(" ")
+                        .frame(width: 48, alignment: .leading)
+                    ForEach(slot.columns) { column in
+                        Text(column.label)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            }
+            ForEach(slot.rows) { row in
+                HStack(spacing: 4) {
+                    Text(row.label)
+                        .fontWeight(row.focused ? .bold : .regular)
+                        .frame(width: 48, alignment: .leading)
+                    ForEach(Array(row.cells.enumerated()), id: \.offset) { _, cell in
+                        Text(cell.isEmpty ? "—" : cell)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .foregroundStyle(cell.isEmpty || cell == "—" ? .tertiary : .primary)
+                    }
+                }
+                .font(.system(size: 10, design: .monospaced))
+                .opacity(row.marker.isEmpty ? 1 : 0.55)
+                if !row.marker.isEmpty {
+                    Text(row.marker)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 
@@ -928,6 +1000,19 @@ struct SlotAction: Equatable {
     var argv: [String]
 }
 
+struct HardwareColumn: Identifiable, Equatable {
+    var id: String
+    var label: String
+}
+
+struct HardwareRow: Identifiable, Equatable {
+    var id: String
+    var label: String
+    var focused: Bool
+    var marker: String
+    var cells: [String]
+}
+
 struct TraySlot: Identifiable, Equatable {
     var id: String
     var kind: String
@@ -938,6 +1023,9 @@ struct TraySlot: Identifiable, Equatable {
     var face: Bool
     var progress: Double
     var actions: [SlotAction]
+    var columns: [HardwareColumn] = []
+    var rows: [HardwareRow] = []
+    var aiText: String = ""
 
     var chipTitle: String {
         if let detail, !detail.isEmpty {
@@ -971,16 +1059,49 @@ struct TraySlot: Identifiable, Equatable {
             id: id,
             face: obj["face"] as? Bool ?? false
         ).rawValue
+        var columns: [HardwareColumn] = []
+        if let rawColumns = obj["columns"] as? [Any] {
+            for item in rawColumns {
+                guard let col = item as? [String: Any] else { continue }
+                let colID = col["id"] as? String ?? ""
+                let colLabel = col["label"] as? String ?? colID
+                guard !colID.isEmpty || !colLabel.isEmpty else { continue }
+                columns.append(HardwareColumn(id: colID.isEmpty ? colLabel : colID, label: colLabel))
+            }
+        }
+        var rows: [HardwareRow] = []
+        if let rawRows = obj["rows"] as? [Any] {
+            for (index, item) in rawRows.enumerated() {
+                guard let row = item as? [String: Any] else { continue }
+                let rowID = row["id"] as? String ?? "row-\(index)"
+                let rowLabel = row["label"] as? String ?? rowID
+                let cells = (row["cells"] as? [Any])?.map { String(describing: $0) } ?? []
+                rows.append(
+                    HardwareRow(
+                        id: rowID,
+                        label: rowLabel,
+                        focused: row["focused"] as? Bool ?? false,
+                        marker: row["marker"] as? String ?? "",
+                        cells: cells
+                    )
+                )
+            }
+        }
+        let aiText = obj["ai_text"] as? String ?? ""
+        let quietLabel = kind == WidgetKind.table.rawValue && label.isEmpty
         return TraySlot(
             id: id,
             kind: kind,
             glyph: glyph,
-            label: label.isEmpty ? id : label,
+            label: quietLabel ? "" : (label.isEmpty ? id : label),
             detail: obj["detail"] as? String,
             hot: obj["hot"] as? Bool ?? false,
             face: obj["face"] as? Bool ?? false,
             progress: min(max(progress, 0), 1),
-            actions: actions
+            actions: actions,
+            columns: columns,
+            rows: rows,
+            aiText: aiText
         )
     }
 }
@@ -1278,6 +1399,7 @@ struct DeskUIConfig: Equatable {
         UISlotPref(id: "weather", enabled: true, kind: "chip", showAltitude: true),
         UISlotPref(id: "kettle", enabled: true, kind: "face"),
         UISlotPref(id: "dualup", enabled: true, kind: "mode"),
+        UISlotPref(id: "hardware", enabled: false, kind: "table"),
         UISlotPref(id: "lights", enabled: false, kind: "toggle"),
     ]
 
@@ -1296,6 +1418,7 @@ struct DeskUIConfig: Equatable {
         case "kettle": return "Kettle"
         case "dualup": return "Display"
         case "lights": return "Lights"
+        case "hardware": return "Hardware"
         default:
             return id.replacingOccurrences(of: "_", with: " ").capitalized
         }

@@ -102,6 +102,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("kettle", proc.stdout)
         self.assertIn("weather", proc.stdout)
         self.assertIn("wallpaper", proc.stdout)
+        self.assertIn("hardware", proc.stdout)
         self.assertIn("smarthome", proc.stdout)
 
     def test_help_does_not_advertise_aliases(self) -> None:
@@ -358,6 +359,9 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("ChipFlavor", src)
         self.assertIn("ToggleFlavor", src)
         self.assertIn("ModeFlavor", src)
+        self.assertIn("TableFlavor", src)
+        self.assertIn("aiText", src)
+        self.assertIn("case table", src)
         self.assertIn("TraySettingsPanel", src)
         self.assertIn("DeskUIConfig", src)
         self.assertIn("DeskUIConfigStore", src)
@@ -406,6 +410,9 @@ class BarWidgetSourceTests(unittest.TestCase):
         self.assertIn("faceSlotLabel", panel)
         self.assertIn("slotKind", panel)
         self.assertIn("slotActions", panel)
+        self.assertIn("hardwareText", panel)
+        self.assertIn("ai_text", panel)
+        self.assertIn("table", panel)
         self.assertIn("hhkb_usb", bar)
         self.assertIn("status --json", bar)
         self.assertIn("desk status --json", bar)
@@ -674,13 +681,19 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertEqual(example["adapters"]["wallpaper"]["exact_prefix"], "desk")
         self.assertFalse(example["ui"]["tray"]["lights"])
         ids = [item["id"] for item in example["ui"]["tray"]["slots"]]
-        self.assertEqual(ids, ["weather", "kettle", "dualup", "lights"])
+        self.assertEqual(ids, ["weather", "kettle", "dualup", "hardware", "lights"])
+        self.assertFalse(example["adapters"]["hardware"]["enabled"])
+        self.assertEqual(example["adapters"]["hardware"]["url"], "http://metrics.local/api/hardware")
+        self.assertEqual(example["adapters"]["hardware"]["poll_seconds"], 5)
+        self.assertEqual(example["adapters"]["hardware"]["timeout_seconds"], 1.5)
         weather = example["ui"]["tray"]["slots"][0]
         self.assertEqual(weather["kind"], "chip")
         self.assertTrue(weather["show_altitude"])
         self.assertEqual(example["ui"]["tray"]["slots"][1]["kind"], "face")
         self.assertEqual(example["ui"]["tray"]["slots"][2]["kind"], "mode")
-        self.assertEqual(example["ui"]["tray"]["slots"][3]["kind"], "toggle")
+        self.assertEqual(example["ui"]["tray"]["slots"][3]["kind"], "table")
+        self.assertFalse(example["ui"]["tray"]["slots"][3]["enabled"])
+        self.assertEqual(example["ui"]["tray"]["slots"][4]["kind"], "toggle")
         self.assertTrue(example["ui"]["hud"]["show_faces"])
         self.assertEqual(example["ui"]["hud"]["density"], "regular")
 
@@ -1841,7 +1854,7 @@ class AdapterDiscoveryTests(unittest.TestCase):
                 self.assertEqual(ds.resolve_backend_id("unifying"), helper)
 
     def test_reference_manifests_exist(self) -> None:
-        for name in ("mxswitch", "lgdualup", "hhkb", "alexa", "kettle", "weather", "wallpaper"):
+        for name in ("mxswitch", "lgdualup", "hhkb", "alexa", "kettle", "weather", "wallpaper", "hardware"):
             raw = json.loads((ROOT / "adapters" / name / "manifest.json").read_text())
             self.assertEqual(raw["api_version"], 1)
             self.assertEqual(raw["id"], name)
@@ -1855,6 +1868,8 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("weather.status", weather["capabilities"])
         wallpaper = json.loads((ROOT / "adapters" / "wallpaper" / "manifest.json").read_text())
         self.assertIn("wallpaper.apply", wallpaper["capabilities"])
+        hardware = json.loads((ROOT / "adapters" / "hardware" / "manifest.json").read_text())
+        self.assertIn("hardware.status", hardware["capabilities"])
 
     def test_makefile_installs_from_adapters_tree(self) -> None:
         text = (ROOT / "Makefile").read_text()
@@ -1865,11 +1880,13 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("adapters/kettle/kettle.py", text)
         self.assertIn("adapters/weather/weather.py", text)
         self.assertIn("adapters/wallpaper/wallpaper.py", text)
+        self.assertIn("adapters/hardware/hardware.py", text)
         self.assertIn("$(LIBDIR)/mxswitch.manifest.json", text)
         self.assertIn("$(LIBDIR)/alexa.manifest.json", text)
         self.assertIn("$(LIBDIR)/kettle.manifest.json", text)
         self.assertIn("$(LIBDIR)/weather.manifest.json", text)
         self.assertIn("$(LIBDIR)/wallpaper.manifest.json", text)
+        self.assertIn("$(LIBDIR)/hardware.manifest.json", text)
         self.assertIn("$(LIBDIR)/mxswitch", text)
         self.assertIn("desk.py $(BINDIR)/desk", text)
         self.assertNotIn("scripts/desk-alias", text)
@@ -2471,7 +2488,7 @@ class WeatherAdapterTests(unittest.TestCase):
 class UIConfigTests(unittest.TestCase):
     def test_ui_config_docs_kinds_and_per_slot_altitude(self) -> None:
         text = (ROOT / "docs" / "ui-config.md").read_text()
-        for token in ("`kind`", "`face`", "`chip`", "`toggle`", "`mode`", "`host`", "show_altitude"):
+        for token in ("`kind`", "`face`", "`chip`", "`toggle`", "`mode`", "`host`", "`table`", "show_altitude"):
             self.assertIn(token, text)
         self.assertIn("adapter-owned", text)
         self.assertIn("Deprecated mirror", text)
@@ -2486,8 +2503,11 @@ class UIConfigTests(unittest.TestCase):
         self.assertEqual(parsed["hud_density"], "regular")
         self.assertEqual(
             [item["id"] for item in ds.default_tray_slot_prefs()],
-            ["weather", "kettle", "dualup", "lights"],
+            ["weather", "kettle", "dualup", "hardware", "lights"],
         )
+        hardware = next(item for item in ds.default_tray_slot_prefs() if item["id"] == "hardware")
+        self.assertFalse(hardware["enabled"])
+        self.assertEqual(hardware["kind"], "table")
         self.assertFalse(ds.default_tray_slot_prefs()[-1]["enabled"])
 
     def test_parse_string_pin_is_exclusive(self) -> None:
@@ -5346,6 +5366,466 @@ class LgdualupSplitTests(unittest.TestCase):
             refused = self._run("--splits", "stacked=0", "pbp", "side", home=home)
             self.assertEqual(refused.returncode, 2, refused.stderr)
             self.assertIn("not sent", refused.stderr)
+
+
+class HardwareAdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "hardware_adapter", ROOT / "adapters" / "hardware" / "hardware.py"
+        )
+        cls.hw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.hw)
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = mock.patch.dict(os.environ, {"DESK_HARDWARE_STATE": self.tmp.name})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def _now(self) -> float:
+        from datetime import datetime, timezone
+
+        return datetime(2026, 11, 9, 22, 56, 13, tzinfo=timezone.utc).timestamp()
+
+    def _payload(self) -> dict:
+        return {
+            "hosts": {
+                "box": {
+                    "online": True,
+                    "last_seen": "2026-11-09T22:56:12Z",
+                    "cpu_pct": 1,
+                    "mem_pct": 9.9,
+                    "cpu_temp_c": 38.3,
+                    "gpu_pct": 1,
+                    "gpu_temp_c": 35,
+                    "disk_pct": 4,
+                    "ai": {
+                        "updated_at": "2026-11-09T22:56:12Z",
+                        "tools": [
+                            {
+                                "id": "alpha",
+                                "name": "Alpha",
+                                "plan": "pro",
+                                "ready": True,
+                                "today_tokens": 1500,
+                                "month_tokens": 90000,
+                                "today_cost_usd": 0.4,
+                                "month_cost_usd": 12,
+                                "today_sessions": 3,
+                                "limit_used_pct": 22,
+                                "credits_remaining": 10,
+                                "credits_total": 100,
+                                "limits": [
+                                    {
+                                        "label": "session",
+                                        "used_pct": 22,
+                                        "resets_at": "2026-11-09T23:30:00Z",
+                                    },
+                                    {
+                                        "label": "weekly",
+                                        "used_pct": 71,
+                                        "resets_at": "2026-11-15T00:00:00Z",
+                                    },
+                                ],
+                            },
+                            {
+                                "id": "beta",
+                                "name": None,
+                                "plan": None,
+                                "limit_used_pct": None,
+                                "today_tokens": None,
+                                "today_cost_usd": None,
+                                "limits": None,
+                            },
+                            {
+                                "id": "gamma",
+                                "name": "Gamma",
+                                "plan": "free",
+                                "limit_used_pct": 80,
+                                "today_tokens": 10,
+                                "today_cost_usd": None,
+                                "limits": [
+                                    {"label": "daily", "used_pct": None, "resets_at": None},
+                                    {
+                                        "label": "burst",
+                                        "used_pct": 40,
+                                        "resets_at": "2026-11-09T23:00:00Z",
+                                    },
+                                ],
+                            },
+                        ],
+                        "llama": {
+                            "running": True,
+                            "model": "small",
+                            "tok_s": 41.5,
+                            "requests": 3,
+                            "slots_busy": 1,
+                            "slots_total": 4,
+                        },
+                    },
+                },
+                "mac": {
+                    "online": True,
+                    "last_seen": "2026-11-09T22:56:13Z",
+                    "cpu_pct": 6,
+                    "mem_pct": 14.4,
+                    "cpu_temp_c": 34.6,
+                    "gpu_pct": None,
+                    "gpu_temp_c": None,
+                    "ai": None,
+                },
+                "nas": {
+                    "online": True,
+                    "last_seen": "2026-11-09T22:56:12Z",
+                    "cpu_pct": 0,
+                    "mem_pct": 21.3,
+                    "cpu_temp_c": 42,
+                    "gpu_pct": None,
+                    "gpu_temp_c": None,
+                },
+                "tower": {
+                    "online": True,
+                    "last_seen": "2026-11-09T21:00:00Z",
+                    "cpu_pct": 1.6,
+                    "mem_pct": 9.6,
+                    "cpu_temp_c": 42.9,
+                    "gpu_pct": 4,
+                    "gpu_temp_c": 39,
+                    "ai": {"tools": [], "llama": {"running": False, "model": "hidden"}},
+                },
+                "stranger": {"online": True, "cpu_pct": 50, "cpu_temp_c": 90},
+            },
+            "updated_at": "2026-11-09T22:56:13Z",
+            "note": "ignored",
+        }
+
+    def _config(self) -> dict:
+        return {
+            "url": "http://metrics.local/api/hardware",
+            "host_map": {"box": "linux"},
+            "extra_hosts": ["nas"],
+            "desk_hosts": ["mac", "linux", "tower"],
+            "labels": {"mac": "MAC", "linux": "LNX", "tower": "TWR", "nas": "nas"},
+            "stale_seconds": 30,
+            "show": ["cpu_temp_c", "cpu_pct", "mem_pct", "gpu_pct", "gpu_temp_c"],
+        }
+
+    def test_parse_nulls_mapping_staleness_and_ai(self) -> None:
+        data = self.hw.build_snapshot(self._payload(), self._config(), "linux", now=self._now())
+        self.assertEqual(list(data["hosts"]), ["mac", "linux", "tower", "nas"])
+        self.assertNotIn("stranger", data["hosts"])
+        linux = data["hosts"]["linux"]
+        self.assertEqual(linux["cpu_temp_c"], 38.3)
+        self.assertNotIn("disk_pct", linux)
+        self.assertNotIn("ai", linux)
+        nas = data["hosts"]["nas"]
+        self.assertEqual(nas["cpu_pct"], 0)
+        self.assertNotIn("gpu_pct", nas)
+        self.assertNotIn("gpu_temp_c", nas)
+        self.assertEqual(nas["cells"] if "cells" in nas else data["slot"]["rows"][3]["cells"][-2:], ["—", "—"])
+        mac = data["hosts"]["mac"]
+        self.assertNotIn("gpu_pct", mac)
+        self.assertNotIn("gpu_temp_c", mac)
+        self.assertEqual(data["hosts"]["tower"]["marker"], "stale")
+        self.assertTrue(data["hosts"]["tower"]["stale"])
+        self.assertEqual(data["token"], "38° 80%")
+        self.assertEqual(data["slot"]["label"], "38° 80%")
+        self.assertEqual(data["slot"]["kind"], "table")
+        text = data["slot"]["ai_text"]
+        self.assertIn("Alpha · pro", text)
+        self.assertIn("weekly 71% · resets 11-15 00:00Z", text)
+        self.assertIn("1500 tok · $0.40", text)
+        self.assertNotIn("90000", text)
+        self.assertNotIn("session 22%", text)
+        self.assertIn("Gamma · free", text)
+        self.assertIn("burst 40% · resets 11-09 23:00Z", text)
+        self.assertIn("10 tok", text)
+        self.assertNotIn("$0", text.split("Gamma", 1)[1])
+        self.assertIn("llama small · 41.5 tok/s · 1/4 slots", text)
+        self.assertNotIn("hidden", text)
+        self.assertNotIn("MAC\n", text)
+        gamma = data["slot"]["ai"][0]["tools"][2]
+        self.assertEqual(gamma["name"], "Gamma")
+        self.assertEqual(gamma["plan"], "free")
+        self.assertEqual(gamma["limit"], "burst 40%")
+        self.assertEqual(gamma["today"], "10 tok")
+        self.assertNotIn("today_cost_usd", gamma)
+
+    def test_null_limit_is_not_zero_and_zero_is_kept(self) -> None:
+        payload = {
+            "hosts": {
+                "linux": {
+                    "online": True,
+                    "last_seen": "2026-11-09T22:56:12Z",
+                    "cpu_temp_c": 40,
+                    "ai": {
+                        "tools": [
+                            {"id": "none", "name": "NoneTool", "limit_used_pct": None, "today_tokens": 0},
+                            {"id": "zero", "name": "ZeroTool", "limit_used_pct": 0, "today_cost_usd": 0},
+                        ],
+                        "llama": None,
+                    },
+                }
+            }
+        }
+        data = self.hw.build_snapshot(
+            payload,
+            {"desk_hosts": ["linux"], "labels": {"linux": "LNX"}, "show": ["cpu_temp_c"]},
+            "linux",
+            now=self._now(),
+        )
+        self.assertEqual(data["token"], "40° 0%")
+        text = data["slot"]["ai_text"]
+        self.assertIn("0 tok", text)
+        self.assertIn("$0.00", text)
+        self.assertNotIn("NoneTool\n  0%", text)
+
+    def test_offline_marker_and_malformed_ai_keep_metrics(self) -> None:
+        payload = {
+            "hosts": {
+                "linux": {
+                    "online": False,
+                    "last_seen": "2026-11-09T22:56:12Z",
+                    "cpu_pct": 3,
+                    "cpu_temp_c": 50,
+                    "gpu_pct": None,
+                    "ai": "later",
+                }
+            }
+        }
+        data = self.hw.build_snapshot(
+            payload,
+            {"desk_hosts": ["linux"], "show": ["cpu_temp_c", "cpu_pct", "gpu_pct"]},
+            "linux",
+            now=self._now(),
+        )
+        self.assertEqual(data["hosts"]["linux"]["marker"], "offline")
+        self.assertFalse(data["hosts"]["linux"]["stale"])
+        self.assertEqual(data["hosts"]["linux"]["cpu_pct"], 3)
+        self.assertNotIn("gpu_pct", data["hosts"]["linux"])
+        self.assertEqual(data["token"], "off")
+        self.assertNotIn("ai", data["slot"])
+        self.assertNotIn("ai_text", data["slot"])
+
+    def test_missing_sample_does_not_invent_offline_rows(self) -> None:
+        data = self.hw.build_snapshot(None, {"desk_hosts": ["linux", "mac"]}, "linux", reachable=False, source="none")
+        self.assertEqual(data["hosts"], {})
+        self.assertNotIn("slot", data)
+        self.assertEqual(data["token"], "")
+
+    def test_info_does_not_dial_and_refresh_keeps_cache(self) -> None:
+        import socket
+
+        seeded = {"hosts": {"linux": {"online": True, "cpu_temp_c": 41, "cpu_pct": 2}}}
+        self.hw.save_cache({"fetched_at": self._now(), "ok": True, "error": None, "payload": seeded})
+        with mock.patch.object(self.hw, "fetch_url") as fetch:
+            cached = self.hw.cached_snapshot({"url": "http://127.0.0.1:9/api/hardware", "desk_hosts": ["linux"]}, "linux", now=self._now())
+        fetch.assert_not_called()
+        self.assertEqual(cached["hosts"]["linux"]["cpu_temp_c"], 41)
+        self.assertTrue(cached["reachable"])
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        started = time.monotonic()
+        refused = self.hw.refresh_snapshot(
+            {"url": f"http://127.0.0.1:{port}/api/hardware", "timeout_seconds": 1.5, "desk_hosts": ["linux"]},
+            "linux",
+            now=self._now(),
+        )
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertFalse(refused["reachable"])
+        self.assertEqual(refused["error"], "hardware endpoint unreachable")
+        self.assertEqual(refused["hosts"]["linux"]["cpu_temp_c"], 41)
+        again = self.hw.cached_snapshot({"desk_hosts": ["linux"]}, "linux", now=self._now())
+        self.assertFalse(again["reachable"])
+        self.assertEqual(again["hosts"]["linux"]["cpu_pct"], 2)
+
+    def test_refresh_timeout_returns_cache(self) -> None:
+        import socket
+        import threading
+
+        self.hw.save_cache(
+            {
+                "fetched_at": 1,
+                "ok": True,
+                "payload": {"hosts": {"linux": {"online": True, "cpu_temp_c": 36, "last_seen": "2026-11-09T22:56:12Z"}}},
+            }
+        )
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        stop = threading.Event()
+
+        def hold() -> None:
+            try:
+                server.settimeout(2)
+                conn, _addr = server.accept()
+            except OSError:
+                return
+            try:
+                stop.wait(2)
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        try:
+            started = time.monotonic()
+            data = self.hw.refresh_snapshot(
+                {
+                    "url": f"http://127.0.0.1:{port}/api/hardware",
+                    "timeout_seconds": 0.4,
+                    "desk_hosts": ["linux"],
+                },
+                "linux",
+                now=self._now(),
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            stop.set()
+            server.close()
+            thread.join(timeout=2)
+        self.assertLess(elapsed, 1.5)
+        self.assertFalse(data["reachable"])
+        self.assertEqual(data["hosts"]["linux"]["cpu_temp_c"], 36)
+        self.assertEqual(data["source"], "cache")
+
+    def test_cli_info_ignores_a_dead_url(self) -> None:
+        env = os.environ.copy()
+        env["DESK_HARDWARE_STATE"] = self.tmp.name
+        started = time.monotonic()
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "adapters" / "hardware" / "hardware.py"),
+                "info",
+                "--config-json",
+                json.dumps({"url": "http://127.0.0.1:9/nope", "timeout_seconds": 5, "desk_hosts": ["linux"]}),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=3,
+        )
+        self.assertLess(time.monotonic() - started, 1.5)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["hosts"], {})
+        self.assertFalse(data["reachable"])
+
+
+class HardwareCoreTests(unittest.TestCase):
+    def test_watch_loop_does_not_reference_hardware(self) -> None:
+        import inspect
+
+        watch = inspect.getsource(ds.cmd_watch)
+        loop = inspect.getsource(ds._cmd_watch_loop)
+        self.assertNotIn("hardware", watch)
+        self.assertNotIn("hardware", loop)
+        self.assertIn("SessionAgent", watch)
+        self.assertIn("_cmd_watch_loop", watch)
+        self.assertIn("clock gap", loop)
+        self.assertIn("watch_interval_was_suspended", loop)
+
+    def test_slot_stays_off_until_enabled(self) -> None:
+        self.assertFalse(ds.hardware_slot_wanted({}))
+        self.assertFalse(ds.hardware_slot_wanted({"_ui_slots": [{"id": "hardware", "enabled": False}]}))
+        self.assertTrue(ds.hardware_slot_wanted({"_ui_slots": [{"id": "hardware", "enabled": True, "kind": "table"}]}))
+        self.assertFalse(
+            ds.hardware_slot_wanted(
+                {"_ui_slots": [{"id": "weather", "enabled": True}], "_ui_slots_exclusive": True}
+            )
+        )
+        slot = {
+            "id": "hardware",
+            "kind": "table",
+            "glyph": "cpu",
+            "label": "38° 80%",
+            "rows": [{"id": "linux", "label": "LNX", "cells": ["38.3°"]}],
+            "ai_text": "LNX\n  Alpha · pro",
+        }
+        state = {"adapters": {"hardware": {"enabled": True, "slot": slot}}, "dualup_mode": "unknown"}
+        hidden = ds.collect_slots(state, {"_ui_slots": [{"id": "hardware", "enabled": False}]})
+        self.assertNotIn("hardware", [item["id"] for item in hidden])
+        shown = ds.collect_slots(
+            state,
+            {"_ui_slots": [{"id": "hardware", "enabled": True, "kind": "table"}], "_ui_slots_exclusive": False},
+        )
+        self.assertEqual(shown[-1]["label"], "38° 80%")
+        self.assertIn("Alpha", shown[-1]["ai_text"])
+        quiet = ds.collect_slots(state, {})
+        self.assertNotIn("hardware", [item["id"] for item in quiet])
+        strip = ds.format_bar_strip({"target_hint": "LNX", "dualup_mode": "unknown"})
+        self.assertNotIn("hardware", strip)
+        self.assertNotIn("80", json.dumps(strip))
+
+    def test_config_and_background_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "hosts": {"this_host": "linux", "linux": {"channel": 2}, "mac": {"channel": 1}},
+                            "hardware": {
+                                "enabled": True,
+                                "url": "http://metrics.local/api/hardware",
+                                "poll_seconds": 5,
+                                "timeout_seconds": 1.5,
+                                "host_map": {"box": "linux"},
+                                "extra_hosts": ["nas"],
+                                "show": ["cpu_temp_c"],
+                            },
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (path,)):
+                cfg = ds.load_config()
+        self.assertTrue(cfg["_hardware_enabled"])
+        self.assertEqual(cfg["_hardware_config"]["url"], "http://metrics.local/api/hardware")
+        self.assertEqual(cfg["_hardware_config"]["host_map"], {"box": "linux"})
+        self.assertEqual(cfg["_hardware_config"]["extra_hosts"], ["nas"])
+        self.assertEqual(cfg["_hardware_config"]["show"], ["cpu_temp_c"])
+        self.assertEqual(ds.host_id_for_hint(cfg, "LNX"), "linux")
+        self.assertIsNone(ds.host_id_for_hint(cfg, "?"))
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        adapters = {"hardware": {"enabled": True, "available": True}}
+        with mock.patch.dict(os.environ, {"DESK_HARDWARE_STATE": state_dir.name}), mock.patch.object(
+            ds, "invoke_hardware", return_value={"reachable": False, "hosts": {}, "ok": False}
+        ) as invoke, mock.patch.object(ds.subprocess, "Popen") as popen:
+            ds.attach_hardware(cfg, adapters, "linux")
+        self.assertEqual(invoke.call_args[0][1], "info")
+        popen.assert_called_once()
+        cmd = popen.call_args[0][0]
+        self.assertIn("refresh", cmd)
+        self.assertNotIn("info", cmd)
+        self.assertEqual(popen.call_args.kwargs.get("stdout"), subprocess.DEVNULL)
+        self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
+        blob = json.loads(cmd[cmd.index("--config-json") + 1])
+        self.assertEqual(blob["url"], "http://metrics.local/api/hardware")
+        self.assertIn("linux", blob["desk_hosts"])
+        self.assertEqual(blob["host_map"], {"box": "linux"})
+        self.assertEqual(cmd[cmd.index("--focus") + 1], "linux")
+        fresh = Path(state_dir.name) / "hardware.json"
+        fresh.write_text(json.dumps({"fetched_at": time.time(), "ok": True, "payload": {"hosts": {}}}))
+        with mock.patch.dict(os.environ, {"DESK_HARDWARE_STATE": state_dir.name}), mock.patch.object(
+            ds, "invoke_hardware", return_value={"ok": True}
+        ), mock.patch.object(ds.subprocess, "Popen") as popen_fresh:
+            ds.attach_hardware(cfg, adapters, "linux")
+        popen_fresh.assert_not_called()
+        disabled = dict(cfg)
+        disabled["_hardware_enabled"] = False
+        with mock.patch.object(ds.subprocess, "Popen") as popen_off, mock.patch.object(ds, "invoke_hardware") as invoke_off:
+            ds.attach_hardware(disabled, adapters, "linux")
+        popen_off.assert_not_called()
+        invoke_off.assert_not_called()
 
 
 if __name__ == "__main__":

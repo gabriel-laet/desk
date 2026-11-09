@@ -64,6 +64,16 @@
       "exact_prefix": "desk",
       "primary_output": "",
       "outputs": {}
+    },
+    "hardware": {
+      "enabled": false,
+      "backend": "hardware",
+      "url": "http://metrics.local/api/hardware",
+      "poll_seconds": 5,
+      "timeout_seconds": 1.5,
+      "host_map": {},
+      "extra_hosts": [],
+      "show": ["cpu_temp_c", "cpu_pct", "mem_pct", "gpu_pct", "gpu_temp_c"]
     }
   },
   "hhkb_vendor_id": 1278,
@@ -98,6 +108,7 @@
         { "id": "weather", "enabled": true, "kind": "chip", "show_altitude": true },
         { "id": "kettle", "enabled": true, "kind": "face" },
         { "id": "dualup", "enabled": true, "kind": "mode" },
+        { "id": "hardware", "enabled": false, "kind": "table" },
         { "id": "lights", "enabled": false, "kind": "toggle" }
       ]
     },

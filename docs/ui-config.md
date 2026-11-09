@@ -23,6 +23,7 @@ there is a later TODO, not a second schema.
         { "id": "weather", "enabled": true, "kind": "chip", "show_altitude": true },
         { "id": "kettle", "enabled": true, "kind": "face" },
         { "id": "dualup", "enabled": true, "kind": "mode" },
+        { "id": "hardware", "enabled": false, "kind": "table" },
         { "id": "lights", "enabled": false, "kind": "toggle" }
       ]
     },
@@ -58,6 +59,7 @@ paints it without an `if kettle` / `if weather` branch.
 | `chip` | Ambient | `weather` | ° + optional per-slot altitude / mood |
 | `mode` | Display | `dualup` | FULL/PBP + scoped Full / PBP / layout |
 | `toggle` | Light | `lights` | ON/OFF/? + scoped On/Off (HUD flips immediately) |
+| `table` | Metrics | `hardware` | One focused-host token in the bar; per-host table and optional AI block in the panel |
 
 macOS DeskSwitchBar is the reference HUD: host buttons at the top (one
 per configured host), then named layouts, then enabled slots in
@@ -71,7 +73,8 @@ later pass — do not fork the schema.
 ## Slot rules
 
 - No `ui.tray.slots` → today’s quiet set: **weather → kettle → dualup**.
-  Missing adapters are omitted. Lights stay out.
+  Missing adapters are omitted. Lights stay out. Hardware stays out until
+  its slot is enabled.
 - Lights opted in (`ui.tray.lights` or the `lights` pref) always emit a
   slot (`ON` / `OFF` / `?`). Core prefers adapter entity power when
   readable; otherwise last commanded. The Mac HUD flips the slot

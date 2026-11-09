@@ -13,6 +13,7 @@ Core orchestrates. Shells only paint. Hardware plugs in as adapters:
     kettle     — Fellow-style LAN kettle (reference: kettle)
     weather    — Open-Meteo ambient ° + altitude (reference: weather)
     wallpaper  — per-output image (reference: wallpaper). Off unless configured.
+    hardware   — LAN per-host metrics (reference: hardware). Off unless configured.
 
 Reference adapters live under `adapters/` and install to
 `~/.local/lib/desk/` (`$DESK_LIB`). Older libdir and config paths still
@@ -39,6 +40,7 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
     desk kettle off
     desk weather status     # Open-Meteo ambient (adapter)
     desk wallpaper apply    # per-output wallpaper (no-op unless configured)
+    desk hardware status    # LAN hardware metrics (adapter, off unless configured)
     desk watch              # keyboard arrives → desk to this host
     desk watch --dry-run
     desk session-run -- <adapter> [args]
@@ -64,7 +66,7 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.10.1"
+VERSION = "1.11.0"
 ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
@@ -154,6 +156,7 @@ ROLE_CAPABILITIES = {
     "kettle": ("appliance.status", "appliance.heat", "appliance.off"),
     "weather": ("weather.status",),
     "wallpaper": ("wallpaper.apply",),
+    "hardware": ("hardware.status",),
 }
 ROLE_REFERENCE_ID = {
     "mouse": "mxswitch",
@@ -163,6 +166,7 @@ ROLE_REFERENCE_ID = {
     "kettle": "kettle",
     "weather": "weather",
     "wallpaper": "wallpaper",
+    "hardware": "hardware",
 }
 BUILTIN_MANIFESTS = {
     "mxswitch": {
@@ -212,6 +216,12 @@ BUILTIN_MANIFESTS = {
         "id": "wallpaper",
         "name": "Per-output wallpaper",
         "capabilities": ["wallpaper.apply"],
+    },
+    "hardware": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "hardware",
+        "name": "LAN hardware metrics",
+        "capabilities": ["hardware.status"],
     },
 }
 
@@ -382,8 +392,8 @@ def _as_bool(value: object, default: bool) -> bool:
 
 # Quiet default extra: weather → kettle → DualUp. Lights stay off until opted in.
 DEFAULT_TRAY_SLOT_IDS = ("weather", "kettle", "dualup")
-KNOWN_TRAY_SLOT_IDS = ("weather", "kettle", "dualup", "lights")
-KNOWN_SLOT_KINDS = ("face", "chip", "toggle", "mode", "host")
+KNOWN_TRAY_SLOT_IDS = ("weather", "kettle", "dualup", "hardware", "lights")
+KNOWN_SLOT_KINDS = ("face", "chip", "toggle", "mode", "host", "table")
 # Shells paint by `kind`. Ids only seed the v1 registry when an adapter
 # omits it — a new espresso slot can set `"kind": "face"` and the HUD
 # learns the flavor without a Swift/QML special case.
@@ -393,6 +403,7 @@ SLOT_KIND_BY_ID = {
     "dualup": "mode",
     "lights": "toggle",
     "host": "host",
+    "hardware": "table",
 }
 ALTITUDE_DETAIL_RE = re.compile(r"^\d+m$")
 
@@ -409,6 +420,7 @@ def default_tray_slot_prefs(*, lights: bool = False) -> list[dict]:
         {"id": "weather", "enabled": True, "kind": "chip", "show_altitude": True},
         {"id": "kettle", "enabled": True, "kind": "face"},
         {"id": "dualup", "enabled": True, "kind": "mode"},
+        {"id": "hardware", "enabled": False, "kind": "table"},
         {"id": "lights", "enabled": bool(lights), "kind": "toggle"},
     ]
 
@@ -766,6 +778,25 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
             weather_extras[flag] = str(weather[key])
     cfg["_weather_extras"] = weather_extras
 
+    # Off unless the user opts in. No URL is baked in.
+    hardware = _as_dict(adapters.get("hardware"))
+    cfg["_hardware_enabled"] = bool(hardware.get("enabled", False))
+    if hardware.get("backend"):
+        cfg["_hardware_backend"] = str(hardware["backend"])
+    if hardware.get("path"):
+        cfg["_hardware_path"] = str(hardware["path"])
+    hardware_config: dict = {
+        "url": str(hardware.get("url") or "").strip(),
+        "poll_seconds": hardware.get("poll_seconds", 5),
+        "timeout_seconds": hardware.get("timeout_seconds", 1.5),
+        "stale_seconds": hardware.get("stale_seconds", 30),
+        "host_map": hardware.get("host_map") if isinstance(hardware.get("host_map"), dict) else {},
+        "extra_hosts": hardware.get("extra_hosts") if isinstance(hardware.get("extra_hosts"), list) else [],
+    }
+    if isinstance(hardware.get("show"), list):
+        hardware_config["show"] = hardware.get("show")
+    cfg["_hardware_config"] = hardware_config
+
     # Off unless the user opts in. Missing section does nothing.
     wallpaper_outputs = wallpaper.get("outputs") if isinstance(wallpaper.get("outputs"), dict) else {}
     cfg["_wallpaper_config"] = {
@@ -999,6 +1030,21 @@ def host_hint(cfg: dict, host: str | None) -> str:
     spec = _as_dict((cfg.get("hosts") or {}).get(host_id))
     custom = str(spec.get("hint") or "").strip()
     return custom or host_id
+
+
+def host_id_for_hint(cfg: dict, hint: str | None) -> str | None:
+    """Map a focus token back to a configured host id. `?` has no host."""
+    token = str(hint or "").strip()
+    if not token or token == "?":
+        return None
+    hosts = cfg.get("hosts") if isinstance(cfg.get("hosts"), dict) else {}
+    for name, spec in hosts.items():
+        if isinstance(spec, dict) and host_hint(cfg, name) == token:
+            return name
+    lowered = token.lower()
+    if isinstance(hosts.get(lowered), dict):
+        return lowered
+    return None
 
 
 def public_host_list(cfg: dict) -> list[dict]:
@@ -1313,6 +1359,10 @@ def wallpaper_source_path() -> Path | None:
     return python_adapter_source_path("wallpaper")
 
 
+def hardware_source_path() -> Path | None:
+    return python_adapter_source_path("hardware")
+
+
 def load_hhkb_module():
     """Import the HHKB reference adapter (source tree or installed libdir)."""
     global _HHKB_MOD
@@ -1618,6 +1668,8 @@ def _role_enabled(cfg: dict, role: str) -> bool:
         return bool(cfg.get("_weather_enabled", True))
     if role == "wallpaper":
         return bool(cfg.get("_wallpaper_enabled", False))
+    if role == "hardware":
+        return bool(cfg.get("_hardware_enabled", False))
     return True
 
 
@@ -1637,6 +1689,8 @@ def _role_pin(cfg: dict, role: str) -> tuple[str | None, str | None]:
         return cfg.get("_weather_backend"), cfg.get("_weather_path") or None
     if role == "wallpaper":
         return cfg.get("_wallpaper_backend"), cfg.get("_wallpaper_path") or None
+    if role == "hardware":
+        return cfg.get("_hardware_backend"), cfg.get("_hardware_path") or None
     return None, None
 
 
@@ -1730,6 +1784,10 @@ def bind_role(cfg: dict, role: str) -> dict:
             resolved = resolve_backend_id(reference) or wallpaper_source_path()
             cache[role] = _binding("wallpaper", resolved, "reference" if resolved else "missing", enabled=True)
             return cache[role]
+        if role == "hardware":
+            resolved = resolve_backend_id(reference) or hardware_source_path()
+            cache[role] = _binding("hardware", resolved, "reference" if resolved else "missing", enabled=True)
+            return cache[role]
     cache[role] = _binding(reference, None, "missing", enabled=True)
     return cache[role]
 
@@ -1750,6 +1808,8 @@ def discovered_adapters(cfg: dict | None = None) -> list[dict]:
             path = weather_source_path()
         if path is None and adapter_id == "wallpaper":
             path = wallpaper_source_path()
+        if path is None and adapter_id == "hardware":
+            path = hardware_source_path()
         if path is None:
             continue
         found[adapter_id] = {
@@ -1888,6 +1948,60 @@ def invoke_kettle(cfg: dict, verb: str, *extra: str, timeout: float = 8.0) -> di
 
 def invoke_weather(cfg: dict, verb: str, *extra: str, timeout: float = 4.0) -> dict | None:
     cmd = weather_adapter_cmd(cfg, verb, *extra)
+    if cmd is None:
+        return None
+    return invoke_adapter_cmd(cmd, timeout=timeout)
+
+
+def hardware_adapter_path(cfg: dict) -> Path | None:
+    return role_adapter_path(cfg, "hardware", "_hardware_enabled")
+
+
+def hardware_installed_path(cfg: dict) -> Path | None:
+    """Binary for status, including when the role is left disabled."""
+    if cfg.get("_hardware_enabled", False):
+        return hardware_adapter_path(cfg)
+    pinned = cfg.get("_hardware_path")
+    if pinned:
+        expanded = Path(str(pinned)).expanduser()
+        if _is_exe(expanded):
+            return expanded
+    return resolve_backend_id("hardware") or hardware_source_path()
+
+
+def hardware_config_blob(cfg: dict) -> dict:
+    """Adapter config plus the configured host ids. No URL or name is invented."""
+    raw = dict(cfg.get("_hardware_config") or {})
+    hosts = cfg.get("hosts") if isinstance(cfg.get("hosts"), dict) else {}
+    desk_hosts = [name for name, spec in hosts.items() if isinstance(spec, dict)]
+    raw["desk_hosts"] = desk_hosts
+    labels: dict[str, str] = {}
+    for name in desk_hosts:
+        labels[name] = host_hint(cfg, name)
+    for extra in raw.get("extra_hosts") or []:
+        text = str(extra).strip()
+        if text:
+            labels.setdefault(text, text)
+    raw["labels"] = labels
+    if raw.get("show") is None:
+        raw.pop("show", None)
+    return raw
+
+
+def hardware_adapter_cmd(cfg: dict, *verbs: str) -> list[str] | None:
+    path = hardware_adapter_path(cfg)
+    if path is None:
+        return None
+    cmd = [str(path), *[str(verb) for verb in verbs]]
+    cmd.extend(["--config-json", json.dumps(hardware_config_blob(cfg), separators=(",", ":"))])
+    focus = str(cfg.get("_hardware_focus") or "").strip()
+    if focus:
+        cmd.extend(["--focus", focus])
+    return cmd
+
+
+def invoke_hardware(cfg: dict, verb: str, *extra: str, timeout: float = 2.0) -> dict | None:
+    cmd = hardware_adapter_cmd(cfg, verb, *extra)
     if cmd is None:
         return None
     return invoke_adapter_cmd(cmd, timeout=timeout)
@@ -3496,6 +3610,14 @@ def normalize_slot(raw: object) -> dict | None:
     }
     if raw.get("detail"):
         slot["detail"] = str(raw["detail"])
+    # An explicit empty label stays empty so a table slot can keep the
+    # bar quiet when the focused host has nothing to show.
+    if "label" in raw and not label and glyph:
+        slot["label"] = ""
+    for extra_key in ("rows", "columns", "header", "ai", "ai_text"):
+        if extra_key not in raw or raw[extra_key] in (None, "", []):
+            continue
+        slot[extra_key] = raw[extra_key]
     if "hot" in raw:
         slot["hot"] = bool(raw["hot"])
     if "face" in raw:
@@ -3595,12 +3717,47 @@ def lights_slot(mark: str) -> dict:
     }
 
 
+def hardware_slot_wanted(cfg: dict | None) -> bool:
+    """Quiet unless the tray slot is on.
+
+    No `ui.tray.slots` keeps the strip unchanged. An object list that names
+    hardware follows `enabled`. An object list that omits it appends, same
+    as other new slots. A string pin shows it only when the pin names it.
+    """
+    cfg = cfg or {}
+    prefs = cfg.get("_ui_slots")
+    if not isinstance(prefs, list) or not prefs:
+        return False
+    exclusive = bool(cfg.get("_ui_slots_exclusive"))
+    for pref in prefs:
+        if not isinstance(pref, dict) or str(pref.get("id") or "") != "hardware":
+            continue
+        return bool(pref.get("enabled", True))
+    return not exclusive
+
+
+def attach_hardware(cfg: dict, adapters: dict, focus: str | None) -> None:
+    """Merge the cached sample and kick a detached refresh.
+
+    `desk status` must not wait on the endpoint. `desk watch` does not call
+    this: a slow fetch must not stretch a watch iteration.
+    """
+    block = adapters.get("hardware")
+    if not isinstance(block, dict) or not cfg.get("_hardware_enabled"):
+        return
+    cfg["_hardware_focus"] = focus or ""
+    snapshot = invoke_hardware(cfg, "info", timeout=2.0)
+    merge_adapter_snapshot(block, snapshot)
+    schedule_hardware_refresh(cfg)
+
+
 def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
     """Compose additive tray/HUD slots. Shells only paint. Missing adapter ⇒ omit.
 
     Default order is weather → kettle → dualup. `ui.tray.slots` reorders and
-    hides. Each slot carries `kind` (face / chip / toggle / mode). Lights
-    stay out unless `ui.tray.lights` or the lights pref is on.
+    hides. Each slot carries `kind` (face / chip / toggle / mode / table).
+    Lights stay out unless `ui.tray.lights` or the lights pref is on.
+    Hardware stays out unless its tray slot is enabled.
     """
     cfg = cfg or {}
     adapters = state.get("adapters") or {}
@@ -3617,6 +3774,12 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
     display = normalize_slot(display_slot(state))
     if display:
         ordered.append(display)
+    if hardware_slot_wanted(cfg):
+        hw = adapters.get("hardware") if isinstance(adapters.get("hardware"), dict) else {}
+        if hw.get("enabled") is not False:
+            hw_slot = normalize_slot(hw.get("slot"))
+            if hw_slot:
+                ordered.append(hw_slot)
     prefs, exclusive = _slot_prefs_from_cfg(cfg)
     lights_opt_in = bool(cfg.get("_tray_lights") or state.get("_tray_lights"))
     if prefs:
@@ -3804,6 +3967,27 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
         "source": wallpaper_source,
         "capabilities": wallpaper_caps,
     }
+    hardware_path = hardware_installed_path(cfg)
+    if cfg.get("_hardware_enabled", False):
+        hardware_bound = bind_role(cfg, "hardware")
+        hardware_backend = hardware_bound.get("id") or "hardware"
+        hardware_source = hardware_bound.get("source")
+        hardware_caps = list(hardware_bound.get("capabilities") or ["hardware.status"])
+        if hardware_bound.get("path"):
+            hardware_path = Path(hardware_bound["path"])
+    else:
+        hardware_backend = str(cfg.get("_hardware_backend") or "hardware")
+        hardware_source = "disabled"
+        manifest = manifest_for(hardware_backend, hardware_path)
+        hardware_caps = list((manifest or {}).get("capabilities") or ["hardware.status"])
+    hardware = {
+        "enabled": bool(cfg.get("_hardware_enabled", False)),
+        "available": hardware_path is not None,
+        "backend": hardware_backend,
+        "path": str(hardware_path) if hardware_path else None,
+        "source": hardware_source,
+        "capabilities": hardware_caps,
+    }
     discovered = []
     for item in discovered_adapters(cfg):
         discovered.append(
@@ -3836,6 +4020,7 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
         "kettle": kettle,
         "weather": weather,
         "wallpaper": wallpaper,
+        "hardware": hardware,
         "discovered": discovered,
     }
 
@@ -3928,6 +4113,8 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
     merge_adapter_snapshot(adapters.get("kettle"), kettle_snap)
     weather_snap = invoke_weather(cfg, "info", timeout=3.0)
     merge_adapter_snapshot(adapters.get("weather"), weather_snap)
+    # Cache read plus a detached refresh. Not on the watch loop.
+    attach_hardware(cfg, adapters, host_id_for_hint(cfg, hint))
     if cfg.get("_wallpaper_enabled"):
         wallpaper_snap = invoke_wallpaper(cfg, "info", timeout=4.0)
         merge_adapter_snapshot(adapters.get("wallpaper"), wallpaper_snap)
@@ -4088,6 +4275,20 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
         f"  weather     : {weather_state}  backend={weather.get('backend', 'weather')}  "
         f"{weather_mark}  {weather.get('path') or '-'}"
     )
+    hw = adapters.get("hardware") or {}
+    hw_state = "available" if hw.get("available") else "missing"
+    if not hw.get("enabled", False):
+        hw_state = "disabled"
+    hw_hosts = hw.get("hosts") if isinstance(hw.get("hosts"), dict) else {}
+    hw_mark = str(hw.get("token") or "").strip()
+    if not hw_mark:
+        hw_mark = "offline" if hw.get("error") else "—"
+    if not hw.get("enabled", False):
+        hw_mark = "off"
+    print(
+        f"  hardware    : {hw_state}  {hw_mark}  hosts={len(hw_hosts)}  "
+        f"{hw.get('path') or '-'}"
+    )
     paper = adapters.get("wallpaper") or {}
     paper_state = "available" if paper.get("available") else "missing"
     if not paper.get("enabled", False):
@@ -4148,6 +4349,110 @@ def state_dir() -> Path:
     xdg = os.environ.get("XDG_STATE_HOME")
     root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
     return root / "desk"
+
+
+def hardware_state_paths() -> tuple[Path, Path]:
+    """Cache file and in-flight lock. Keep this in sync with the adapter."""
+    override = os.environ.get("DESK_HARDWARE_STATE", "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if path.suffix == ".json":
+            return path, path.with_suffix(".refresh")
+        return path / "hardware.json", path / "hardware.refresh"
+    base = state_dir()
+    return base / "hardware.json", base / "hardware.refresh"
+
+
+def hardware_cache_age() -> float | None:
+    path, _lock = hardware_state_paths()
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        fetched = float(raw.get("fetched_at") or 0)
+    except (TypeError, ValueError):
+        return None
+    if fetched <= 0:
+        return None
+    return max(0.0, time.time() - fetched)
+
+
+def claim_hardware_refresh(window: float) -> bool:
+    """Exclusive lock so overlapping status calls share one fetch."""
+    _path, lock = hardware_state_paths()
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+
+    def _create() -> int | None:
+        try:
+            return os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            return None
+
+    fd = _create()
+    if fd is None:
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except OSError:
+            return False
+        if age < window:
+            return False
+        try:
+            lock.unlink()
+        except OSError:
+            return False
+        fd = _create()
+        if fd is None:
+            return False
+    try:
+        os.write(fd, str(time.time()).encode())
+    finally:
+        os.close(fd)
+    return True
+
+
+def schedule_hardware_refresh(cfg: dict) -> None:
+    """Start one refresh and return. Never waits on the socket."""
+    if not cfg.get("_hardware_enabled"):
+        return
+    blob = hardware_config_blob(cfg)
+    if not str(blob.get("url") or "").strip():
+        return
+    try:
+        poll = float(blob.get("poll_seconds") or 5)
+    except (TypeError, ValueError):
+        poll = 5.0
+    age = hardware_cache_age()
+    if age is not None and age < poll:
+        return
+    try:
+        timeout = float(blob.get("timeout_seconds") or 1.5)
+    except (TypeError, ValueError):
+        timeout = 1.5
+    if not claim_hardware_refresh(timeout + 2.0):
+        return
+    cmd = hardware_adapter_cmd(cfg, "refresh")
+    if not cmd:
+        return
+    try:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        try:
+            hardware_state_paths()[1].unlink()
+        except OSError:
+            return
+        return
 
 
 def state_path() -> Path:
@@ -5314,6 +5619,38 @@ def cmd_weather(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
         return 1
 
 
+def cmd_hardware(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
+    action = str(verb or "status").strip().lower()
+    if action in ("info", "probe"):
+        action = "info"
+    elif action in ("status", "refresh"):
+        action = "refresh"
+    else:
+        print(f"unknown hardware verb: {verb} (try status)", file=sys.stderr)
+        return 2
+    if not cfg.get("_hardware_enabled"):
+        print(json.dumps({"ok": True, "enabled": False, "reachable": False, "hosts": {}}, indent=2))
+        return 0
+    if hardware_adapter_path(cfg) is None:
+        print("hardware adapter not found (install adapters/hardware or pin adapters.hardware)")
+        return 0
+    try:
+        timeout = float((cfg.get("_hardware_config") or {}).get("timeout_seconds") or 1.5)
+    except (TypeError, ValueError):
+        timeout = 1.5
+    budget = 2.0 if action == "info" else timeout + 2.0
+    cfg["_hardware_focus"] = str(cfg.get("this_host") or "")
+    data = invoke_hardware(cfg, action, timeout=budget)
+    if data is None:
+        print("hardware adapter not found (install adapters/hardware or pin adapters.hardware)")
+        return 0
+    printable = {key: value for key, value in data.items() if not str(key).startswith("_")}
+    print(json.dumps(printable, indent=2))
+    if printable.get("reachable") or printable.get("hosts"):
+        return 0
+    return 1
+
+
 def cmd_wallpaper(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
     action = str(verb or "apply").strip().lower()
     if action in ("info", "probe"):
@@ -5435,6 +5772,9 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
         help="status | info",
     )
     weather.add_argument("--json", action="store_true", help="print adapter JSON")
+    hardware = sub.add_parser("hardware", help="LAN hardware metrics (off unless configured)")
+    hardware.add_argument("verb", nargs="?", default="status", help="status | info")
+    hardware.add_argument("--json", action="store_true", help="print adapter JSON")
     wallpaper = sub.add_parser("wallpaper", help="per-output wallpaper (off unless configured)")
     wallpaper.add_argument("verb", nargs="?", default="apply", help="apply | status")
     wallpaper.add_argument("--json", action="store_true", help="print adapter JSON")
@@ -5469,6 +5809,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_kettle(cfg, args.verb, args.temp, as_json=args.json)
     if args.cmd == "weather":
         return cmd_weather(cfg, args.verb, as_json=args.json)
+    if args.cmd == "hardware":
+        return cmd_hardware(cfg, args.verb, as_json=args.json)
     if args.cmd == "wallpaper":
         return cmd_wallpaper(cfg, args.verb, as_json=args.json)
     return 2
