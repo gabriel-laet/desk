@@ -35,7 +35,7 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
     desk kettle heat 93
     desk kettle off
     desk weather status     # Open-Meteo ambient (adapter)
-    desk watch              # HHKB leave → mouse away; USB appear → desk here
+    desk watch              # keyboard arrives → desk to this host
     desk watch --dry-run
 """
 
@@ -89,6 +89,8 @@ HOST_MAP_META = {
     "this_host",
     "follow_channel",
     "follow_hhkb_usb",
+    "follow_keyboard_arrival",
+    "push_on_leave",
     "peer",
     "watch",
     "order",
@@ -220,6 +222,8 @@ def load_config() -> dict:
         "switch_pbp": False,
         "pbp_mode": "50-50",
         "follow_hhkb_usb": True,
+        "follow_keyboard_arrival": True,
+        "push_on_leave": None,
         "hosts": {
             "mac": {"channel": 1},
             "linux": {"channel": 2},
@@ -254,6 +258,10 @@ def load_config() -> dict:
         raise SystemExit(
             f"this_host {cfg['this_host']} is not configured in adapters.hosts ({known})"
         )
+    if cfg.get("push_on_leave") is None:
+        cfg["push_on_leave"] = default_push_on_leave(cfg)
+    else:
+        cfg["push_on_leave"] = bool(cfg["push_on_leave"])
     if isinstance(user.get("adapters"), dict):
         cfg["adapters"] = user["adapters"]
     return cfg
@@ -268,6 +276,29 @@ def _user_set_follow_channel(user: dict) -> bool:
         return True
     hosts_ad = _as_dict(_as_dict(user.get("adapters")).get("hosts"))
     return "follow_channel" in hosts_ad
+
+
+def _cfg_bool(user: dict, hosts_ad: dict, key: str) -> bool | None:
+    """Bool from the top-level file or `adapters.hosts`. Unset is None."""
+    if key in user:
+        return bool(user[key])
+    if key in hosts_ad:
+        return bool(hosts_ad[key])
+    return None
+
+
+def configured_host_count(cfg: dict) -> int:
+    hosts = cfg.get("hosts") if isinstance(cfg.get("hosts"), dict) else {}
+    return sum(1 for spec in hosts.values() if isinstance(spec, dict))
+
+
+def default_push_on_leave(cfg: dict) -> bool:
+    """Leave still pushes the mouse on a one- or two-host file.
+
+    Three or more hosts cannot tell where the keyboard went, so the
+    default is off and the host that sees the arrival pulls instead.
+    """
+    return configured_host_count(cfg) < 3
 
 
 def display_adapter_cfg(container: dict) -> dict:
@@ -618,6 +649,11 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     if mouse.get("path"):
         cfg["mxswitch"] = str(mouse["path"])
         cfg["_mouse_path"] = str(mouse["path"])
+    if "relay_hosts" in mouse:
+        cfg["_mouse_relay_hosts"] = _coerce_relay_hosts(mouse.get("relay_hosts"))
+    mouse_remote = str(mouse.get("relay_path") or "").strip()
+    if mouse_remote:
+        cfg["_mouse_relay_path"] = mouse_remote
 
     if hosts_ad.get("this_host"):
         cfg["this_host"] = hosts_ad["this_host"]
@@ -625,10 +661,12 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         cfg["target_channel"] = hosts_ad["follow_channel"]
     if hosts_ad.get("peer"):
         cfg["_peer"] = str(hosts_ad["peer"])
-    follow_usb = user.get("follow_hhkb_usb")
-    if follow_usb is None:
-        follow_usb = hosts_ad.get("follow_hhkb_usb")
-    cfg["follow_hhkb_usb"] = True if follow_usb is None else bool(follow_usb)
+    follow_usb = _cfg_bool(user, hosts_ad, "follow_hhkb_usb")
+    cfg["follow_hhkb_usb"] = True if follow_usb is None else follow_usb
+    follow_arrival = _cfg_bool(user, hosts_ad, "follow_keyboard_arrival")
+    cfg["follow_keyboard_arrival"] = True if follow_arrival is None else follow_arrival
+    # None until the host map is resolved: 3+ hosts default this off.
+    cfg["push_on_leave"] = _cfg_bool(user, hosts_ad, "push_on_leave")
 
     cfg["_keyboard_enabled"] = bool(keyboard.get("enabled", True))
     if keyboard.get("backend"):
@@ -809,7 +847,8 @@ def resolve_hosts(cfg: dict, user_hosts: dict | None = None) -> dict:
     A map that names any other id does not invent `linux` beside it.
 
     `channel` and `mouse_channel` are one slot. `to <id>` reads it. `watch`
-    on USB appearance uses this host's slot; leave still uses `target_channel`.
+    on keyboard arrival uses this host's slot. Leave uses `target_channel`
+    only when `push_on_leave` is on.
     If a legacy two-host file never named the other host, that host inherits
     `target_channel`.
     """
@@ -1647,26 +1686,71 @@ def invoke_weather(cfg: dict, verb: str, *extra: str, timeout: float = 4.0) -> d
     return invoke_adapter_cmd(cmd, timeout=timeout)
 
 
+def mouse_adapter_id(cfg: dict) -> str:
+    """Bound mouse-adapter id. The relay invokes that id on the peer."""
+    bound = bind_role(cfg, "mouse")
+    adapter_id = str(bound.get("id") or cfg.get("_mouse_backend") or "").strip()
+    if adapter_id:
+        return adapter_id
+    path = bound.get("path")
+    if path:
+        return Path(path).name
+    return "mxswitch"
+
+
+def mouse_relay_path(cfg: dict) -> str | None:
+    text = str(cfg.get("_mouse_relay_path") or "").strip()
+    return text or None
+
+
+def mouse_relay_host_ids(cfg: dict) -> list[str]:
+    """Ordered peers for a mouse hop.
+
+    `adapters.mouse.relay_hosts` wins, including an explicit empty list.
+    Otherwise the display `relay_hosts` list is reused.
+    """
+    if "_mouse_relay_hosts" in cfg:
+        return _coerce_relay_hosts(cfg.get("_mouse_relay_hosts"))
+    return display_relay_host_ids(cfg)
+
+
 def switch_mouse(cfg: dict, channel: int | None = None) -> int:
+    """Switch the mouse to `channel`, relaying when this host does not have it.
+
+    The local adapter runs first. A non-zero exit that reports the device
+    absent is tried on each relay host, stopping at the first success.
+    The line printed names the host that performed it.
+    """
     if not cfg.get("_mouse_enabled", True):
         print("mouse adapter disabled")
         return 0
     dest = int(cfg["target_channel"] if channel is None else channel)
-    cmd = [str(mxswitch_path(cfg)), str(dest)]
+    relays = mouse_relay_host_ids(cfg)
+    explicit = "_mouse_relay_hosts" in cfg
+    peers = [host for host in relays if host != _this_host_id(cfg)]
     try:
-        proc = run(cmd, timeout=8.0)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"mouse adapter failed to start: {exc}")
+        path = mxswitch_path(cfg)
+    except SystemExit:
+        path = None
+    # A missing binary is an install error, unless this config asked the
+    # mouse role to relay. Falling back to the display list only applies
+    # once a local adapter has reported the device absent.
+    if path is None and not (explicit and peers):
+        mxswitch_path(cfg)
         return 1
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    if out:
-        log(out)
-    if err:
-        log(err)
-    if proc.returncode == 0:
+    local = [str(path), str(dest)] if path is not None else None
+    rc = relay_adapter(
+        cfg,
+        local,
+        adapter_id=mouse_adapter_id(cfg),
+        args=[str(dest)],
+        label=f"mouse channel {dest}",
+        relay_host_ids=relays,
+        remote_path=mouse_relay_path(cfg),
+    )
+    if rc == 0:
         save_mouse_cache(dest)
-    return proc.returncode
+    return rc
 
 
 def parse_mouse_channel(info: str) -> int | None:
@@ -2908,6 +2992,12 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "hhkb_bluetooth": bool(probe.get("bluetooth")),
         "hhkb_transport": probe.get("transport") or "absent",
         "follow_hhkb_usb": bool(cfg.get("follow_hhkb_usb", True)),
+        "follow_keyboard_arrival": bool(cfg.get("follow_keyboard_arrival", True)),
+        "push_on_leave": (
+            default_push_on_leave(cfg)
+            if cfg.get("push_on_leave") is None
+            else bool(cfg["push_on_leave"])
+        ),
         "target_channel": cfg["target_channel"],
         "hosts": cfg["hosts"],
         "host_list": public_host_list(cfg),
@@ -2959,6 +3049,11 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
     )
     print(f"hhkb          : {state['hhkb']}  transport={transport}  ({usb_note})")
     print(f"target        : channel {state['target_channel']}")
+    print(
+        f"follow        : arrival={str(bool(state.get('follow_keyboard_arrival'))).lower()}  "
+        f"usb={str(bool(state.get('follow_hhkb_usb'))).lower()}  "
+        f"push_on_leave={str(bool(state.get('push_on_leave'))).lower()}"
+    )
     print(f"target_hint   : {state['target_hint']}  source={state.get('target_hint_source', '?')}")
     print(f"bar           : {state.get('bar_label', state['target_hint'])}")
     print("adapters")
@@ -3053,31 +3148,84 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
 
 
 def watch_usb_rising_edge(last_usb: bool | None, usb_now: bool, follow_usb: bool) -> tuple[bool, bool]:
-    """Detect Fn+Ctrl+0: USB appearance. Startup snapshot does not fire."""
+    """Detect USB appearance. Startup snapshot does not fire."""
     if last_usb is None:
         return bool(usb_now), False
     fire = bool(follow_usb) and bool(usb_now) and not bool(last_usb)
     return bool(usb_now), fire
 
 
+def _watch_pull_here(cfg: dict, dry_run: bool, *, reason: str) -> None:
+    """Run `desk to <this_host>` once for a keyboard edge."""
+    here = str(cfg["this_host"])
+    here_channel = host_channel(cfg, here)
+    if dry_run:
+        log(f"dry-run: {reason} — would desk to {here} (channel {here_channel})")
+        return
+    log(f"{reason} — desk → {here} (channel {here_channel})")
+    rc = cmd_to(cfg, here)
+    if rc != 0:
+        log(f"follow to {here} failed (rc={rc})")
+
+
+def _watch_push_leave(cfg: dict, dry_run: bool, dest: int, retries: int, retry_delay: float) -> None:
+    if dry_run:
+        log(f"dry-run: would switch mouse to channel {dest}")
+        return
+    log(f"HHKB left — switching mouse to channel {dest}")
+    rc = 1
+    for attempt in range(1, retries + 1):
+        rc = switch_mouse(cfg, dest)
+        if rc == 0:
+            log(f"switch sent (attempt {attempt})")
+            return
+        log(f"switch attempt {attempt} failed (rc={rc})")
+        time.sleep(retry_delay)
+    log("giving up this departure; will re-arm when HHKB returns")
+
+
 def cmd_watch(cfg: dict, dry_run: bool) -> int:
+    """Follow the keyboard. Arrival pulls the whole desk to this host.
+
+    Bluetooth and USB use the same debounced rising edge
+    (`absent_polls_required`, sleep-gap snapshot, probe errors count as
+    present). `follow_hhkb_usb` still adds the legacy one-sample USB edge
+    so a cable plug pulls even when the keyboard was already here over
+    Bluetooth. Leave pushes the mouse to `follow_channel` only when
+    `push_on_leave` is set.
+    """
     interval = float(cfg["poll_interval_s"])
-    need = int(cfg["absent_polls_required"])
+    need = max(int(cfg["absent_polls_required"]), 1)
     sleep_gap = float(cfg["sleep_gap_s"])
     retries = int(cfg["switch_retries"])
     retry_delay = float(cfg["switch_retry_delay_s"])
     dest = int(cfg["target_channel"])
     follow_usb = bool(cfg.get("follow_hhkb_usb", True))
+    follow_arrival = bool(cfg.get("follow_keyboard_arrival", True))
+    if cfg.get("push_on_leave") is None:
+        push_leave = default_push_on_leave(cfg)
+    else:
+        push_leave = bool(cfg["push_on_leave"])
+    here = str(cfg["this_host"])
 
     log(
-        f"watching HHKB → MX channel {dest} "
+        f"watching keyboard → desk to {here} "
         f"(dry_run={dry_run}, every {interval}s, absent×{need}, "
-        f"follow_hhkb_usb={follow_usb})"
+        f"follow_keyboard_arrival={follow_arrival}, follow_hhkb_usb={follow_usb}, "
+        f"push_on_leave={push_leave}, follow_channel={dest})"
     )
     armed = False
     absent = 0
     last = time.time()
     last_usb: bool | None = None
+    # First sample after start or a sleep gap is a snapshot, not an edge.
+    baseline = True
+    present_streak = 0
+    # True once this host is the last pull target and the keyboard has not
+    # had a confirmed leave since. A blip shorter than `need` polls must
+    # not run `desk to` again.
+    focused_here = False
+    arrival_latched = False
 
     while True:
         now = time.time()
@@ -3086,67 +3234,89 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
             armed = False
             absent = 0
             last_usb = None
+            present_streak = 0
+            arrival_latched = False
+            baseline = True
         last = now
 
         try:
             probe = hhkb_probe(cfg)
+        except StopIteration:
+            raise
         except Exception as exc:  # noqa: BLE001 — never treat a probe crash as gone
             log(f"presence probe error ({exc}); treating as present")
             probe = empty_hhkb_probe(unknown=True)
 
-        present = bool(probe.get("present"))
-        usb_now = bool(probe.get("usb"))
+        unknown = bool(probe.get("unknown"))
+        # A failed probe counts as present so it cannot look like a leave
+        # or, below, like a fresh arrival.
+        usb_now = bool(probe.get("usb")) and not unknown
+        present = bool(probe.get("present")) and not unknown
 
-        # Fn+Ctrl+0: USB rising edge pulls the whole desk to the machine with the cable.
-        last_usb, follow_here = watch_usb_rising_edge(last_usb, usb_now, follow_usb)
-        if follow_here:
-            here = str(cfg["this_host"])
-            here_channel = host_channel(cfg, here)
-            if dry_run:
-                log(
-                    f"dry-run: HHKB USB appeared — would desk to {here} "
-                    f"(channel {here_channel})"
-                )
+        if baseline:
+            baseline = False
+            last_usb = usb_now
+            if present or unknown:
+                armed = True
+                present_streak = 1 if present else 0
+                focused_here = True
+                arrival_latched = True
+                log("HHKB USB present — armed" if usb_now else "HHKB present — armed")
             else:
-                log(f"HHKB USB appeared — desk → {here} (channel {here_channel})")
-                rc = cmd_to(cfg, here)
-                if rc != 0:
-                    log(f"USB follow to {here} failed (rc={rc})")
-            armed = True
-            absent = 0
+                present_streak = 0
+                focused_here = False
+                arrival_latched = False
+            time.sleep(interval)
+            continue
 
-        # USB cable is never an "absent" hop-away. BT leave still is.
-        if usb_now:
-            if not armed:
-                log("HHKB USB present — armed")
-            armed = True
+        last_usb, usb_rise = watch_usb_rising_edge(last_usb, usb_now, follow_usb)
+
+        if present:
+            present_streak += 1
             absent = 0
-        elif present:
+            if not armed:
+                log("HHKB USB present — armed" if usb_now else "HHKB present — armed")
+            armed = True
+        elif unknown:
+            absent = 0
             if not armed:
                 log("HHKB present — armed")
             armed = True
-            absent = 0
         elif armed:
+            present_streak = 0
+            arrival_latched = False
             absent += 1
             if absent == 1 or absent == need:
                 log(f"HHKB absent ({absent}/{need})")
-            if absent >= need:
-                if dry_run:
-                    log(f"dry-run: would switch mouse to channel {dest}")
-                else:
-                    log(f"HHKB left — switching mouse to channel {dest}")
-                    rc = 1
-                    for attempt in range(1, retries + 1):
-                        rc = switch_mouse(cfg, dest)
-                        if rc == 0:
-                            log(f"switch sent (attempt {attempt})")
-                            break
-                        log(f"switch attempt {attempt} failed (rc={rc})")
-                        time.sleep(retry_delay)
-                    if rc != 0:
-                        log("giving up this departure; will re-arm when HHKB returns")
-                armed = False
-                absent = 0
+        else:
+            present_streak = 0
+            arrival_latched = False
+
+        arrival_edge = (
+            follow_arrival
+            and present
+            and present_streak >= need
+            and not arrival_latched
+        )
+        if usb_rise or (arrival_edge and not focused_here):
+            reason = "HHKB USB appeared" if usb_rise else "keyboard arrived"
+            _watch_pull_here(cfg, dry_run, reason=reason)
+            focused_here = True
+            arrival_latched = True
+            armed = True
+            absent = 0
+        elif arrival_edge and focused_here:
+            log(f"keyboard arrived — {here} is already the last action; not switching again")
+            arrival_latched = True
+        elif not present and not unknown and armed and absent >= need:
+            if push_leave:
+                _watch_push_leave(cfg, dry_run, dest, retries, retry_delay)
+            else:
+                log("HHKB left — not pushing the mouse (the host that sees the keyboard pulls)")
+            focused_here = False
+            arrival_latched = False
+            armed = False
+            absent = 0
         time.sleep(interval)
 
 
@@ -3318,7 +3488,7 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
     status.add_argument("--hint", action="store_true", help="print the focus token only")
     status.add_argument("--local", action="store_true", help="skip SSH peer peek")
     sub.add_parser("hint", help="print the focus token (MAC, LNX, or that host's hint)")
-    watch = sub.add_parser("watch", help="follow HHKB leave (mouse away) and USB appear (desk here)")
+    watch = sub.add_parser("watch", help="keyboard arrival runs desk to this host")
     watch.add_argument("--dry-run", action="store_true")
     sw = sub.add_parser("switch", help="push the mouse, or switch a whole desk")
     sw.add_argument("target", nargs="?", help="Easy-Switch 1|2|3, or a configured host id")

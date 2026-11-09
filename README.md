@@ -19,8 +19,8 @@ Taught command: **`desk`**. LaunchAgent / systemd *unit filenames* can
 stay (`local.hhkb-mx-follow`, `hhkb-mx-follow.service`); they invoke
 `desk`.
 
-Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
-*away*. Install the watcher on every computer you leave from.
+Works on **macOS** and **Linux**. Install the watcher on every computer.
+The host where the keyboard arrives runs `desk to` itself.
 
 **Docs:** [RFC 0001](docs/rfc/0001-rust-core-and-adapters.md) ·
 [RFC 0002](docs/rfc/0002-desk-product-kettle-shared-tray.md) ·
@@ -46,26 +46,30 @@ can also ship `desk-<id>` on PATH. See [Plug another adapter](#plug-another-adap
 
 ## How it works
 
-Logitech Enhanced Easy-Switch only links an MX keyboard to an MX mouse. An
-HHKB is invisible to Logi Options+. Two paths:
+The keyboard picks the host. Software cannot move it: each machine is a
+Bluetooth slot, or the USB cable. `desk watch` on that machine sees the
+keyboard arrive and runs the full `desk to <this host>`.
 
 ```
-Fn+Ctrl+2 on the HHKB          Fn+Ctrl+0 (HHKB → USB)
-        │                              │
-        ▼                              ▼
- HHKB disconnects (BT hop)      USB appears on the host
-        │                       that has the cable
-        ▼                              │
- desk watch (~2s)                      ▼
-        │                       watch: rising hhkb_usb
-        ▼                              │
- mouse → other Easy-Switch             ▼
- DualUp is left alone           desk to <this_host>
-                                (mouse + DualUp input)
-
-desk to linux                 (or the Omarchy / macOS panel)
+keyboard arrives on this host     (Bluetooth or USB, after the leave debounce)
         │
-        ├─ mouse adapter  → Linux channel
+        ▼
+desk to <this host>
+        ├─ mouse → this host's channel
+        │     local adapter, else SSH relay_hosts when the device is absent
+        ├─ display input → this host's input
+        │     pre_switch, then the local adapter, else the same relay
+        └─ OS layout, when this hop is a PBP / full change
+
+keyboard leaves this host
+        │
+        ├─ one or two hosts: mouse → follow_channel     (push_on_leave, default on)
+        └─ three or more:    nothing                    (the next host pulls)
+
+desk to <host>                (or the Omarchy / macOS panel)
+        │
+        ├─ mouse adapter  → that host's channel
+        │     local, else SSH relay on "not found"
         └─ display input  → local adapter, else SSH relay_hosts on "not found"
 
 desk pbp                      (or DualUp PBP in the menu bar / Omarchy panel)
@@ -88,9 +92,17 @@ DualUp probes). New shells paint `slots`. Lights stay out of the strip
 unless `ui.tray.lights` is true. Slot order and HUD prefs live in `ui`
 — see [docs/ui-config.md](docs/ui-config.md).
 
-**Lock screen / greeter:** keep the HHKB USB cable in the machine you are
-unlocking. `Fn+Ctrl+0` selects USB — `watch` then pulls mouse + DualUp
-input to whichever host has the cable.
+A rising USB sample is the legacy `follow_hhkb_usb` edge: it also runs
+`desk to` this host when the keyboard was already connected over Bluetooth.
+`follow_keyboard_arrival` (default on) is the edge for every transport.
+The first sample after start or sleep is a snapshot, and a probe error
+counts as present, so neither one pulls the desk by itself. A drop shorter
+than the debounce does not count as a new arrival, and a repeat sample
+does not run again while this host is still the last pull.
+
+**Lock screen / greeter:** keep the keyboard USB cable in the machine you are
+unlocking. Selecting USB makes `watch` pull mouse + display input to whichever
+host has the cable.
 
 ## Requirements
 
@@ -405,7 +417,9 @@ Edit [`config.example.json`](config.example.json) →
 | `ui.tray.lights` | If true, `bar_strip` may include a lights on/off mark |
 | `ui.tray.slots` | Order + show/hide + flavor. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
 | `adapters.hosts.this_host` | This machine's id. Any id in the host map. Default is `mac` on macOS and `linux` on Linux |
-| `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to when the keyboard leaves |
+| `adapters.hosts.follow_channel` | Easy-Switch slot `watch` pushes the mouse to when the keyboard leaves, if `push_on_leave` is on |
+| `adapters.hosts.follow_keyboard_arrival` | If true (default), `watch` runs `desk to <this_host>` when the keyboard arrives on any transport, after the same debounce as a leave |
+| `adapters.hosts.push_on_leave` | If true, a confirmed leave pushes the mouse to `follow_channel`. Default true for one or two hosts, false for three or more |
 | `adapters.hosts.<id>.channel` | Mouse channel for that host. `mouse_channel` is the same field. `desk to <id>` uses it |
 | `adapters.hosts.<id>.keyboard_slot` | Opaque keyboard slot stored for the keyboard adapter |
 | `adapters.hosts.<id>.input` | Display input for `desk to <id>`. `adapters.display.inputs.<id>` is the same value |
@@ -416,13 +430,15 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.hosts.<id>.pre_switch` | Optional shell command run on that host before `desk to` changes its display input |
 | `adapters.display.relay_hosts` | Ordered host ids. When the local display adapter reports the device absent, try these peers and stop at the first success. `adapters.dualup.relay_hosts` is the same list |
 | `adapters.display.relay_path` | Optional remote executable. Default is `$HOME/.local/lib/desk/<adapter id>` |
+| `adapters.mouse.relay_hosts` | Ordered host ids for the mouse. When the local mouse adapter reports the device absent, try these and stop at the first success. When omitted, the display `relay_hosts` list is used |
+| `adapters.mouse.relay_path` | Optional remote mouse executable. Default is `$HOME/.local/lib/desk/<mouse adapter id>` |
 | `adapters.dualup.switch_pbp` | If true, `to mac\|linux` also runs the PBP sequence |
 | `adapters.dualup.pbp_mode` | Mode for `desk pbp` and for `to` when `switch_pbp` is true |
 | `adapters.dualup.display_id` | macOS displayplacer UUID or Hyprland connector. Empty = detect DualUp |
 | `adapters.dualup.layout` | Apply OS resolution/rotation after USB (default true) |
 | `adapters.dualup.layout_settle_s` | Seconds to wait after USB before OS layout. Default 0.5 |
 | `adapters.dualup.peer` | Optional SSH host; runs `dualup-layout` there (no USB) |
-| `adapters.hosts.follow_hhkb_usb` | If true (default), `watch` treats HHKB USB appearance as `to <this_host>`, on that host's own channel |
+| `adapters.hosts.follow_hhkb_usb` | Legacy USB-only edge. If true (default), a rising USB sample runs `desk to <this_host>` even when the keyboard was already here over Bluetooth. Set `follow_keyboard_arrival` false to keep only this edge |
 | `poll_interval_s` / `absent_polls_required` | Watcher debounce (defaults 0.5s × 4 ≈ 2s) |
 
 ### More than two hosts
@@ -430,8 +446,16 @@ Edit [`config.example.json`](config.example.json) →
 Host ids come from `adapters.hosts`. `mac` and `linux` stay valid, including
 aliases (`macos`, `omarchy`). A third id is just another entry: its channel,
 display input, `ssh`, and `pre_switch` are what `desk to <id>` and the
-display relay use. `this_host` on that machine is the same id. USB appearance
-runs `desk to` that id, so the mouse moves to **this** host's channel.
+relays use. `this_host` on that machine is the same id.
+
+With three or more hosts the keyboard is the only driver. The machine
+that sees it arrive (Bluetooth slot or USB) runs `desk to` **this** id:
+mouse channel, display input, `pre_switch`, and the relay when the device
+is not on this host. Leaving does not push the mouse at `follow_channel`,
+because this host cannot know which of the others took the keyboard.
+`push_on_leave` stays available and defaults off once the map has three
+or more ids. A file that only names `mac` and `linux` still pushes on
+leave, and still treats a USB appearance as `desk to` this host.
 
 A file that only names `mac` and `linux` (or only sets `target_channel`)
 keeps today's channels. Naming any other id does not invent a `linux` entry
@@ -518,6 +542,24 @@ specific to one monitor. On success desk prints `display input <name> via <host>
 `relay_hosts` when the control device stays on the machine that runs
 `desk to`. A target with no input configured prints that and does not
 guess one.
+
+### Mouse relay
+
+The mouse adapter can send a host change only while the mouse is connected
+to the machine that runs it. `desk to` (and the leave-push, when that is
+on) runs the local adapter first. If it exits non-zero and the output says
+the device is absent (`not found`, or `No … found`), desk tries each relay
+host over SSH and stops at the first success:
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=3 <ssh target> \
+  "$HOME/.local/lib/desk/<mouse adapter id> <channel>"
+```
+
+On success it prints `mouse channel <n> via <host>`. `adapters.mouse.relay_hosts`
+is the ordered list. When that key is omitted, `adapters.display.relay_hosts`
+is used, so one list can cover both devices. An explicit empty mouse list
+does not fall back. Other adapter errors stay on this host.
 
 Inputs the helper accepts: `usbc` / `usb-c` / `dp3`, `dp` / `dp1`, `dp2`,
 `hdmi1`, `hdmi2`, `auto`. List devices: `lgdualup --list` (or `--info`).
@@ -629,11 +671,13 @@ Prefer `desk kettle …`. Optional `kettle` on PATH is a shim to
 `mouse_channel` (live or cached), `adapters.mouse.available`,
 `adapters.dualup.available`, and whether DualUp USB was seen (`dualup_info`).
 
-**Watcher never fires (HHKB USB ghost).** Mac still sees the HHKB over USB.
-That is now a *feature* when `follow_hhkb_usb` is on: USB appearance pulls
-the desk here instead of hopping the mouse away. To hop with BT only, unplug
-or use charge-only USB. A probe error is treated as *present* so a flaky
-`hidutil` cannot steal the mouse.
+**Watcher never fires (keyboard USB ghost).** This host still sees the
+keyboard over USB, so a Bluetooth hop does not look like a leave. With
+`follow_keyboard_arrival` (default) the host that actually sees the
+keyboard runs `desk to` itself. `follow_hhkb_usb` still treats a rising
+USB sample as that same pull. To hop on Bluetooth only, unplug or use a
+charge-only cable. A probe error is treated as *present* so a flaky read
+cannot steal the mouse or look like a new arrival.
 
 **Bar shows `?` on Mac while Linux is focused.** The MX Master is on the
 Linux Easy-Switch channel, so Mac `mxswitch --info` fails (mouse asleep /
@@ -656,6 +700,13 @@ says so and leaves the input unchanged. After PBP / full the host must
 also get the OS layout. Optional `adapters.dualup.peer` SSHes layout-only
 to the other machine. `pre_switch` on the target host runs first when you
 need that machine's outputs awake before the input changes.
+
+**Mouse not found on this host.** The mouse radio is on whichever machine
+it is paired to right now. `desk to` runs the mouse adapter locally, then
+each `adapters.mouse.relay_hosts` entry (or the display `relay_hosts` list
+when the mouse list is omitted) over SSH, and prints which host performed
+it. The host where the keyboard arrives is often not the host that still
+has the mouse, so that relay is what completes the hop.
 
 **Panel / menu bar shows `?` or “desk not found”.** CLI not installed, or
 GUI `PATH` lacks `~/.local/bin`. The menu bar also looks in `~/.local/bin`
