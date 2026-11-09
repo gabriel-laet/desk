@@ -41,6 +41,8 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
     desk wallpaper apply    # per-output wallpaper (no-op unless configured)
     desk watch              # keyboard arrives → desk to this host
     desk watch --dry-run
+    desk session-run -- <adapter> [args]
+                            # ask the local watcher to run an adapter
 """
 
 from __future__ import annotations
@@ -53,14 +55,16 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
@@ -78,6 +82,33 @@ PEER_CACHE_TTL_S = 20.0
 # brief the display-input hop can spend on a dead peer.
 SSH_RELAY_ARGS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"]
 RELAY_TIMEOUT_S = 12.0
+# Mouse hops fail over faster. A dead peer must not add a long TCP timeout
+# onto the host that actually has the radio. OpenSSH's default is one try.
+MOUSE_SSH_RELAY_ARGS = [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=2",
+    "-o",
+    "ConnectionAttempts=1",
+]
+MOUSE_RELAY_TIMEOUT_S = 8.0
+# Who last reported the mouse online. Ordering only — a hop still tries
+# every candidate. Unreachable is a short memory so a peer that was off
+# is not stuck at the back of the list all day.
+MOUSE_ONLINE_TTL_S = 30 * 60
+MOUSE_UNREACHABLE_TTL_S = 120.0
+SESSION_AGENT_TIMEOUT_S = 8.0
+# Marks on adapter stderr so a relay can tell a GUI-session answer from
+# an SSH child that never had Input Monitoring.
+SESSION_MARK_GUI = "desk-session: gui"
+SESSION_MARK_OUTSIDE = "desk-session: outside-gui"
+SESSION_CONTEXT_EXPLANATION = (
+    "This process is outside the GUI session. Input Monitoring granted to "
+    "the desk watcher (the agent that runs `desk watch`) does not apply to "
+    "an SSH shell. Reload that agent after updating desk so a peer can ask "
+    "it to run the adapter."
+)
 # Adapters report "device absent" with a non-zero exit and text such as
 # "not found" or a line "No <device> found". Other failures stay on this host.
 _ABSENT_RE = re.compile(r"not found|^\s*no\b.+\bfound\b", re.I | re.M)
@@ -1093,6 +1124,115 @@ def save_mouse_cache(channel: int, now: float | None = None) -> None:
         return
 
 
+def mouse_seen_path() -> Path:
+    return cache_dir() / "mouse-seen.json"
+
+
+def load_mouse_seen() -> dict[str, dict]:
+    """Per-host mouse reports. Missing or unreadable is an empty map."""
+    try:
+        raw = json.loads(mouse_seen_path().read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    hosts = raw.get("hosts") if isinstance(raw, dict) else None
+    if not isinstance(hosts, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for key, value in hosts.items():
+        if isinstance(value, dict):
+            out[str(key)] = dict(value)
+    return out
+
+
+def record_mouse_seen(
+    host: str,
+    *,
+    online: bool | None = None,
+    reachable: bool | None = None,
+    channel: int | None = None,
+    now: float | None = None,
+) -> None:
+    """Remember a mouse report for relay ordering. Failures are ignored."""
+    host_id = str(host or "").strip()
+    if not host_id:
+        return
+    try:
+        host_id = normalize_host(host_id)
+    except SystemExit:
+        return
+    moment = time.time() if now is None else float(now)
+    data = load_mouse_seen()
+    entry = dict(data.get(host_id) or {})
+    if online is not None:
+        entry["online"] = bool(online)
+        entry["online_ts"] = moment
+    if reachable is not None:
+        entry["reachable"] = bool(reachable)
+        entry["reachable_ts"] = moment
+    if channel is not None:
+        try:
+            entry["channel"] = int(channel)
+        except (TypeError, ValueError):
+            pass
+    data[host_id] = entry
+    path = mouse_seen_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"hosts": data}) + "\n")
+        tmp.replace(path)
+    except OSError:
+        return
+
+
+def order_mouse_relay_hosts(
+    hosts: list[str],
+    seen: dict | None = None,
+    now: float | None = None,
+) -> list[str]:
+    """Configured order, with fresh online reports first and dead peers last.
+
+    A host that last reported the mouse online is the one most likely to
+    still have the radio. A peer that just failed to answer sinks for a
+    short while so the next hop does not wait on it first. Everyone else
+    keeps the configured order. This never drops a candidate.
+    """
+    moment = time.time() if now is None else float(now)
+    reports = load_mouse_seen() if seen is None else seen
+
+    def rank(pair: tuple[int, str]) -> tuple:
+        index, host = pair
+        info = reports.get(host) if isinstance(reports, dict) else None
+        if not isinstance(info, dict):
+            info = {}
+        try:
+            online_ts = float(info.get("online_ts") or 0)
+        except (TypeError, ValueError):
+            online_ts = 0.0
+        try:
+            reachable_ts = float(info.get("reachable_ts") or 0)
+        except (TypeError, ValueError):
+            reachable_ts = 0.0
+        fresh_online = (
+            bool(info.get("online"))
+            and online_ts <= moment
+            and (moment - online_ts) <= MOUSE_ONLINE_TTL_S
+        )
+        down = (
+            info.get("reachable") is False
+            and reachable_ts <= moment
+            and (moment - reachable_ts) <= MOUSE_UNREACHABLE_TTL_S
+            and reachable_ts >= online_ts
+        )
+        if fresh_online and not down:
+            return (0, -online_ts, index)
+        if down:
+            return (2, index, 0.0)
+        return (1, index, 0.0)
+
+    return [host for _, host in sorted(enumerate(hosts), key=rank)]
+
+
 def target_hint(cfg: dict, mouse_channel: int | None = None, hhkb: bool | None = None) -> str:
     """Desk focus: mouse Easy-Switch channel wins; local HHKB is a weak fallback."""
     return resolve_target_hint(cfg, mouse_channel=mouse_channel, hhkb_present=hhkb)[0]
@@ -1840,8 +1980,8 @@ def wallpaper_signature_from_outputs(outputs: object) -> str:
     return "|".join(f"{name}:{width}x{height}" for name, width, height in parts)
 
 
-def wallpaper_geometry_signature(cfg: dict) -> tuple[str | None, str | None]:
-    data = invoke_wallpaper(cfg, "geometry", timeout=5.0)
+def wallpaper_geometry_signature(cfg: dict, *, timeout: float = 5.0) -> tuple[str | None, str | None]:
+    data = invoke_wallpaper(cfg, "geometry", timeout=timeout)
     if data is None:
         return None, "wallpaper adapter not found"
     if data.get("ok") is False:
@@ -1941,7 +2081,9 @@ def wallpaper_watch_poll(cfg: dict, state: dict, now: float) -> None:
     if not wallpaper_poll_due(state, now):
         return
     try:
-        signature, error = wallpaper_geometry_signature(cfg)
+        # The follow loop cannot wait on a slow display enumeration.
+        # system_profiler in particular outlives a poll interval.
+        signature, error = wallpaper_geometry_signature(cfg, timeout=2.0)
     except Exception as exc:  # noqa: BLE001
         signature, error = None, str(exc)
     if error or signature is None:
@@ -1967,7 +2109,7 @@ def switch_mouse(cfg: dict, channel: int | None = None) -> int:
         print("mouse adapter disabled")
         return 0
     dest = int(cfg["target_channel"] if channel is None else channel)
-    relays = mouse_relay_host_ids(cfg)
+    relays = order_mouse_relay_hosts(mouse_relay_host_ids(cfg))
     explicit = "_mouse_relay_hosts" in cfg
     peers = [host for host in relays if host != _this_host_id(cfg)]
     try:
@@ -1989,6 +2131,10 @@ def switch_mouse(cfg: dict, channel: int | None = None) -> int:
         label=f"mouse channel {dest}",
         relay_host_ids=relays,
         remote_path=mouse_relay_path(cfg),
+        via_session=True,
+        ssh_args=MOUSE_SSH_RELAY_ARGS,
+        timeout=MOUSE_RELAY_TIMEOUT_S,
+        host_result=_track_mouse_host,
     )
     if rc == 0:
         save_mouse_cache(dest)
@@ -2017,13 +2163,20 @@ def mouse_snapshot(cfg: dict) -> dict:
     """Live Easy-Switch channel, or last-known if the mouse is asleep / on the other host."""
     info, live = mouse_info(cfg)
     cached, cached_ts = load_mouse_cache()
+    here = str(cfg.get("this_host") or "").strip()
     if live is not None:
         save_mouse_cache(live)
+        if here:
+            record_mouse_seen(here, online=True, channel=live, reachable=True)
         channel, source, online, stale = live, "mouse", True, False
     elif cached is not None:
         channel, source, online, stale = cached, "mouse_cached", False, True
+        if here:
+            record_mouse_seen(here, online=False, reachable=True)
     else:
         channel, source, online, stale = None, None, False, False
+        if here:
+            record_mouse_seen(here, online=False, reachable=True)
     return {
         "info": info,
         "channel": channel,
@@ -2337,8 +2490,422 @@ def remote_adapter_invocation(
     return " ".join([_shell_token(binary), *(shlex.quote(str(arg)) for arg in args)])
 
 
-def ssh_argv(target: str, remote_command: str) -> list[str]:
-    return ["ssh", *SSH_RELAY_ARGS, target, remote_command]
+def ssh_argv(
+    target: str,
+    remote_command: str,
+    ssh_args: list[str] | None = None,
+) -> list[str]:
+    return ["ssh", *(SSH_RELAY_ARGS if ssh_args is None else ssh_args), target, remote_command]
+
+
+def remote_session_invocation(
+    adapter_id: str,
+    args: list[str],
+    remote_path: str | None = None,
+) -> str:
+    """Ask the peer's desk watcher to run the adapter, then fall back.
+
+    The watcher is the process in the GUI session. An SSH child on macOS
+    does not inherit Input Monitoring from that agent, so the relay must
+    not be the process that opens the mouse. Peers without `session-run`
+    still exec the adapter directly.
+    """
+    direct = remote_adapter_invocation(adapter_id, args, remote_path)
+    return (
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        "if desk session-run --check >/dev/null 2>&1; then "
+        f"exec desk session-run -- {direct}; "
+        "fi; "
+        f"exec {direct}"
+    )
+
+
+def in_session_agent() -> bool:
+    """True in the watcher process that owns the GUI-session listener."""
+    return os.environ.get("DESK_SESSION_AGENT") == "1"
+
+
+def session_agent_socket_path() -> Path:
+    return cache_dir() / "session-agent.sock"
+
+
+def _strip_session_marks(text: str) -> str:
+    """Hide machine markers. The human explanation stays."""
+    kept: list[str] = []
+    for line in (text or "").splitlines(keepends=True):
+        if SESSION_MARK_GUI in line or SESSION_MARK_OUTSIDE in line:
+            continue
+        kept.append(line)
+    return "".join(kept)
+
+
+def _print_adapter_output(proc: subprocess.CompletedProcess) -> None:
+    shown = subprocess.CompletedProcess(
+        proc.args,
+        proc.returncode,
+        stdout=_strip_session_marks(proc.stdout or ""),
+        stderr=_strip_session_marks(proc.stderr or ""),
+    )
+    _print_helper(shown)
+
+
+def _append_line(text: str, line: str) -> str:
+    base = text or ""
+    if line in base:
+        return base if base.endswith("\n") else base + "\n"
+    if base and not base.endswith("\n"):
+        base += "\n"
+    return base + line + "\n"
+
+
+def adapter_session_blocked(stdout: str = "", stderr: str = "") -> bool:
+    """True when this result cannot prove the device is absent.
+
+    A GUI-session answer (`desk-session: gui`) is authoritative, even if
+    the adapter also mentions Input Monitoring. An SSH child that prints
+    that phrase, or `desk-session: outside-gui`, did not run where the
+    grant applies.
+    """
+    text = f"{stdout or ''}\n{stderr or ''}"
+    if SESSION_MARK_GUI in text:
+        return False
+    if SESSION_MARK_OUTSIDE in text:
+        return True
+    return re.search(r"input monitoring", text, re.I) is not None
+
+
+def _direct_needs_session_note(returncode: int, stdout: str, stderr: str) -> bool:
+    if returncode == 0:
+        return False
+    text = f"{stdout or ''}\n{stderr or ''}"
+    return re.search(r"input monitoring", text, re.I) is not None
+
+
+def _track_mouse_host(host: str, kind: str) -> None:
+    """Update relay order from a hop. A session miss is not 'mouse left'."""
+    if kind == "ok":
+        record_mouse_seen(host, online=True, reachable=True)
+    elif kind == "absent":
+        record_mouse_seen(host, online=False, reachable=True)
+    elif kind == "unreachable":
+        record_mouse_seen(host, reachable=False)
+    elif kind == "session":
+        record_mouse_seen(host, reachable=True)
+
+
+def session_argv_allowed(cfg: dict, argv: list[str]) -> bool:
+    """The watcher only runs desk adapters, not an arbitrary SSH command."""
+    if not argv or not str(argv[0]).strip():
+        return False
+    raw = os.path.expanduser(os.path.expandvars(str(argv[0])))
+    candidate = Path(raw)
+    if not _is_exe(candidate):
+        found = which_cmd(raw)
+        if found is None:
+            return False
+        candidate = found
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return False
+    roots: list[Path] = []
+    for lib in libexec_dirs():
+        try:
+            roots.append(lib.resolve())
+        except OSError:
+            continue
+    for root in roots:
+        if resolved == root or root in resolved.parents:
+            return True
+    extras: list[Path] = []
+    bound = bind_role(cfg, "mouse").get("path")
+    if bound:
+        extras.append(Path(str(bound)))
+    relay = mouse_relay_path(cfg)
+    if relay:
+        extras.append(Path(os.path.expanduser(os.path.expandvars(relay))))
+    for extra in extras:
+        try:
+            if _is_exe(extra) and extra.resolve() == resolved:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _session_exec(cfg: dict, argv: list[str]) -> dict:
+    if not session_argv_allowed(cfg, argv):
+        return {
+            "rc": 126,
+            "stdout": "",
+            "stderr": "session agent refused to run that program\n",
+        }
+    try:
+        proc = run([str(part) for part in argv], timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"rc": 1, "stdout": "", "stderr": f"adapter failed to start: {exc}\n"}
+    return {
+        "rc": int(proc.returncode or 0),
+        "stdout": proc.stdout or "",
+        "stderr": proc.stderr or "",
+    }
+
+
+def _read_session_line(conn: socket.socket, limit: int = 65536) -> bytes:
+    buf = b""
+    while b"\n" not in buf and len(buf) < limit:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def _write_session_result(conn: socket.socket, result: dict) -> None:
+    payload = {
+        "rc": int(result.get("rc") or 0),
+        "stdout": str(result.get("stdout") or "")[:16384],
+        "stderr": str(result.get("stderr") or "")[:16384],
+    }
+    conn.sendall((json.dumps(payload) + "\n").encode())
+
+
+def _session_socket_live(path: Path) -> bool:
+    if not path.exists():
+        return False
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(0.2)
+    try:
+        sock.connect(str(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def session_agent_call(argv: list[str], timeout: float = SESSION_AGENT_TIMEOUT_S) -> dict | None:
+    """Ask the local watcher to run `argv`. None when no watcher is listening."""
+    path = session_agent_socket_path()
+    if not path.exists():
+        return None
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        try:
+            sock.connect(str(path))
+        except OSError:
+            return None
+        sock.sendall((json.dumps({"op": "run", "argv": [str(part) for part in argv]}) + "\n").encode())
+        raw = _read_session_line(sock)
+    except (OSError, TimeoutError):
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    try:
+        data = json.loads(raw.decode() or "{}")
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or "rc" not in data:
+        return None
+    return data
+
+
+def _result_to_proc(argv: list[str], result: dict, *, gui: bool) -> subprocess.CompletedProcess:
+    try:
+        rc = int(result.get("rc") or 0)
+    except (TypeError, ValueError):
+        rc = 1
+    stdout = str(result.get("stdout") or "")
+    stderr = str(result.get("stderr") or "")
+    if gui and rc != 0:
+        stderr = _append_line(stderr, SESSION_MARK_GUI)
+    return subprocess.CompletedProcess(list(argv), rc, stdout=stdout, stderr=stderr)
+
+
+def run_adapter_argv(
+    cfg: dict,
+    argv: list[str],
+    *,
+    via_session: bool,
+    timeout: float = 8.0,
+) -> subprocess.CompletedProcess:
+    """Run an adapter here, or in the watcher when this process is not it.
+
+    The watcher sets `DESK_SESSION_AGENT` so its own hops do not loop back
+    through the socket. Any other process (an SSH shell, a menu bar, a
+    peer's `desk session-run`) asks the watcher first.
+    """
+    if via_session and not in_session_agent():
+        result = session_agent_call(argv, timeout=min(float(timeout), SESSION_AGENT_TIMEOUT_S))
+        if result is not None:
+            return _result_to_proc(argv, result, gui=True)
+    proc = run(list(argv), timeout=timeout)
+    out = proc.stdout or ""
+    err = proc.stderr or ""
+    if not via_session:
+        return proc
+    # This process is the watcher. Its answer is the GUI session, including
+    # when the adapter's own text mentions Input Monitoring.
+    if in_session_agent():
+        if proc.returncode != 0:
+            err = _append_line(err, SESSION_MARK_GUI)
+            return subprocess.CompletedProcess(list(argv), proc.returncode, stdout=out, stderr=err)
+        return proc
+    # No watcher answered. An Input Monitoring failure here is the SSH
+    # shell, not proof the device is on another host.
+    if SESSION_MARK_GUI not in f"{out}\n{err}" and _direct_needs_session_note(
+        proc.returncode, out, err
+    ):
+        err = _append_line(err, SESSION_CONTEXT_EXPLANATION)
+        err = _append_line(err, SESSION_MARK_OUTSIDE)
+        return subprocess.CompletedProcess(list(argv), proc.returncode, stdout=out, stderr=err)
+    return proc
+
+
+class SessionAgent:
+    """Unix-socket server inside `desk watch`. Children inherit its session.
+
+    On macOS that session is the launchd GUI agent, which is the process
+    Input Monitoring was granted for. Peers connect and this process runs
+    the adapter.
+    """
+
+    def __init__(self, cfg: dict) -> None:
+        self.cfg = cfg
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._sock: socket.socket | None = None
+        self._path: Path | None = None
+        self._owns_flag = False
+
+    def start(self) -> None:
+        path = session_agent_socket_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log(f"session agent: cannot create {path.parent} ({exc})")
+            return
+        if _session_socket_live(path):
+            log("session agent already listening")
+            return
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError as exc:
+                log(f"session agent: cannot replace {path.name} ({exc})")
+                return
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            srv.bind(str(path))
+            os.chmod(path, 0o600)
+            srv.listen(4)
+            srv.settimeout(0.2)
+        except OSError as exc:
+            log(f"session agent: not listening ({exc})")
+            try:
+                srv.close()
+            except OSError:
+                pass
+            return
+        self._sock = srv
+        self._path = path
+        os.environ["DESK_SESSION_AGENT"] = "1"
+        self._owns_flag = True
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="desk-session-agent",
+            daemon=True,
+        )
+        self._thread.start()
+        log("session agent listening")
+
+    def stop(self) -> None:
+        self._stop.set()
+        sock = self._sock
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        if self._path is not None:
+            try:
+                if self._path.exists():
+                    self._path.unlink()
+            except OSError:
+                pass
+        if self._owns_flag:
+            os.environ.pop("DESK_SESSION_AGENT", None)
+            self._owns_flag = False
+
+    def _serve(self) -> None:
+        srv = self._sock
+        if srv is None:
+            return
+        while not self._stop.is_set():
+            try:
+                conn, _addr = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                conn.settimeout(2.0)
+                raw = _read_session_line(conn)
+                if not raw.strip():
+                    continue
+                try:
+                    req = json.loads(raw.decode() or "{}")
+                except (UnicodeError, json.JSONDecodeError):
+                    req = None
+                if (
+                    not isinstance(req, dict)
+                    or req.get("op") != "run"
+                    or not isinstance(req.get("argv"), list)
+                ):
+                    result = {"rc": 2, "stdout": "", "stderr": "session agent: bad request\n"}
+                else:
+                    result = _session_exec(self.cfg, [str(part) for part in req["argv"]])
+                _write_session_result(conn, result)
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+
+def cmd_session_run(cfg: dict, argv: list[str], *, check: bool = False) -> int:
+    """Run an adapter in the watcher session. `--check` only tests support.
+
+    No watcher: run the argv in this process. On macOS that is the SSH
+    shell, so a failure that names Input Monitoring is reported as session
+    context instead of a missing device.
+    """
+    if check:
+        return 0
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    argv = [os.path.expanduser(os.path.expandvars(str(part))) for part in argv if str(part) != ""]
+    if not argv:
+        print("usage: desk session-run -- <adapter> [args]", file=sys.stderr)
+        return 2
+    try:
+        proc = run_adapter_argv(cfg, argv, via_session=True, timeout=8.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"adapter failed to start: {exc}", file=sys.stderr)
+        return 1
+    _print_helper(proc)
+    return int(proc.returncode or 0)
 
 
 def run_pre_switch(cfg: dict, host: str) -> int:
@@ -2380,38 +2947,84 @@ def relay_adapter(
     label: str,
     relay_host_ids: list[str] | None = None,
     remote_path: str | None = None,
+    via_session: bool = False,
+    ssh_args: list[str] | None = None,
+    timeout: float | None = None,
+    host_result=None,
 ) -> int:
     """Run an adapter here, then on each relay host until one succeeds.
 
     A peer is used only when this host has no adapter binary, or the local
     run reports the device absent. The first success stops the search.
     Prints which host performed it.
+
+    `via_session` asks the local watcher (and, over SSH, the peer's
+    `desk session-run`) to run the adapter in the GUI session. A result
+    that only means "this SSH shell cannot see the device" is not treated
+    as the device being absent.
     """
     this_id = _this_host_id(cfg) or "this host"
     hosts = list(relay_host_ids or [])
     tried: list[str] = [this_id]
+    limit = RELAY_TIMEOUT_S if timeout is None else float(timeout)
+    ssh_opts = list(SSH_RELAY_ARGS if ssh_args is None else ssh_args)
+
+    def note(host: str, kind: str) -> None:
+        if host_result is not None:
+            host_result(host, kind)
 
     def performed(who: str) -> int:
         print(f"{label} via {who}")
         return 0
 
+    def classify(host: str, proc: subprocess.CompletedProcess, *, local: bool) -> int | None:
+        """None keeps searching. An int is the final status."""
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        if proc.returncode == 0:
+            note(host, "ok")
+            return performed(host)
+        if via_session and adapter_session_blocked(out, err):
+            print(
+                f"{label}: {host} ran outside the GUI session "
+                f"(Input Monitoring does not apply over SSH). "
+                f"The desk watcher on {host} must run the adapter."
+            )
+            note(host, "session")
+            return None
+        if adapter_reports_absent(proc.returncode, out, err):
+            print(f"{label}: not found on {host}")
+            note(host, "absent")
+            return None
+        note(host, "error")
+        if local:
+            return int(proc.returncode)
+        print(f"{label}: relay {host} failed (rc={proc.returncode})")
+        return None
+
     if local_argv:
         try:
-            proc = run(list(local_argv), timeout=8.0)
+            if via_session:
+                proc = run_adapter_argv(cfg, list(local_argv), via_session=True, timeout=8.0)
+            else:
+                proc = run(list(local_argv), timeout=8.0)
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"{label}: local adapter failed to start: {exc}")
             return 1
-        _print_helper(proc)
-        if proc.returncode == 0:
-            return performed(this_id)
-        if not adapter_reports_absent(proc.returncode, proc.stdout or "", proc.stderr or ""):
-            return int(proc.returncode)
-        print(f"{label}: not found on {this_id}")
+        _print_adapter_output(proc)
+        result = classify(this_id, proc, local=True)
+        if result is not None:
+            return result
     else:
         print(f"{label}: adapter not available on {this_id}")
 
     can_relay = bool(adapter_id or remote_path)
-    remote = remote_adapter_invocation(adapter_id, args, remote_path) if can_relay else ""
+    if can_relay and via_session:
+        remote = remote_session_invocation(adapter_id, args, remote_path)
+    elif can_relay:
+        remote = remote_adapter_invocation(adapter_id, args, remote_path)
+    else:
+        remote = ""
     for host_id in hosts:
         if host_id == this_id:
             continue
@@ -2425,17 +3038,26 @@ def relay_adapter(
             continue
         print(f"{label}: trying {host_id}")
         try:
-            proc = run(ssh_argv(target, remote), timeout=RELAY_TIMEOUT_S)
+            proc = run(ssh_argv(target, remote, ssh_opts), timeout=limit)
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"{label}: relay {host_id} failed: {exc}")
+            note(host_id, "unreachable")
             continue
-        _print_helper(proc)
-        if proc.returncode == 0:
-            return performed(host_id)
-        if adapter_reports_absent(proc.returncode, proc.stdout or "", proc.stderr or ""):
-            print(f"{label}: not found on {host_id}")
+        _print_adapter_output(proc)
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        # OpenSSH uses 255 for "could not connect". That is not the adapter.
+        if (
+            proc.returncode == 255
+            and not adapter_reports_absent(proc.returncode, out, err)
+            and not (via_session and adapter_session_blocked(out, err))
+        ):
+            print(f"{label}: relay {host_id} failed (rc={proc.returncode})")
+            note(host_id, "unreachable")
             continue
-        print(f"{label}: relay {host_id} failed (rc={proc.returncode})")
+        result = classify(host_id, proc, local=False)
+        if result is not None:
+            return result
     print(f"{label}: no host could run it (tried {', '.join(tried)})")
     return 1
 
@@ -2741,6 +3363,27 @@ def slim_peer_status(data: dict, peer: str) -> dict:
     }
 
 
+def _remember_peer_mouse(state: dict) -> None:
+    """Keep a peer's mouse_online report for the next relay's candidate order."""
+    if not isinstance(state, dict) or not state.get("reachable"):
+        return
+    host = str(state.get("this_host") or "").strip()
+    if not host:
+        return
+    channel = state.get("mouse_channel")
+    channel_i: int | None
+    try:
+        channel_i = int(channel) if channel is not None else None
+    except (TypeError, ValueError):
+        channel_i = None
+    record_mouse_seen(
+        host,
+        online=bool(state.get("mouse_online")),
+        channel=channel_i,
+        reachable=True,
+    )
+
+
 def peek_peer_status(cfg: dict) -> dict | None:
     """Best-effort SSH status --json --local. Never blocks the local probe for long."""
     peer = peer_ssh_target(cfg)
@@ -2779,6 +3422,7 @@ def peek_peer_status(cfg: dict) -> dict | None:
         return missed
     slim = slim_peer_status(data, peer)
     save_peer_cache(peer, slim)
+    _remember_peer_mouse(slim)
     return slim
 
 
@@ -4334,6 +4978,27 @@ def _watch_push_leave(cfg: dict, dry_run: bool, dest: int, retries: int, retry_d
     log("giving up this departure; will re-arm when HHKB returns")
 
 
+def watch_interval_was_suspended(interval: float, threshold: float) -> bool:
+    """Sleep `interval`. True when that wait itself looks like system suspend.
+
+    Wall time and monotonic time are sampled only around the sleep, so a
+    slow probe, a relay, or any other work in the iteration does not count.
+    Linux suspend advances the wall clock and stops the monotonic clock.
+    macOS suspend advances both. Either clock running past `threshold`
+    across this wait is a gap.
+    """
+    wall0 = time.time()
+    mono0 = time.monotonic()
+    time.sleep(interval)
+    wall_dt = time.time() - wall0
+    mono_dt = time.monotonic() - mono0
+    if wall_dt - mono_dt > threshold:
+        return True
+    if wall_dt > threshold or mono_dt > threshold:
+        return True
+    return False
+
+
 def cmd_watch(cfg: dict, dry_run: bool) -> int:
     """Follow the keyboard. Arrival pulls the whole desk to this host.
 
@@ -4365,9 +5030,44 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
         f"arrival_moves_display={arrival_moves_display(cfg)}, "
         f"push_on_leave={push_leave}, follow_channel={dest})"
     )
+    agent = SessionAgent(cfg)
+    agent.start()
+    try:
+        return _cmd_watch_loop(
+            cfg,
+            dry_run,
+            interval=interval,
+            need=need,
+            sleep_gap=sleep_gap,
+            retries=retries,
+            retry_delay=retry_delay,
+            dest=dest,
+            follow_usb=follow_usb,
+            follow_arrival=follow_arrival,
+            push_leave=push_leave,
+            here=here,
+        )
+    finally:
+        agent.stop()
+
+
+def _cmd_watch_loop(
+    cfg: dict,
+    dry_run: bool,
+    *,
+    interval: float,
+    need: int,
+    sleep_gap: float,
+    retries: int,
+    retry_delay: float,
+    dest: int,
+    follow_usb: bool,
+    follow_arrival: bool,
+    push_leave: bool,
+    here: str,
+) -> int:
     armed = False
     absent = 0
-    last = time.time()
     last_usb: bool | None = None
     # First sample after start or a sleep gap is a snapshot, not an edge.
     baseline = True
@@ -4377,6 +5077,8 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
     # not run `desk to` again.
     focused_here = False
     arrival_latched = False
+    pending_gap = False
+    gap_limit = max(sleep_gap, interval * 4)
     wallpaper_state = {
         "baseline": None,
         "pending": None,
@@ -4386,8 +5088,7 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
     }
 
     while True:
-        now = time.time()
-        if now - last > max(sleep_gap, interval * 4):
+        if pending_gap:
             log("clock gap (sleep/wake) — disarm until HHKB is seen again")
             armed = False
             absent = 0
@@ -4395,7 +5096,7 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
             present_streak = 0
             arrival_latched = False
             baseline = True
-        last = now
+            pending_gap = False
 
         try:
             probe = hhkb_probe(cfg)
@@ -4424,7 +5125,7 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
                 present_streak = 0
                 focused_here = False
                 arrival_latched = False
-            time.sleep(interval)
+            pending_gap = watch_interval_was_suspended(interval, gap_limit)
             continue
 
         last_usb, usb_rise = watch_usb_rising_edge(last_usb, usb_now, follow_usb)
@@ -4476,10 +5177,10 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
             armed = False
             absent = 0
         try:
-            wallpaper_watch_poll(cfg, wallpaper_state, now)
+            wallpaper_watch_poll(cfg, wallpaper_state, time.time())
         except Exception as exc:  # noqa: BLE001 — watcher stays up
             log(f"wallpaper watch failed: {exc}")
-        time.sleep(interval)
+        pending_gap = watch_interval_was_suspended(interval, gap_limit)
 
 
 def format_smarthome_human(verb: str, data: dict) -> str:
@@ -4681,6 +5382,16 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
     sub.add_parser("hint", help="print the focus token (MAC, LNX, or that host's hint)")
     watch = sub.add_parser("watch", help="keyboard arrival runs desk to this host")
     watch.add_argument("--dry-run", action="store_true")
+    session = sub.add_parser(
+        "session-run",
+        help="run an adapter in the desk watcher session (GUI agent)",
+    )
+    session.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 0 when this desk can ask the watcher",
+    )
+    session.add_argument("argv", nargs=argparse.REMAINDER, help="adapter and arguments, after --")
     sw = sub.add_parser("switch", help="push the mouse, or switch a whole desk")
     sw.add_argument("target", nargs="?", help="Easy-Switch 1|2|3, or a configured host id")
     to = sub.add_parser("to", help="switch mouse + optional display input to a host")
@@ -4740,6 +5451,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(cfg, hint_only=True)
     if args.cmd == "watch":
         return cmd_watch(cfg, args.dry_run)
+    if args.cmd == "session-run":
+        return cmd_session_run(cfg, list(args.argv), check=bool(args.check))
     if args.cmd == "switch":
         return cmd_switch(cfg, args.target)
     if args.cmd == "to":

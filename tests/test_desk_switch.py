@@ -1330,6 +1330,46 @@ class HhkbTransportTests(unittest.TestCase):
         probe = ds.parse_hidutil_hhkb(text, 0x04FE, 0x0016)
         self.assertTrue(probe["present"])
 
+    def test_macos_probe_skips_hidutil_when_ioreg_already_sees_bluetooth(self) -> None:
+        mod = ds.load_hhkb_module()
+        calls: list[list[str]] = []
+        hid = (
+            '+-o IOHIDDevice  <class IOHIDDevice>\n'
+            '| {\n'
+            '|   "Product" = "HHKB-Studio1"\n'
+            '|   "Transport" = "Bluetooth"\n'
+            '| }\n'
+        )
+
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            stdout = hid if cmd and cmd[0] == "ioreg" and "IOHIDDevice" in cmd else ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        with mock.patch.object(mod, "run", side_effect=fake_run):
+            probe = mod.hhkb_probe_macos(0x04FE, 0x0016)
+        self.assertTrue(probe["present"])
+        self.assertTrue(probe["bluetooth"])
+        self.assertEqual(sorted(cmd[0] for cmd in calls), ["ioreg", "ioreg", "ioreg"])
+        self.assertFalse(any(cmd[0] == "hidutil" for cmd in calls))
+
+    def test_macos_probe_uses_hidutil_when_ioreg_misses(self) -> None:
+        mod = ds.load_hhkb_module()
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            stdout = ""
+            if cmd and cmd[0] == "hidutil":
+                stdout = "Services:\n0x4fe  0x16  0x0  0x1  0x6  0xabc  HHKB\n"
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        with mock.patch.object(mod, "run", side_effect=fake_run):
+            probe = mod.hhkb_probe_macos(0x04FE, 0x0016)
+        self.assertTrue(probe["present"])
+        self.assertTrue(any(cmd[0] == "hidutil" for cmd in calls))
+        self.assertEqual(sum(1 for cmd in calls if cmd[0] == "ioreg"), 3)
+
 
 class HintAndCacheTests(unittest.TestCase):
     def test_hint_mouse_wins_over_missing_hhkb(self) -> None:
@@ -3971,6 +4011,47 @@ class KeyboardArrivalTests(unittest.TestCase):
                 ds.cmd_watch(cfg, dry_run=False)
         self.assertEqual(calls, [])
 
+    def test_slow_probe_is_not_a_clock_gap(self) -> None:
+        cfg = self._watch_cfg(sleep_gap_s=3, poll_interval_s=0.5, absent_polls_required=2)
+        calls: list[str] = []
+        clock = {"t": 1000.0}
+        samples = [
+            _presence(),
+            _presence(present=True, bluetooth=True),
+            _presence(present=True, bluetooth=True),
+        ]
+        cursor = {"i": 0}
+
+        def fake_time() -> float:
+            return clock["t"]
+
+        def fake_probe(*_args, **_kwargs) -> dict:
+            clock["t"] += 10
+            index = cursor["i"]
+            if index >= len(samples):
+                raise KeyboardInterrupt
+            cursor["i"] = index + 1
+            return samples[index]
+
+        def fake_sleep(_interval: float) -> None:
+            if cursor["i"] >= len(samples):
+                raise KeyboardInterrupt
+
+        def fake_to(conf: dict, host: str, *, mouse_only: bool = False) -> int:
+            calls.append(host)
+            return 0
+
+        buf = io.StringIO()
+        with mock.patch.object(ds, "hhkb_probe", side_effect=fake_probe), mock.patch.object(
+            ds.time, "time", side_effect=fake_time
+        ), mock.patch.object(ds.time, "sleep", side_effect=fake_sleep), mock.patch.object(
+            ds, "cmd_to", side_effect=fake_to
+        ), mock.patch("sys.stdout", buf):
+            with self.assertRaises(KeyboardInterrupt):
+                ds.cmd_watch(cfg, dry_run=False)
+        self.assertEqual(calls, ["tower"])
+        self.assertNotIn("clock gap", buf.getvalue())
+
     def test_legacy_usb_edge_still_pulls_when_arrival_is_off(self) -> None:
         cfg = self._watch_cfg(
             this_host="mac",
@@ -4119,7 +4200,9 @@ class KeyboardArrivalTests(unittest.TestCase):
         self.assertIn("pre_switch tower: wake-outputs", text)
         self.assertEqual(calls[0][:2], ["/opt/desk/mxswitch", "3"])
         self.assertEqual(calls[1][0], "ssh")
-        self.assertEqual(calls[1][5], "user@192.0.2.20")
+        self.assertEqual(calls[1][-2], "user@192.0.2.20")
+        self.assertIn("ConnectTimeout=2", calls[1])
+        self.assertIn("session-run", calls[1][-1])
         self.assertTrue(calls[1][-1].endswith("mxswitch 3"))
         self.assertEqual(calls[2], ["sh", "-c", "wake-outputs"])
         self.assertEqual(calls[3], ["/opt/desk/display-adapter", "input", "hdmi2"])
@@ -4191,19 +4274,14 @@ class MouseRelayTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertEqual(calls[0], ["/opt/desk/mxswitch", "2"])
-        self.assertEqual(
-            calls[1],
-            [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=3",
-                "user@192.0.2.20",
-                "$HOME/.local/lib/desk/mxswitch 2",
-            ],
-        )
-        self.assertEqual(calls[2][5], "user@192.0.2.30")
+        self.assertEqual(calls[1][0], "ssh")
+        self.assertIn("ConnectTimeout=2", calls[1])
+        self.assertIn("ConnectionAttempts=1", calls[1])
+        self.assertEqual(calls[1][-2], "user@192.0.2.20")
+        self.assertIn("session-run", calls[1][-1])
+        self.assertIn("$HOME/.local/lib/desk/mxswitch 2", calls[1][-1])
+        self.assertTrue(calls[1][-1].endswith("mxswitch 2"))
+        self.assertEqual(calls[2][-2], "user@192.0.2.30")
         self.assertTrue(calls[2][-1].endswith("mxswitch 2"))
         self.assertEqual(len(calls), 3)
         self.assertIn("mouse channel 2: not found on mac", out)
@@ -4244,7 +4322,7 @@ class MouseRelayTests(unittest.TestCase):
             ],
         )
         self.assertEqual(rc, 0)
-        self.assertEqual(calls[1][5], "user@192.0.2.30")
+        self.assertEqual(calls[1][-2], "user@192.0.2.30")
         self.assertIn("mouse channel 2 via tower", out)
         self.assertNotIn("192.0.2.20", " ".join(" ".join(cmd) for cmd in calls))
 
@@ -4260,7 +4338,7 @@ class MouseRelayTests(unittest.TestCase):
             ],
         )
         self.assertEqual(rc, 0)
-        self.assertEqual([cmd[5] for cmd in calls if cmd[0] == "ssh"], ["user@192.0.2.20"])
+        self.assertEqual([cmd[-2] for cmd in calls if cmd[0] == "ssh"], ["user@192.0.2.20"])
         self.assertIn("via linux", out)
 
     def test_missing_binary_with_explicit_relay_uses_ssh(self) -> None:
@@ -4270,7 +4348,8 @@ class MouseRelayTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "ssh")
-        self.assertEqual(calls[0][5], "user@192.0.2.20")
+        self.assertEqual(calls[0][-2], "user@192.0.2.20")
+        self.assertIn("ConnectTimeout=2", calls[0])
         self.assertIn("adapter not available on mac", out)
         self.assertIn("mouse channel 2 via linux", out)
 
@@ -4292,7 +4371,8 @@ class MouseRelayTests(unittest.TestCase):
             [(1, "", "not found\n"), (0, "ok\n", "")],
         )
         self.assertEqual(rc, 0)
-        self.assertEqual(calls[1][-1], "~/bin/mxswitch 2")
+        self.assertIn("~/bin/mxswitch 2", calls[1][-1])
+        self.assertIn("session-run", calls[1][-1])
 
     def test_config_loads_mouse_relay_ahead_of_display_relay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4330,6 +4410,219 @@ class MouseRelayTests(unittest.TestCase):
         bare = dict(cfg)
         del bare["_mouse_relay_hosts"]
         self.assertEqual(ds.mouse_relay_host_ids(bare), ["linux"])
+
+    def test_online_report_is_tried_before_the_configured_order(self) -> None:
+        seen = {
+            "linux": {"online": True, "online_ts": 100, "reachable": True, "reachable_ts": 100},
+            "mac": {"online": True, "online_ts": 300, "reachable": True, "reachable_ts": 300},
+        }
+        self.assertEqual(
+            ds.order_mouse_relay_hosts(["linux", "mac", "tower"], seen, now=400),
+            ["mac", "linux", "tower"],
+        )
+        stale = {
+            "mac": {"online": True, "online_ts": 1, "reachable": True, "reachable_ts": 1},
+        }
+        self.assertEqual(
+            ds.order_mouse_relay_hosts(["linux", "mac"], stale, now=1 + ds.MOUSE_ONLINE_TTL_S + 5),
+            ["linux", "mac"],
+        )
+
+    def test_unreachable_peer_sinks_until_the_memory_expires(self) -> None:
+        seen = {
+            "linux": {"online": False, "online_ts": 1, "reachable": False, "reachable_ts": 990},
+            "mac": {"online": False, "online_ts": 1, "reachable": True, "reachable_ts": 900},
+        }
+        self.assertEqual(
+            ds.order_mouse_relay_hosts(["linux", "mac"], seen, now=1000),
+            ["mac", "linux"],
+        )
+        self.assertEqual(
+            ds.order_mouse_relay_hosts(["linux", "mac"], seen, now=990 + ds.MOUSE_UNREACHABLE_TTL_S + 5),
+            ["linux", "mac"],
+        )
+
+    def test_switch_tries_the_last_online_host_first(self) -> None:
+        cfg = self._cfg()
+        cfg["this_host"] = "tower"
+        cfg["_mouse_relay_hosts"] = ["linux", "mac"]
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            if cmd[:2] == ["/opt/desk/mxswitch", "3"]:
+                return _proc(cmd, 1, "", "not found\n")
+            if cmd[0] == "ssh" and cmd[-2] == "user@192.0.2.10":
+                return _proc(cmd, 0, "switched\n", "")
+            return _proc(cmd, 1, "", "not found\n")
+
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "run", side_effect=fake_run), mock.patch.object(
+                ds, "cache_dir", return_value=Path(tmp)
+            ), mock.patch("sys.stdout", buf), mock.patch("sys.stderr", io.StringIO()):
+                now = time.time()
+                ds.record_mouse_seen("mac", online=True, now=now)
+                ds.record_mouse_seen("linux", online=True, now=now - 30)
+                rc = ds.switch_mouse(cfg, 3)
+        self.assertEqual(rc, 0)
+        ssh = [cmd for cmd in calls if cmd[0] == "ssh"]
+        self.assertEqual([cmd[-2] for cmd in ssh], ["user@192.0.2.10"])
+        self.assertIn("mouse channel 3 via mac", buf.getvalue())
+        self.assertNotIn("trying linux", buf.getvalue())
+
+    def test_input_monitoring_over_ssh_is_session_context(self) -> None:
+        absent = (
+            "No device supporting ChangeHost found.\n"
+            "Click the mouse to wake it, and check Input Monitoring.\n"
+        )
+        rc, out, calls = self._switch(
+            self._cfg(),
+            [
+                (1, "", absent),
+                (1, "", absent),
+                (0, "ok\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("not found on mac", out)
+        self.assertIn("outside the GUI session", out)
+        self.assertIn("Input Monitoring does not apply over SSH", out)
+        self.assertIn("desk watcher", out)
+        self.assertIn("mouse channel 2 via tower", out)
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_gui_session_absence_stays_not_found(self) -> None:
+        err = (
+            "No device supporting ChangeHost found.\n"
+            "Click the mouse to wake it, and check Input Monitoring.\n"
+            "desk-session: gui\n"
+        )
+        rc, out, _calls = self._switch(
+            self._cfg(),
+            [
+                (1, "", err),
+                (0, "ok\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("not found on mac", out)
+        self.assertNotIn("outside the GUI session", out)
+        self.assertIn("via linux", out)
+
+    def test_watcher_process_does_not_call_its_own_miss_a_session_problem(self) -> None:
+        err = (
+            "No device supporting ChangeHost found.\n"
+            "Click the mouse to wake it, and check Input Monitoring.\n"
+        )
+        with mock.patch.dict(os.environ, {"DESK_SESSION_AGENT": "1"}):
+            rc, out, _calls = self._switch(self._cfg(), [(1, "", err), (0, "ok\n", "")])
+        self.assertEqual(rc, 0)
+        self.assertIn("not found on mac", out)
+        self.assertNotIn("outside the GUI session", out)
+        self.assertIn("via linux", out)
+
+    def test_watcher_runs_the_adapter_for_a_session_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lib = root / "lib"
+            lib.mkdir()
+            helper = lib / "mxswitch"
+            stamp = root / "stamp"
+            helper.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$1\" > {shlex.quote(str(stamp))}\n"
+                "echo switched\n"
+            )
+            helper.chmod(0o755)
+            cfg = self._cfg()
+            cfg["_bindings"]["mouse"]["path"] = helper
+            cfg["_mouse_relay_hosts"] = []
+            agent = ds.SessionAgent(cfg)
+            buf = io.StringIO()
+            err = io.StringIO()
+            with mock.patch.object(ds, "cache_dir", return_value=root), mock.patch.object(
+                ds, "libexec_dir", return_value=lib
+            ), mock.patch.object(ds, "libexec_dirs", return_value=[lib]), mock.patch(
+                "sys.stdout", buf
+            ), mock.patch("sys.stderr", err):
+                agent.start()
+                os.environ.pop("DESK_SESSION_AGENT", None)
+                try:
+                    rc = ds.cmd_session_run(cfg, [str(helper), "2"])
+                    refused = ds.cmd_session_run(cfg, ["/bin/echo", "nope"])
+                finally:
+                    agent.stop()
+            self.assertEqual(rc, 0, buf.getvalue())
+            self.assertEqual(stamp.read_text().strip(), "2")
+            self.assertIn("switched", buf.getvalue())
+            self.assertEqual(refused, 126)
+
+    def test_session_run_without_watcher_names_input_monitoring(self) -> None:
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            return _proc(cmd, 1, "", "Click the mouse to wake it, and check Input Monitoring.\n")
+
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "run", side_effect=fake_run), mock.patch.object(
+                ds, "cache_dir", return_value=Path(tmp)
+            ), mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", err):
+                rc = ds.cmd_session_run({}, ["/opt/desk/mxswitch", "--info"])
+                check = ds.cmd_session_run({}, [], check=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(check, 0)
+        text = err.getvalue()
+        self.assertIn("Input Monitoring", text)
+        self.assertIn("GUI session", text)
+        self.assertIn(ds.SESSION_MARK_OUTSIDE, text)
+        parser = ds.build_parser()
+        self.assertTrue(parser.parse_args(["session-run", "--check"]).check)
+        argv = parser.parse_args(["session-run", "--", "mxswitch", "1"]).argv
+        self.assertEqual([part for part in argv if part != "--"], ["mxswitch", "1"])
+
+
+class WatchSleepTests(unittest.TestCase):
+    def _clocks(self) -> dict[str, float]:
+        return {"wall": 0.0, "mono": 0.0}
+
+    def _run(self, clock: dict[str, float], sleep) -> bool:
+        def fake_time() -> float:
+            return clock["wall"]
+
+        def fake_mono() -> float:
+            return clock["mono"]
+
+        with mock.patch.object(ds.time, "time", side_effect=fake_time), mock.patch.object(
+            ds.time, "monotonic", side_effect=fake_mono
+        ), mock.patch.object(ds.time, "sleep", side_effect=sleep):
+            return ds.watch_interval_was_suspended(0.5, 3)
+
+    def test_short_wait_is_not_a_gap(self) -> None:
+        clock = self._clocks()
+
+        def sleep(interval: float) -> None:
+            clock["wall"] += interval
+            clock["mono"] += interval
+
+        self.assertFalse(self._run(clock, sleep))
+
+    def test_wall_clock_jump_during_the_wait_is_a_gap(self) -> None:
+        clock = self._clocks()
+
+        def sleep(_interval: float) -> None:
+            clock["wall"] += 40
+            clock["mono"] += 0.5
+
+        self.assertTrue(self._run(clock, sleep))
+
+    def test_both_clocks_jumping_during_the_wait_is_a_gap(self) -> None:
+        clock = self._clocks()
+
+        def sleep(_interval: float) -> None:
+            clock["wall"] += 40
+            clock["mono"] += 40
+
+        self.assertTrue(self._run(clock, sleep))
 
 
 class WallpaperTests(unittest.TestCase):
