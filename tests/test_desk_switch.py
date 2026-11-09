@@ -2792,6 +2792,393 @@ class SlotComposeTests(unittest.TestCase):
         self.assertEqual(args.cmd, "weather")
 
 
+def _proc(cmd: list[str], rc: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr=stderr)
+
+
+class DisplayRelayTests(unittest.TestCase):
+    """Display-input relay: local first, then relay_hosts, mock subprocess."""
+
+    def _cfg(self) -> dict:
+        return {
+            "this_host": "mac",
+            "switch_monitor": True,
+            "_dualup_enabled": True,
+            "_display_relay_hosts": ["other", "linux"],
+            "_bindings": {
+                "display": {
+                    "id": "display-adapter",
+                    "path": Path("/opt/desk/display-adapter"),
+                    "source": "path",
+                    "manifest": None,
+                    "capabilities": ["display.input"],
+                }
+            },
+            "hosts": {
+                "mac": {
+                    "channel": 1,
+                    "ssh": "user@192.0.2.10",
+                    "dualup_input": "hdmi1",
+                },
+                "linux": {
+                    "channel": 2,
+                    "ssh": "user@192.0.2.20",
+                    "dualup_input": "dp",
+                    "pre_switch": "wake-outputs",
+                },
+                "other": {"ssh": "user@192.0.2.30"},
+            },
+        }
+
+    def _switch(self, cfg: dict, host: str, steps: list) -> tuple[int, str, list[list[str]]]:
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            if not steps:
+                raise AssertionError(f"unexpected command: {cmd}")
+            step = steps.pop(0)
+            if isinstance(step, BaseException):
+                raise step
+            rc, out, err = step
+            return _proc(cmd, rc, out, err)
+
+        buf = io.StringIO()
+        err = io.StringIO()
+        with mock.patch.object(ds, "run", side_effect=fake_run), mock.patch("sys.stdout", buf), mock.patch(
+            "sys.stderr", err
+        ):
+            rc = ds.switch_monitor(cfg, host, mouse_only=False)
+        self.assertEqual(steps, [], f"unused script steps; calls={calls}")
+        return rc, buf.getvalue(), calls
+
+    def test_absence_text(self) -> None:
+        self.assertFalse(ds.adapter_reports_absent(0, "not found", ""))
+        self.assertFalse(ds.adapter_reports_absent(2, "", "unknown input: dp"))
+        self.assertTrue(ds.adapter_reports_absent(1, "", "device not found"))
+        self.assertTrue(ds.adapter_reports_absent(1, "", "No display device found."))
+        # Reference adapter phrases (non-zero + "No … found"), not a core special case.
+        self.assertTrue(
+            ds.adapter_reports_absent(1, "", "No LG Monitor Controls hidraw (043e:9a39) found.")
+        )
+        self.assertTrue(
+            ds.adapter_reports_absent(1, "", "No LG Monitor Controls device (043e:9a39) found.")
+        )
+
+    def test_remote_invocation_uses_adapter_id_and_quotes(self) -> None:
+        self.assertEqual(
+            ds.remote_adapter_invocation("display-adapter", ["input", "dp"]),
+            "$HOME/.local/lib/desk/display-adapter input dp",
+        )
+        self.assertEqual(
+            ds.remote_adapter_invocation("display-adapter", ["input", "a b"], "~/bin/display-adapter"),
+            "~/bin/display-adapter input 'a b'",
+        )
+        self.assertEqual(
+            ds.ssh_argv("user@192.0.2.20", "wake-outputs"),
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "user@192.0.2.20", "wake-outputs"],
+        )
+
+    def test_local_success_skips_relay_after_pre_switch(self) -> None:
+        cfg = self._cfg()
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [(0, "", ""), (0, "input ok\n", "")],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][0], "ssh")
+        self.assertEqual(calls[0][-1], "wake-outputs")
+        self.assertEqual(calls[0][5], "user@192.0.2.20")
+        self.assertEqual(calls[1], ["/opt/desk/display-adapter", "input", "dp"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("display input dp via mac", out)
+        self.assertNotIn("trying", out)
+
+    def test_relay_order_stops_at_first_success(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [
+                (1, "", "No display device found.\n"),
+                (1, "", "device not found\n"),
+                (0, "switched\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0], ["/opt/desk/display-adapter", "input", "dp"])
+        self.assertEqual(
+            calls[1],
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "user@192.0.2.30",
+                "$HOME/.local/lib/desk/display-adapter input dp",
+            ],
+        )
+        self.assertEqual(calls[2][5], "user@192.0.2.20")
+        self.assertTrue(calls[2][-1].endswith("input dp"))
+        self.assertEqual(len(calls), 3)
+        self.assertIn("display input dp: not found on mac", out)
+        self.assertIn("display input dp: not found on other", out)
+        self.assertIn("display input dp via linux", out)
+        self.assertNotIn("via other", out)
+        self.assertNotIn("no host could run it", out)
+
+    def test_this_host_is_not_relayed_to(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        cfg["_display_relay_hosts"] = ["mac", "linux"]
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [(1, "", "not found\n"), (0, "ok\n", "")],
+        )
+        self.assertEqual(rc, 0)
+        targets = [cmd[5] for cmd in calls if cmd[0] == "ssh"]
+        self.assertEqual(targets, ["user@192.0.2.20"])
+        self.assertIn("via linux", out)
+
+    def test_missing_ssh_falls_through(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        del cfg["hosts"]["other"]["ssh"]
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [(1, "", "not found\n"), (0, "ok\n", "")],
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("relay other has no ssh target", out)
+        self.assertEqual([cmd[5] for cmd in calls if cmd[0] == "ssh"], ["user@192.0.2.20"])
+        self.assertIn("via linux", out)
+
+    def test_all_peers_absent(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [
+                (1, "", "not found\n"),
+                (1, "", "No display device found.\n"),
+                (1, "", "device not found\n"),
+            ],
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("no host could run it (tried mac, other, linux)", out)
+        self.assertNotIn("via ", out)
+
+    def test_ssh_timeout_tries_the_next_host(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [
+                (1, "", "not found\n"),
+                subprocess.TimeoutExpired(["ssh"], 12),
+                (0, "ok\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("relay other failed", out)
+        self.assertIn("via linux", out)
+
+    def test_hard_error_stays_local(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [(2, "", "unknown input: dp\n")],
+        )
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("trying", out)
+        self.assertNotIn("no host could run it", out)
+        self.assertNotIn("via ", out)
+
+    def test_pre_switch_runs_before_relay(self) -> None:
+        cfg = self._cfg()
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [
+                (0, "awake\n", ""),
+                (1, "", "not found\n"),
+                (0, "switched\n", ""),
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][-1], "wake-outputs")
+        self.assertEqual(calls[1][0], "/opt/desk/display-adapter")
+        self.assertEqual(calls[2][5], "user@192.0.2.30")
+        self.assertIn("pre_switch linux: wake-outputs", out)
+        self.assertIn("via other", out)
+
+    def test_pre_switch_on_this_host_is_local(self) -> None:
+        cfg = self._cfg()
+        cfg["this_host"] = "linux"
+        rc, _out, calls = self._switch(
+            cfg,
+            "linux",
+            [(0, "", ""), (0, "ok\n", "")],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0], ["sh", "-c", "wake-outputs"])
+        self.assertTrue(all(cmd[0] != "ssh" for cmd in calls))
+
+    def test_pre_switch_without_ssh_is_an_error_and_switch_still_runs(self) -> None:
+        cfg = self._cfg()
+        del cfg["hosts"]["linux"]["ssh"]
+        rc, out, calls = self._switch(
+            cfg,
+            "linux",
+            [(0, "ok\n", "")],
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("pre_switch linux: no ssh target configured", out)
+        self.assertEqual(calls, [["/opt/desk/display-adapter", "input", "dp"]])
+        self.assertIn("via mac", out)
+
+    def test_missing_input_is_explicit_and_does_not_run(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"] = {"channel": 2, "ssh": "user@192.0.2.20", "pre_switch": "wake-outputs"}
+        rc, out, calls = self._switch(cfg, "linux", [])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("no display input configured for linux", out)
+        self.assertIn("hosts.linux.dualup_input", out)
+        self.assertIn("adapters.display.inputs.linux", out)
+        self.assertIn("leaving the display input unchanged", out)
+
+    def test_missing_input_wins_over_missing_adapter(self) -> None:
+        cfg = self._cfg()
+        cfg["_bindings"]["display"]["path"] = None
+        cfg["hosts"]["linux"] = {"channel": 2}
+        rc, out, calls = self._switch(cfg, "linux", [])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("no display input configured for linux", out)
+        self.assertNotIn("not on PATH", out)
+
+    def test_host_input_field_is_the_display_input(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"] = {"channel": 2, "input": "hdmi2"}
+        rc, out, calls = self._switch(cfg, "linux", [(0, "ok\n", "")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [["/opt/desk/display-adapter", "input", "hdmi2"]])
+        self.assertIn("display input hdmi2 via mac", out)
+
+    def test_missing_local_binary_uses_relay(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        cfg["_bindings"]["display"]["path"] = None
+        rc, out, calls = self._switch(cfg, "linux", [(0, "ok\n", "")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "ssh")
+        self.assertEqual(calls[0][5], "user@192.0.2.30")
+        self.assertIn("adapter not available on mac", out)
+        self.assertIn("via other", out)
+
+    def test_missing_local_binary_without_relay_is_noop(self) -> None:
+        cfg = self._cfg()
+        cfg["_display_relay_hosts"] = []
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        cfg["_bindings"]["display"]["path"] = None
+        rc, out, calls = self._switch(cfg, "linux", [])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("not on PATH", out)
+
+    def test_relay_path_override(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"]["pre_switch"] = ""
+        cfg["_display_relay_path"] = "~/bin/display-adapter"
+        rc, _out, calls = self._switch(
+            cfg,
+            "linux",
+            [(1, "", "not found\n"), (0, "ok\n", "")],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[1][-1], "~/bin/display-adapter input dp")
+
+    def test_mouse_only_skips_display(self) -> None:
+        calls: list = []
+        with mock.patch.object(ds, "run", side_effect=lambda *a, **k: calls.append(a)):
+            rc = ds.switch_monitor(self._cfg(), "linux", mouse_only=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    def test_cmd_to_says_when_input_is_missing(self) -> None:
+        cfg = self._cfg()
+        cfg["hosts"]["linux"] = {"channel": 2}
+        buf = io.StringIO()
+        with mock.patch.object(ds, "switch_mouse", return_value=0) as mouse, mock.patch.object(
+            ds, "run"
+        ) as run, mock.patch("sys.stdout", buf):
+            rc = ds.cmd_to(cfg, "linux")
+        self.assertEqual(rc, 0)
+        mouse.assert_called_once_with(cfg, 2)
+        run.assert_not_called()
+        text = buf.getvalue()
+        self.assertIn("no display input configured for linux", text)
+        self.assertIn("dualup_input", text)
+
+    def test_config_loads_ssh_pre_switch_and_relay_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "hosts": {
+                                "this_host": "mac",
+                                "mac": {"channel": 1, "ssh": "user@192.0.2.10"},
+                                "linux": {
+                                    "channel": 2,
+                                    "ssh": "user@192.0.2.20",
+                                    "pre_switch": "wake-outputs",
+                                },
+                            },
+                            "display": {
+                                "relay_hosts": ["linux", "LNX", "mac"],
+                                "relay_path": "~/bin/display-adapter",
+                                "inputs": {"mac": "hdmi1", "linux": "dp"},
+                            },
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)), mock.patch.object(
+                ds, "default_this_host", return_value="mac"
+            ):
+                cfg = ds.load_config()
+        self.assertEqual(cfg["_display_relay_hosts"], ["linux", "mac"])
+        self.assertEqual(cfg["_display_relay_path"], "~/bin/display-adapter")
+        self.assertEqual(cfg["hosts"]["mac"]["ssh"], "user@192.0.2.10")
+        self.assertEqual(cfg["hosts"]["linux"]["ssh"], "user@192.0.2.20")
+        self.assertEqual(cfg["hosts"]["linux"]["pre_switch"], "wake-outputs")
+        self.assertEqual(cfg["hosts"]["linux"]["dualup_input"], "dp")
+        self.assertEqual(cfg["hosts"]["mac"]["dualup_input"], "hdmi1")
+
+    def test_coerce_relay_hosts_keeps_unknown_ids_in_order(self) -> None:
+        self.assertEqual(
+            ds._coerce_relay_hosts(["linux", "other", "LNX", "", "mac"]),
+            ["linux", "other", "mac"],
+        )
+        self.assertEqual(ds._coerce_relay_hosts("linux, mac"), ["linux", "mac"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

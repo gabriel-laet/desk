@@ -45,6 +45,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,13 @@ HHKB_VID_DEFAULT = 0x04FE
 HHKB_PID_DEFAULT = 0x0016
 MOUSE_CACHE_TTL_S = 24 * 3600  # last-known channel until contradicted (wake lag / other host)
 PEER_CACHE_TTL_S = 20.0
+# Relay never waits on a password prompt. ConnectTimeout matches the
+# brief the display-input hop can spend on a dead peer.
+SSH_RELAY_ARGS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"]
+RELAY_TIMEOUT_S = 12.0
+# Adapters report "device absent" with a non-zero exit and text such as
+# "not found" or a line "No <device> found". Other failures stay on this host.
+_ABSENT_RE = re.compile(r"not found|^\s*no\b.+\bfound\b", re.I | re.M)
 HOST_ALIASES = {
     "mac": "mac",
     "macos": "mac",
@@ -659,6 +667,10 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         cfg["_dualup_display_id"] = str(dual["display_id"])
     if dual.get("peer"):
         cfg["_dualup_peer"] = str(dual["peer"])
+    cfg["_display_relay_hosts"] = _coerce_relay_hosts(dual.get("relay_hosts"))
+    relay_path = str(dual.get("relay_path") or "").strip()
+    if relay_path:
+        cfg["_display_relay_path"] = relay_path
     cfg["_dualup_layout_retries"] = as_int(dual.get("layout_retries"), LAYOUT_DEFAULT_RETRIES)
     raw_delay = dual.get("layout_retry_delay_s")
     cfg["_dualup_layout_retry_delay_s"] = float(
@@ -1684,14 +1696,239 @@ def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
     return rc or layout_rc
 
 
+def _coerce_relay_hosts(raw: object) -> list[str]:
+    """Ordered host ids. Aliases collapse; unknown ids are kept as written."""
+    if isinstance(raw, str):
+        items = [part.strip() for part in raw.split(",")]
+    elif isinstance(raw, list):
+        items = [str(part).strip() for part in raw]
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in items:
+        if not name:
+            continue
+        try:
+            name = normalize_host(name)
+        except SystemExit:
+            pass
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _this_host_id(cfg: dict) -> str:
+    raw = str(cfg.get("this_host") or "").strip()
+    if not raw:
+        return ""
+    try:
+        return normalize_host(raw)
+    except SystemExit:
+        return raw
+
+
+def _host_id(host: str) -> str:
+    try:
+        return normalize_host(host)
+    except SystemExit:
+        return str(host).strip()
+
+
+def host_text(cfg: dict, host: str, key: str) -> str:
+    """String field on a host entry (`ssh`, `pre_switch`, …). Missing is empty."""
+    spec = _as_dict((cfg.get("hosts") or {}).get(_host_id(host)))
+    value = spec.get(key)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def configured_display_input(cfg: dict, host: str) -> str:
+    """Input token for `desk to <host>`. Empty means leave the input alone.
+
+    `adapters.display.inputs` / `adapters.dualup.inputs` land on
+    `dualup_input`. A host-level `input` is the same field.
+    """
+    spec = _as_dict((cfg.get("hosts") or {}).get(_host_id(host)))
+    for field in ("dualup_input", "input"):
+        name = str(spec.get(field) or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def display_relay_host_ids(cfg: dict) -> list[str]:
+    if "_display_relay_hosts" in cfg:
+        raw = cfg.get("_display_relay_hosts")
+    else:
+        raw = display_adapter_cfg(cfg).get("relay_hosts")
+    return _coerce_relay_hosts(raw)
+
+
+def display_relay_path(cfg: dict) -> str | None:
+    raw = cfg.get("_display_relay_path")
+    if not raw:
+        raw = display_adapter_cfg(cfg).get("relay_path")
+    text = str(raw or "").strip()
+    return text or None
+
+
+def display_adapter_id(cfg: dict) -> str:
+    """Bound display-adapter id. The relay invokes that id on the peer."""
+    bound = bind_role(cfg, "display")
+    adapter_id = str(bound.get("id") or cfg.get("_display_backend") or "").strip()
+    if adapter_id:
+        return adapter_id
+    path = bound.get("path")
+    if path:
+        return Path(path).name
+    return ""
+
+
+def adapter_reports_absent(returncode: int, stdout: str = "", stderr: str = "") -> bool:
+    """True when an adapter says its device is not on the machine that ran it."""
+    if returncode == 0:
+        return False
+    return _ABSENT_RE.search(f"{stdout or ''}\n{stderr or ''}") is not None
+
+
+def _shell_token(token: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_./~$:-]+", token):
+        return token
+    return shlex.quote(token)
+
+
+def remote_adapter_invocation(
+    adapter_id: str,
+    args: list[str],
+    remote_path: str | None = None,
+) -> str:
+    """Remote shell command: adapter path plus the same arguments.
+
+    Default path is the install location, with `$HOME` left for the peer
+    shell to expand. `relay_path` overrides it.
+    """
+    if remote_path:
+        binary = remote_path.strip()
+    else:
+        ident = adapter_id.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", ident):
+            ident = shlex.quote(ident)
+        binary = f"$HOME/.local/lib/desk/{ident}"
+    return " ".join([_shell_token(binary), *(shlex.quote(str(arg)) for arg in args)])
+
+
+def ssh_argv(target: str, remote_command: str) -> list[str]:
+    return ["ssh", *SSH_RELAY_ARGS, target, remote_command]
+
+
+def run_pre_switch(cfg: dict, host: str) -> int:
+    """Run the target host's `pre_switch` command before an input change.
+
+    The local host runs it in a shell. Any other host runs it over SSH
+    using that host's `ssh` target.
+    """
+    command = host_text(cfg, host, "pre_switch")
+    if not command:
+        return 0
+    host_id = _host_id(host)
+    print(f"pre_switch {host_id}: {command}")
+    if host_id == _this_host_id(cfg):
+        argv = ["sh", "-c", command]
+    else:
+        target = host_text(cfg, host_id, "ssh")
+        if not target:
+            print(f"pre_switch {host_id}: no ssh target configured")
+            return 1
+        argv = ssh_argv(target, command)
+    try:
+        proc = run(argv, timeout=RELAY_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"pre_switch {host_id} failed: {exc}")
+        return 1
+    _print_helper(proc)
+    if proc.returncode != 0:
+        print(f"pre_switch {host_id} failed (rc={proc.returncode})")
+    return int(proc.returncode or 0)
+
+
+def relay_adapter(
+    cfg: dict,
+    local_argv: list[str] | None,
+    *,
+    adapter_id: str,
+    args: list[str],
+    label: str,
+    relay_host_ids: list[str] | None = None,
+    remote_path: str | None = None,
+) -> int:
+    """Run an adapter here, then on each relay host until one succeeds.
+
+    A peer is used only when this host has no adapter binary, or the local
+    run reports the device absent. The first success stops the search.
+    Prints which host performed it.
+    """
+    this_id = _this_host_id(cfg) or "this host"
+    hosts = list(relay_host_ids or [])
+    tried: list[str] = [this_id]
+
+    def performed(who: str) -> int:
+        print(f"{label} via {who}")
+        return 0
+
+    if local_argv:
+        try:
+            proc = run(list(local_argv), timeout=8.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"{label}: local adapter failed to start: {exc}")
+            return 1
+        _print_helper(proc)
+        if proc.returncode == 0:
+            return performed(this_id)
+        if not adapter_reports_absent(proc.returncode, proc.stdout or "", proc.stderr or ""):
+            return int(proc.returncode)
+        print(f"{label}: not found on {this_id}")
+    else:
+        print(f"{label}: adapter not available on {this_id}")
+
+    can_relay = bool(adapter_id or remote_path)
+    remote = remote_adapter_invocation(adapter_id, args, remote_path) if can_relay else ""
+    for host_id in hosts:
+        if host_id == this_id:
+            continue
+        tried.append(host_id)
+        target = host_text(cfg, host_id, "ssh")
+        if not target:
+            print(f"{label}: relay {host_id} has no ssh target")
+            continue
+        if not can_relay:
+            print(f"{label}: relay {host_id} has no adapter id")
+            continue
+        print(f"{label}: trying {host_id}")
+        try:
+            proc = run(ssh_argv(target, remote), timeout=RELAY_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"{label}: relay {host_id} failed: {exc}")
+            continue
+        _print_helper(proc)
+        if proc.returncode == 0:
+            return performed(host_id)
+        if adapter_reports_absent(proc.returncode, proc.stdout or "", proc.stderr or ""):
+            print(f"{label}: not found on {host_id}")
+            continue
+        print(f"{label}: relay {host_id} failed (rc={proc.returncode})")
+    print(f"{label}: no host could run it (tried {', '.join(tried)})")
+    return 1
+
+
 def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
     if mouse_only or not cfg.get("switch_monitor", True):
         return 0
-    path = lgdualup_path(cfg)
-    if path is None:
-        print("lgdualup not on PATH — run `make install` (DualUp helper ships in this repo)")
-        return 0
-    spec = (cfg.get("hosts") or {}).get(normalize_host(host), {})
+    host_id = _host_id(host)
+    spec = _as_dict((cfg.get("hosts") or {}).get(host_id))
     pbp = spec.get("pbp")
     if pbp or cfg.get("switch_pbp"):
         mode = str(pbp or cfg.get("pbp_mode") or "").strip()
@@ -1701,16 +1938,35 @@ def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
                 mode,
                 missing="lgdualup not on PATH — run `make install`",
             )
-    name = str(spec.get("dualup_input") or "").strip()
-    if name:
-        print(f"DualUp input → {name}")
-        return call_lgdualup(
-            cfg,
-            ["input", name],
-            missing="lgdualup not on PATH — run `make install`",
+    name = configured_display_input(cfg, host_id)
+    if not name:
+        print(
+            f"no display input configured for {host_id} "
+            f"(set adapters.display.inputs.{host_id} or hosts.{host_id}.dualup_input) "
+            f"— leaving the display input unchanged"
         )
-    print(f"no dualup_input configured for {host} — leaving DualUp input alone")
-    return 0
+        return 0
+    path = lgdualup_path(cfg)
+    relays = display_relay_host_ids(cfg)
+    others = [item for item in relays if item != _this_host_id(cfg)]
+    if path is None and not others:
+        print("lgdualup not on PATH — run `make install` (DualUp helper ships in this repo)")
+        return 0
+    pre_rc = run_pre_switch(cfg, host_id)
+    adapter_id = display_adapter_id(cfg)
+    if not adapter_id and path is not None:
+        adapter_id = path.name
+    local = [str(path), "input", name] if path is not None else None
+    rc = relay_adapter(
+        cfg,
+        local,
+        adapter_id=adapter_id,
+        args=["input", name],
+        label=f"display input {name}",
+        relay_host_ids=relays,
+        remote_path=display_relay_path(cfg),
+    )
+    return pre_rc or rc
 
 
 def cmd_to(cfg: dict, host: str, *, mouse_only: bool = False) -> int:
@@ -2828,9 +3084,9 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--dry-run", action="store_true")
     sw = sub.add_parser("switch", help="push the mouse, or switch a whole desk")
     sw.add_argument("target", nargs="?", help="Easy-Switch 1|2|3, or host mac|linux")
-    to = sub.add_parser("to", help="switch mouse + optional DualUp input to a host")
+    to = sub.add_parser("to", help="switch mouse + optional display input to a host")
     to.add_argument("host", help="mac or linux")
-    to.add_argument("--mouse-only", action="store_true", help="do not call lgdualup")
+    to.add_argument("--mouse-only", action="store_true", help="do not change the display input")
     pbp = sub.add_parser("pbp", help="DualUp PBP: USB toggle, input pair, tilted OS layout")
     pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
     sub.add_parser("full", help="DualUp full: USB toggle + 2880x2560 @ 270°")
