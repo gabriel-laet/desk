@@ -23,6 +23,7 @@ Works on **macOS** and **Linux**. Each machine only ever pushes the mouse
 
 **Docs:** [RFC 0001](docs/rfc/0001-rust-core-and-adapters.md) ·
 [RFC 0002](docs/rfc/0002-desk-product-kettle-shared-tray.md) ·
+[RFC 0003](docs/rfc/0003-three-host-desk.md) ·
 [HUD / tray UI config](docs/ui-config.md)
 
 ## Adapters
