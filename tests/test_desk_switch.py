@@ -101,6 +101,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("watch", proc.stdout)
         self.assertIn("kettle", proc.stdout)
         self.assertIn("weather", proc.stdout)
+        self.assertIn("wallpaper", proc.stdout)
         self.assertIn("smarthome", proc.stdout)
 
     def test_help_does_not_advertise_aliases(self) -> None:
@@ -655,6 +656,8 @@ class DualupAdapterTests(unittest.TestCase):
         self.assertEqual(example["adapters"]["kettle"]["backend"], "kettle")
         self.assertEqual(example["adapters"]["kettle"]["host"], "YOUR_HOST")
         self.assertEqual(example["adapters"]["weather"]["backend"], "weather")
+        self.assertFalse(example["adapters"]["wallpaper"]["enabled"])
+        self.assertEqual(example["adapters"]["wallpaper"]["exact_prefix"], "desk")
         self.assertFalse(example["ui"]["tray"]["lights"])
         ids = [item["id"] for item in example["ui"]["tray"]["slots"]]
         self.assertEqual(ids, ["weather", "kettle", "dualup", "lights"])
@@ -1690,7 +1693,7 @@ class AdapterDiscoveryTests(unittest.TestCase):
                 self.assertEqual(ds.resolve_backend_id("unifying"), helper)
 
     def test_reference_manifests_exist(self) -> None:
-        for name in ("mxswitch", "lgdualup", "hhkb", "alexa", "kettle", "weather"):
+        for name in ("mxswitch", "lgdualup", "hhkb", "alexa", "kettle", "weather", "wallpaper"):
             raw = json.loads((ROOT / "adapters" / name / "manifest.json").read_text())
             self.assertEqual(raw["api_version"], 1)
             self.assertEqual(raw["id"], name)
@@ -1702,6 +1705,8 @@ class AdapterDiscoveryTests(unittest.TestCase):
             self.assertIn(cap, kettle["capabilities"])
         weather = json.loads((ROOT / "adapters" / "weather" / "manifest.json").read_text())
         self.assertIn("weather.status", weather["capabilities"])
+        wallpaper = json.loads((ROOT / "adapters" / "wallpaper" / "manifest.json").read_text())
+        self.assertIn("wallpaper.apply", wallpaper["capabilities"])
 
     def test_makefile_installs_from_adapters_tree(self) -> None:
         text = (ROOT / "Makefile").read_text()
@@ -1711,10 +1716,12 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("adapters/alexa/alexa.py", text)
         self.assertIn("adapters/kettle/kettle.py", text)
         self.assertIn("adapters/weather/weather.py", text)
+        self.assertIn("adapters/wallpaper/wallpaper.py", text)
         self.assertIn("$(LIBDIR)/mxswitch.manifest.json", text)
         self.assertIn("$(LIBDIR)/alexa.manifest.json", text)
         self.assertIn("$(LIBDIR)/kettle.manifest.json", text)
         self.assertIn("$(LIBDIR)/weather.manifest.json", text)
+        self.assertIn("$(LIBDIR)/wallpaper.manifest.json", text)
         self.assertIn("$(LIBDIR)/mxswitch", text)
         self.assertIn("desk.py $(BINDIR)/desk", text)
         self.assertNotIn("scripts/desk-alias", text)
@@ -4203,6 +4210,291 @@ class MouseRelayTests(unittest.TestCase):
         bare = dict(cfg)
         del bare["_mouse_relay_hosts"]
         self.assertEqual(ds.mouse_relay_host_ids(bare), ["linux"])
+
+
+class WallpaperTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "wallpaper_adapter", ROOT / "adapters" / "wallpaper" / "wallpaper.py"
+        )
+        cls.wp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.wp)
+
+    def _output(self, **raw: object) -> dict:
+        raw.setdefault("name", "DP-1")
+        output = self.wp.normalize_output(raw)
+        self.assertIsNotNone(output)
+        return output
+
+    def test_aspect_transforms_square_and_scale(self) -> None:
+        wp = self.wp
+        self.assertEqual(wp.logical_size(1920, 1080, 0), (1920, 1080))
+        self.assertEqual(wp.orientation_for(1920, 1080), "landscape")
+        self.assertEqual(wp.logical_size(1080, 1920, 0), (1080, 1920))
+        self.assertEqual(wp.orientation_for(1080, 1920), "portrait")
+        for turn in (1, 3, 5, 7):
+            self.assertEqual(wp.logical_size(1920, 1080, turn), (1080, 1920), turn)
+            self.assertEqual(wp.orientation_for(*wp.logical_size(2560, 1440, turn)), "portrait")
+        for turn in (0, 2, 4, 6):
+            self.assertEqual(wp.logical_size(1920, 1080, turn), (1920, 1080), turn)
+        self.assertEqual(wp.orientation_for(1000, 1000), "landscape")
+        self.assertEqual(wp.logical_size(1000, 1000, 3), (1000, 1000))
+        self.assertEqual(wp.logical_size(1280, 2880, 3), (2880, 1280))
+        self.assertEqual(wp.orientation_for(2880, 1280), "landscape")
+        scaled = self._output(width=2560, height=1440, transform=0, scale=2)
+        self.assertEqual((scaled["logical_width"], scaled["logical_height"]), (2560, 1440))
+        rotated = self._output(width=2560, height=1440, transform=1, scale=1.6)
+        self.assertEqual((rotated["logical_width"], rotated["logical_height"]), (1440, 2560))
+
+    def _exact_tree(self, root: Path) -> None:
+        files = {
+            "desk-2560x1440.png": b"1440",
+            "desk-1920x1080.png": b"1080",
+            "desk-2560x2880.png": b"2880",
+            "desk-2880x2560.png": b"swapped-name",
+            "other-1920x1080.png": b"other",
+            "shot-2560x1440.jpg": b"jpg",
+            "foo-2560x14400.png": b"longer",
+            "plain-1000x1000.webp": b"square",
+        }
+        for name, body in files.items():
+            (root / name).write_bytes(body)
+
+    def _config(self, exact: Path, **extra: object) -> dict:
+        raw = {
+            "enabled": True,
+            "landscape": str(extra.get("landscape") or "/images/landscape.jpg"),
+            "portrait": str(extra.get("portrait") or "/images/portrait.jpg"),
+            "exact_dir": str(exact),
+            "exact_prefix": extra.get("exact_prefix", "desk"),
+            "outputs": extra.get("outputs") or {},
+        }
+        return self.wp.normalize_config(raw)
+
+    def test_exact_prefix_uses_rotated_mode_pixels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            exact = Path(tmp)
+            self._exact_tree(exact)
+            config = self._config(exact)
+            cases = [
+                ({"width": 2560, "height": 1440, "transform": 0, "scale": 2}, "desk-2560x1440.png"),
+                ({"width": 1920, "height": 1080, "transform": 0}, "desk-1920x1080.png"),
+                ({"width": 2560, "height": 2880, "transform": 0}, "desk-2560x2880.png"),
+                ({"width": 2880, "height": 2560, "transform": 3, "scale": 2}, "desk-2560x2880.png"),
+                ({"width": 1440, "height": 2560, "transform": 1}, "desk-2560x1440.png"),
+            ]
+            for raw, filename in cases:
+                output = self._output(**raw)
+                image, match = self.wp.choose_image(output, config)
+                self.assertEqual(match, "exact", raw)
+                self.assertEqual(Path(image).name, filename, raw)
+                self.assertNotEqual(Path(image).name, "desk-1280x720.png")
+
+    def test_exact_prefix_beats_other_wildcard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            exact = Path(tmp)
+            self._exact_tree(exact)
+            output = self._output(width=1920, height=1080, transform=0)
+            image, match = self.wp.choose_image(output, self._config(exact))
+            self.assertEqual(match, "exact")
+            self.assertEqual(Path(image).name, "desk-1920x1080.png")
+
+    def test_unique_wildcard_when_prefix_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            exact = Path(tmp)
+            self._exact_tree(exact)
+            (exact / "desk-2560x1440.png").unlink()
+            output = self._output(width=2560, height=1440, transform=0, scale=2)
+            image, match = self.wp.choose_image(output, self._config(exact))
+            self.assertEqual(match, "exact")
+            self.assertEqual(Path(image).name, "shot-2560x1440.jpg")
+            self.assertTrue((exact / "foo-2560x14400.png").is_file())
+
+    def test_ambiguous_wildcard_falls_back_to_orientation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            exact = Path(tmp)
+            (exact / "a-1920x1080.png").write_bytes(b"a")
+            (exact / "b-1920x1080.webp").write_bytes(b"b")
+            wide = self._output(name="DP-1", width=1920, height=1080, transform=0)
+            tall = self._output(name="DP-2", width=1080, height=1920, transform=0)
+            config = self._config(
+                exact,
+                exact_prefix="desk",
+                landscape="/images/landscape.jpg",
+                portrait="/images/portrait.jpg",
+                outputs={"DP-2": {"portrait": "/images/override-portrait.jpg"}},
+            )
+            wide_image, wide_match = self.wp.choose_image(wide, config)
+            tall_image, tall_match = self.wp.choose_image(tall, config)
+            self.assertEqual(wide_match, "landscape")
+            self.assertTrue(wide_image.endswith("landscape.jpg"))
+            self.assertEqual(tall_match, "portrait")
+            self.assertTrue(tall_image.endswith("override-portrait.jpg"))
+
+    def test_exact_beats_orientation_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            exact = Path(tmp)
+            (exact / "desk-1080x1920.png").write_bytes(b"tall")
+            output = self._output(name="DP-2", width=1920, height=1080, transform=1)
+            config = self._config(
+                exact,
+                outputs={"DP-2": {"portrait": "/images/override-portrait.jpg"}},
+            )
+            image, match = self.wp.choose_image(output, config)
+            self.assertEqual(match, "exact")
+            self.assertEqual(Path(image).name, "desk-1080x1920.png")
+
+    def test_square_without_exact_uses_landscape(self) -> None:
+        output = self._output(width=1000, height=1000, transform=3)
+        config = self.wp.normalize_config(
+            {
+                "enabled": True,
+                "landscape": "/images/landscape.jpg",
+                "portrait": "/images/portrait.jpg",
+            }
+        )
+        image, match = self.wp.choose_image(output, config)
+        self.assertEqual(output["orientation"], "landscape")
+        self.assertEqual(match, "landscape")
+        self.assertTrue(image.endswith("landscape.jpg"))
+        self.assertFalse(self.wp.normalize_config({"landscape": "/a", "exact_dir": "/tmp"})["enabled"])
+
+    def test_tilde_exact_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            pictures = home / "Pictures" / "wallpapers"
+            pictures.mkdir(parents=True)
+            (pictures / "desk-1920x1080.png").write_bytes(b"x")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                config = self.wp.normalize_config(
+                    {
+                        "enabled": True,
+                        "exact_dir": "~/Pictures/wallpapers",
+                        "exact_prefix": "desk",
+                        "landscape": "~/Pictures/land.jpg",
+                        "portrait": "~/Pictures/port.jpg",
+                    }
+                )
+                output = self._output(width=1920, height=1080, transform=0)
+                image, match = self.wp.choose_image(output, config)
+            self.assertEqual(match, "exact")
+            self.assertEqual(image, str((pictures / "desk-1920x1080.png").resolve()))
+
+    def test_apply_does_not_modify_exact_or_fallback_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "landscape.jpg"
+            source.write_bytes(b"original")
+            exact = root / "exact"
+            exact.mkdir()
+            picture = exact / "desk-1920x1080.png"
+            picture.write_bytes(b"exact-bytes")
+            output = self._output(width=1920, height=1080, transform=0, scale=2)
+            config = self._config(exact, landscape=str(source), portrait=str(source))
+            plan = self.wp.plan_apply([output], config, "hyprpaper")
+            calls: list[list[str]] = []
+
+            def runner(cmd: list[str], timeout: float = 20.0) -> subprocess.CompletedProcess:
+                calls.append(list(cmd))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            result = self.wp.execute(
+                plan,
+                {"hyprpaper_running": True},
+                runner=runner,
+                stopper=lambda _name: None,
+                spawner=lambda _cmd: 1,
+            )
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(picture.read_bytes(), b"exact-bytes")
+            self.assertEqual(source.read_bytes(), b"original")
+            flat = [part for cmd in calls for part in cmd]
+            self.assertIn(str(picture.resolve()), flat)
+            self.assertNotIn(str(source.resolve()), flat)
+            self.assertEqual(result["applied"][0]["match"], "exact")
+
+    def test_macos_fill_is_scale_3_with_clipping(self) -> None:
+        script = self.wp.APPLY_JS
+        self.assertEqual(self.wp.MACOS_FILL_SCALING, 3)
+        self.assertIn("NSWorkspaceDesktopImageScalingKey", script)
+        self.assertIn("numberWithInt(3)", script)
+        self.assertIn("NSWorkspaceDesktopImageAllowClippingKey", script)
+        self.assertIn("numberWithBool(true)", script)
+        self.assertNotIn("numberWithInt(2)", script)
+        self.assertIn('Application("System Events")', script)
+        self.assertIn(".picture", script)
+
+    def test_disabled_is_noop(self) -> None:
+        payload = self.wp.apply_payload(self.wp.normalize_config({"landscape": "/images/a.jpg"}))
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["applied"], [])
+        with mock.patch.object(ds, "invoke_wallpaper") as invoke:
+            self.assertEqual(ds.apply_wallpaper({"_wallpaper_enabled": False}), 0)
+            ds.note_wallpaper({})
+            invoke.assert_not_called()
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            rc = ds.cmd_wallpaper({}, "apply")
+        self.assertEqual(rc, 0)
+        body = json.loads(buf.getvalue())
+        self.assertFalse(body["enabled"])
+        self.assertEqual(body["applied"], [])
+
+    def test_layout_and_to_apply_wallpaper_and_failure_is_not_fatal(self) -> None:
+        cfg = {
+            "_wallpaper_enabled": True,
+            "this_host": "mac",
+            "hosts": {"mac": {"channel": 1, "hint": "MAC"}},
+            "target_channel": 2,
+        }
+        with mock.patch.object(ds, "switch_mouse", return_value=0), mock.patch.object(
+            ds, "switch_monitor", return_value=0
+        ), mock.patch.object(ds, "apply_wallpaper", return_value=0) as apply, mock.patch(
+            "sys.stdout", io.StringIO()
+        ):
+            self.assertEqual(ds.cmd_to(cfg, "mac"), 0)
+        apply.assert_called_once()
+        with mock.patch.object(ds, "dualup_set_mode", return_value=0), mock.patch.object(
+            ds, "apply_wallpaper", side_effect=RuntimeError("setter down")
+        ), mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(ds.cmd_full(cfg), 0)
+            self.assertEqual(ds.cmd_pbp(cfg, "50-50"), 0)
+
+    def test_watch_debounce(self) -> None:
+        state: dict = {}
+        self.assertFalse(ds.wallpaper_watch_step(state, "DP-1:1920x1080", 10))
+        self.assertFalse(ds.wallpaper_watch_step(state, "DP-1:1080x1920", 11))
+        self.assertFalse(ds.wallpaper_watch_step(state, "DP-1:1080x1920", 12))
+        self.assertTrue(ds.wallpaper_watch_step(state, "DP-1:1080x1920", 13))
+        self.assertFalse(ds.wallpaper_watch_step(state, "DP-1:1080x1920", 14))
+        state = {}
+        ds.wallpaper_watch_step(state, "DP-1:1920x1080", 0)
+        ds.wallpaper_watch_step(state, "DP-1:1080x1920", 1)
+        self.assertFalse(ds.wallpaper_watch_step(state, "DP-1:1920x1080", 3))
+        self.assertIsNone(state["pending"])
+
+    def test_status_json_has_wallpaper_and_no_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (Path(tmp) / "missing.json",)):
+                cfg = ds.load_config()
+        adapters = ds.collect_adapters(cfg, mouse_channel=None, mouse_path=None, dual_path=None)
+        self.assertIn("wallpaper", adapters)
+        self.assertFalse(adapters["wallpaper"]["enabled"])
+        self.assertIn("wallpaper.apply", adapters["wallpaper"]["capabilities"])
+        slots = ds.collect_slots({"adapters": adapters, "dualup_mode": "unknown"}, cfg)
+        self.assertNotIn("wallpaper", [item.get("id") for item in slots])
+
+    def test_adapter_disabled_cli(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "adapters" / "wallpaper" / "wallpaper.py"), "apply", "--config-json", "{}"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertFalse(data["enabled"])
 
 
 if __name__ == "__main__":

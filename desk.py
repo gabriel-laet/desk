@@ -12,6 +12,7 @@ Core orchestrates. Shells only paint. Hardware plugs in as adapters:
     smarthome  — list devices + light on/off (reference: alexa)
     kettle     — Fellow-style LAN kettle (reference: kettle)
     weather    — Open-Meteo ambient ° + altitude (reference: weather)
+    wallpaper  — per-output image (reference: wallpaper). Off unless configured.
 
 Reference adapters live under `adapters/` and install to
 `~/.local/lib/desk/` (`$DESK_LIB`). Older libdir and config paths still
@@ -35,6 +36,7 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
     desk kettle heat 93
     desk kettle off
     desk weather status     # Open-Meteo ambient (adapter)
+    desk wallpaper apply    # per-output wallpaper (no-op unless configured)
     desk watch              # keyboard arrives → desk to this host
     desk watch --dry-run
 """
@@ -64,6 +66,8 @@ PBP_INPUT_ORDER = ("linux", "mac")  # secondary first, primary last
 LAYOUT_DEFAULT_RETRIES = 16  # EDID after PBP+inputs can lag several seconds
 LAYOUT_DEFAULT_DELAY_S = 0.5
 LAYOUT_DEFAULT_SETTLE_S = 0.5
+WALLPAPER_POLL_S = 2.0
+WALLPAPER_DEBOUNCE_S = 2.0
 HHKB_VID_DEFAULT = 0x04FE
 HHKB_PID_DEFAULT = 0x0016
 MOUSE_CACHE_TTL_S = 24 * 3600  # last-known channel until contradicted (wake lag / other host)
@@ -116,6 +120,7 @@ ROLE_CAPABILITIES = {
     "smarthome": ("smarthome.list", "smarthome.status", "light.on", "light.off"),
     "kettle": ("appliance.status", "appliance.heat", "appliance.off"),
     "weather": ("weather.status",),
+    "wallpaper": ("wallpaper.apply",),
 }
 ROLE_REFERENCE_ID = {
     "mouse": "mxswitch",
@@ -124,6 +129,7 @@ ROLE_REFERENCE_ID = {
     "smarthome": "alexa",
     "kettle": "kettle",
     "weather": "weather",
+    "wallpaper": "wallpaper",
 }
 BUILTIN_MANIFESTS = {
     "mxswitch": {
@@ -167,6 +173,12 @@ BUILTIN_MANIFESTS = {
         "id": "weather",
         "name": "Open-Meteo ambient",
         "capabilities": ["weather.status"],
+    },
+    "wallpaper": {
+        "api_version": ADAPTER_API_VERSION,
+        "id": "wallpaper",
+        "name": "Per-output wallpaper",
+        "capabilities": ["wallpaper.apply"],
     },
 }
 
@@ -642,6 +654,7 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     smarthome = _as_dict(adapters.get("smarthome"))
     kettle = _as_dict(adapters.get("kettle"))
     weather = _as_dict(adapters.get("weather"))
+    wallpaper = _as_dict(adapters.get("wallpaper"))
     dual = display_adapter_cfg(user)
     ui = _as_dict(user.get("ui"))
 
@@ -718,6 +731,23 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         if weather.get(key) is not None and str(weather.get(key)):
             weather_extras[flag] = str(weather[key])
     cfg["_weather_extras"] = weather_extras
+
+    # Off unless the user opts in. Missing section does nothing.
+    wallpaper_outputs = wallpaper.get("outputs") if isinstance(wallpaper.get("outputs"), dict) else {}
+    cfg["_wallpaper_config"] = {
+        "enabled": bool(wallpaper.get("enabled", False)),
+        "landscape": str(wallpaper.get("landscape") or ""),
+        "portrait": str(wallpaper.get("portrait") or ""),
+        "exact_dir": str(wallpaper.get("exact_dir") or ""),
+        "exact_prefix": str(wallpaper.get("exact_prefix") or ""),
+        "primary_output": str(wallpaper.get("primary_output") or ""),
+        "outputs": wallpaper_outputs,
+    }
+    cfg["_wallpaper_enabled"] = cfg["_wallpaper_config"]["enabled"]
+    if wallpaper.get("backend"):
+        cfg["_wallpaper_backend"] = str(wallpaper["backend"])
+    if wallpaper.get("path"):
+        cfg["_wallpaper_path"] = str(wallpaper["path"])
 
     cfg["_dualup_enabled"] = bool(dual.get("enabled", True))
     cfg["_dualup_layout"] = bool(dual.get("layout", True))
@@ -1120,6 +1150,10 @@ def weather_source_path() -> Path | None:
     return python_adapter_source_path("weather")
 
 
+def wallpaper_source_path() -> Path | None:
+    return python_adapter_source_path("wallpaper")
+
+
 def load_hhkb_module():
     """Import the HHKB reference adapter (source tree or installed libdir)."""
     global _HHKB_MOD
@@ -1423,6 +1457,8 @@ def _role_enabled(cfg: dict, role: str) -> bool:
         return bool(cfg.get("_kettle_enabled", True))
     if role == "weather":
         return bool(cfg.get("_weather_enabled", True))
+    if role == "wallpaper":
+        return bool(cfg.get("_wallpaper_enabled", False))
     return True
 
 
@@ -1440,6 +1476,8 @@ def _role_pin(cfg: dict, role: str) -> tuple[str | None, str | None]:
         return cfg.get("_kettle_backend"), cfg.get("_kettle_path") or None
     if role == "weather":
         return cfg.get("_weather_backend"), cfg.get("_weather_path") or None
+    if role == "wallpaper":
+        return cfg.get("_wallpaper_backend"), cfg.get("_wallpaper_path") or None
     return None, None
 
 
@@ -1529,6 +1567,10 @@ def bind_role(cfg: dict, role: str) -> dict:
             resolved = resolve_backend_id(reference) or weather_source_path()
             cache[role] = _binding("weather", resolved, "reference" if resolved else "missing", enabled=True)
             return cache[role]
+        if role == "wallpaper":
+            resolved = resolve_backend_id(reference) or wallpaper_source_path()
+            cache[role] = _binding("wallpaper", resolved, "reference" if resolved else "missing", enabled=True)
+            return cache[role]
     cache[role] = _binding(reference, None, "missing", enabled=True)
     return cache[role]
 
@@ -1547,6 +1589,8 @@ def discovered_adapters(cfg: dict | None = None) -> list[dict]:
             path = kettle_source_path()
         if path is None and adapter_id == "weather":
             path = weather_source_path()
+        if path is None and adapter_id == "wallpaper":
+            path = wallpaper_source_path()
         if path is None:
             continue
         found[adapter_id] = {
@@ -1716,6 +1760,181 @@ def mouse_relay_host_ids(cfg: dict) -> list[str]:
     if "_mouse_relay_hosts" in cfg:
         return _coerce_relay_hosts(cfg.get("_mouse_relay_hosts"))
     return display_relay_host_ids(cfg)
+
+
+def wallpaper_adapter_path(cfg: dict) -> Path | None:
+    if not cfg.get("_wallpaper_enabled", False):
+        return None
+    return role_adapter_path(cfg, "wallpaper", "_wallpaper_enabled")
+
+
+def wallpaper_installed_path(cfg: dict) -> Path | None:
+    """Binary for status, including when the role is left disabled."""
+    if cfg.get("_wallpaper_enabled", False):
+        return wallpaper_adapter_path(cfg)
+    pinned = cfg.get("_wallpaper_path")
+    if pinned:
+        expanded = Path(str(pinned)).expanduser()
+        if _is_exe(expanded):
+            return expanded
+    backend = str(cfg.get("_wallpaper_backend") or "wallpaper")
+    return resolve_backend_id(backend) or wallpaper_source_path()
+
+
+def wallpaper_adapter_cmd(cfg: dict, *verbs: str) -> list[str] | None:
+    path = wallpaper_adapter_path(cfg)
+    if path is None:
+        return None
+    cmd = [str(path), *[str(verb) for verb in verbs]]
+    raw = cfg.get("_wallpaper_config")
+    if isinstance(raw, dict):
+        cmd.extend(["--config-json", json.dumps(raw)])
+    return cmd
+
+
+def invoke_wallpaper(cfg: dict, verb: str, *extra: str, timeout: float = 8.0) -> dict | None:
+    cmd = wallpaper_adapter_cmd(cfg, verb, *extra)
+    if cmd is None:
+        return None
+    return invoke_adapter_cmd(cmd, timeout=timeout)
+
+
+def wallpaper_signature_from_outputs(outputs: object) -> str:
+    parts: list[tuple[str, int, int]] = []
+    if not isinstance(outputs, list):
+        return ""
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        width = item.get("logical_width")
+        if width is None:
+            width = item.get("width") or 0
+        height = item.get("logical_height")
+        if height is None:
+            height = item.get("height") or 0
+        try:
+            parts.append((name, int(width), int(height)))
+        except (TypeError, ValueError):
+            continue
+    parts.sort()
+    return "|".join(f"{name}:{width}x{height}" for name, width, height in parts)
+
+
+def wallpaper_geometry_signature(cfg: dict) -> tuple[str | None, str | None]:
+    data = invoke_wallpaper(cfg, "geometry", timeout=5.0)
+    if data is None:
+        return None, "wallpaper adapter not found"
+    if data.get("ok") is False:
+        return None, str(data.get("error") or "geometry failed")
+    if data.get("signature"):
+        return str(data["signature"]), None
+    return wallpaper_signature_from_outputs(data.get("outputs") or []), None
+
+
+def apply_wallpaper(cfg: dict) -> int:
+    """Run the adapter. Disabled is a no-op. Failures are logged, not raised."""
+    if not cfg.get("_wallpaper_enabled"):
+        return 0
+    try:
+        data = invoke_wallpaper(cfg, "apply", timeout=25.0)
+    except Exception as exc:  # noqa: BLE001 — wallpaper must not break desk
+        log(f"wallpaper apply failed: {exc}")
+        return 1
+    if data is None:
+        log("wallpaper adapter not found — skipping")
+        return 0
+    ok = data.get("ok") is not False and data.get("_returncode") in (0, None)
+    if data.get("enabled") is False:
+        return 0
+    if not ok:
+        log(str(data.get("error") or data.get("summary") or "wallpaper apply failed"))
+        try:
+            return int(data.get("_returncode") or 1)
+        except (TypeError, ValueError):
+            return 1
+    log(f"wallpaper apply: {data.get('summary') or 'ok'}")
+    return 0
+
+
+def note_wallpaper(cfg: dict) -> None:
+    """Best-effort apply after a layout change. Never changes the caller's result."""
+    if not cfg.get("_wallpaper_enabled"):
+        return
+    try:
+        apply_wallpaper(cfg)
+    except Exception as exc:  # noqa: BLE001
+        log(f"wallpaper apply failed: {exc}")
+
+
+def wallpaper_poll_due(state: dict, now: float, *, poll_s: float = WALLPAPER_POLL_S) -> bool:
+    if state.get("pending") is not None and not state.get("last_error"):
+        return True
+    try:
+        last = float(state.get("last_poll") or 0.0)
+    except (TypeError, ValueError):
+        last = 0.0
+    return (now - last) >= poll_s
+
+
+def wallpaper_watch_step(
+    state: dict,
+    signature: str,
+    now: float,
+    *,
+    debounce_s: float = WALLPAPER_DEBOUNCE_S,
+) -> bool:
+    """Return True once a new geometry signature has been stable for debounce_s.
+
+    The first signature is only a baseline.
+    """
+    state["last_poll"] = now
+    state["last_error"] = None
+    baseline = state.get("baseline")
+    if baseline is None:
+        state["baseline"] = signature
+        state["pending"] = None
+        return False
+    if signature == baseline:
+        state["pending"] = None
+        state["pending_since"] = None
+        return False
+    if state.get("pending") != signature:
+        state["pending"] = signature
+        state["pending_since"] = now
+        return False
+    try:
+        since = float(state.get("pending_since"))
+    except (TypeError, ValueError):
+        since = now
+        state["pending_since"] = now
+    if now - since >= debounce_s:
+        state["baseline"] = signature
+        state["pending"] = None
+        state["pending_since"] = None
+        return True
+    return False
+
+
+def wallpaper_watch_poll(cfg: dict, state: dict, now: float) -> None:
+    if not cfg.get("_wallpaper_enabled"):
+        return
+    if not wallpaper_poll_due(state, now):
+        return
+    try:
+        signature, error = wallpaper_geometry_signature(cfg)
+    except Exception as exc:  # noqa: BLE001
+        signature, error = None, str(exc)
+    if error or signature is None:
+        message = error or "geometry failed"
+        if message != state.get("last_error"):
+            log(f"wallpaper geometry: {message}")
+        state["last_error"] = message
+        state["last_poll"] = now
+        return
+    if wallpaper_watch_step(state, signature, now):
+        log("output geometry changed — applying wallpaper")
+        apply_wallpaper(cfg)
 
 
 def switch_mouse(cfg: dict, channel: int | None = None) -> int:
@@ -2247,12 +2466,17 @@ def switch_monitor(cfg: dict, host: str, *, mouse_only: bool) -> int:
     return pre_rc or rc
 
 
+def _after_display_change(cfg: dict) -> None:
+    note_wallpaper(cfg)
+
+
 def cmd_to(cfg: dict, host: str, *, mouse_only: bool = False) -> int:
     dest_host, _spec = host_spec(cfg, host)
     channel = host_channel(cfg, dest_host)
     print(f"desk → {dest_host} (MX channel {channel})")
     rc = switch_mouse(cfg, channel)
     mon_rc = switch_monitor(cfg, dest_host, mouse_only=mouse_only)
+    _after_display_change(cfg)
     return rc or mon_rc
 
 
@@ -2272,19 +2496,23 @@ def cmd_pbp(cfg: dict, mode: str | None) -> int:
     if not chosen:
         print("usage: desk pbp <mode>   (mode is whatever lgdualup pbp accepts)")
         return 2
-    return dualup_set_mode(
+    rc = dualup_set_mode(
         cfg,
         chosen,
         missing="lgdualup not on PATH — DualUp PBP needs `make install`",
     )
+    _after_display_change(cfg)
+    return rc
 
 
 def cmd_full(cfg: dict) -> int:
-    return dualup_set_mode(
+    rc = dualup_set_mode(
         cfg,
         "full",
         missing="lgdualup not on PATH — DualUp full needs `make install`",
     )
+    _after_display_change(cfg)
+    return rc
 
 
 def cmd_layout(cfg: dict) -> int:
@@ -2864,6 +3092,27 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
     }
     if weather_bound.get("candidates"):
         weather["candidates"] = weather_bound["candidates"]
+    wallpaper_path = wallpaper_installed_path(cfg)
+    if cfg.get("_wallpaper_enabled", False):
+        wallpaper_bound = bind_role(cfg, "wallpaper")
+        wallpaper_backend = wallpaper_bound.get("id") or "wallpaper"
+        wallpaper_source = wallpaper_bound.get("source")
+        wallpaper_caps = list(wallpaper_bound.get("capabilities") or ["wallpaper.apply"])
+        if wallpaper_bound.get("path"):
+            wallpaper_path = Path(wallpaper_bound["path"])
+    else:
+        wallpaper_backend = str(cfg.get("_wallpaper_backend") or "wallpaper")
+        wallpaper_source = "disabled"
+        manifest = manifest_for(wallpaper_backend, wallpaper_path)
+        wallpaper_caps = list((manifest or {}).get("capabilities") or ["wallpaper.apply"])
+    wallpaper = {
+        "enabled": bool(cfg.get("_wallpaper_enabled", False)),
+        "available": wallpaper_path is not None,
+        "backend": wallpaper_backend,
+        "path": str(wallpaper_path) if wallpaper_path else None,
+        "source": wallpaper_source,
+        "capabilities": wallpaper_caps,
+    }
     discovered = []
     for item in discovered_adapters(cfg):
         discovered.append(
@@ -2895,6 +3144,7 @@ def collect_adapters(cfg: dict, *, mouse_channel: int | None, mouse_path: Path |
         "smarthome": smarthome,
         "kettle": kettle,
         "weather": weather,
+        "wallpaper": wallpaper,
         "discovered": discovered,
     }
 
@@ -2984,6 +3234,9 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
     merge_adapter_snapshot(adapters.get("kettle"), kettle_snap)
     weather_snap = invoke_weather(cfg, "info", timeout=3.0)
     merge_adapter_snapshot(adapters.get("weather"), weather_snap)
+    if cfg.get("_wallpaper_enabled"):
+        wallpaper_snap = invoke_wallpaper(cfg, "info", timeout=4.0)
+        merge_adapter_snapshot(adapters.get("wallpaper"), wallpaper_snap)
     present = bool(adapters["hhkb"]["present"])
     state = {
         "os": SYSTEM,
@@ -3120,6 +3373,17 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
         f"  weather     : {weather_state}  backend={weather.get('backend', 'weather')}  "
         f"{weather_mark}  {weather.get('path') or '-'}"
     )
+    paper = adapters.get("wallpaper") or {}
+    paper_state = "available" if paper.get("available") else "missing"
+    if not paper.get("enabled", False):
+        paper_state = "disabled"
+    paper_mark = str(paper.get("summary") or paper.get("backend_choice") or "").strip()
+    if paper.get("error"):
+        paper_mark = str(paper.get("error"))
+    print(
+        f"  wallpaper   : {paper_state}  backend={paper.get('backend', 'wallpaper')}  "
+        f"{paper_mark + '  ' if paper_mark else ''}{paper.get('path') or '-'}"
+    )
     slots = state.get("slots") or []
     if slots:
         painted = "  ".join(
@@ -3219,7 +3483,9 @@ def apply_arrival(cfg: dict, plan: dict, *, dry_run: bool, reason: str) -> int:
     if layout:
         print(f"desk → {host} (MX channel {channel})")
         rc = switch_mouse(cfg, channel) if plan.get("mouse", True) else 0
-        return rc or apply_named_arrival_layout(cfg, str(layout))
+        layout_rc = apply_named_arrival_layout(cfg, str(layout))
+        _after_display_change(cfg)
+        return rc or layout_rc
     return cmd_to(cfg, host, mouse_only=not move_displays)
 
 
@@ -3289,6 +3555,13 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
     # not run `desk to` again.
     focused_here = False
     arrival_latched = False
+    wallpaper_state = {
+        "baseline": None,
+        "pending": None,
+        "pending_since": None,
+        "last_poll": 0.0,
+        "last_error": None,
+    }
 
     while True:
         now = time.time()
@@ -3380,6 +3653,10 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
             arrival_latched = False
             armed = False
             absent = 0
+        try:
+            wallpaper_watch_poll(cfg, wallpaper_state, now)
+        except Exception as exc:  # noqa: BLE001 — watcher stays up
+            log(f"wallpaper watch failed: {exc}")
         time.sleep(interval)
 
 
@@ -3514,6 +3791,35 @@ def cmd_weather(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
         return 1
 
 
+def cmd_wallpaper(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
+    action = str(verb or "apply").strip().lower()
+    if action in ("info", "probe"):
+        action = "status"
+    if action not in ("apply", "status"):
+        print(f"unknown wallpaper verb: {verb} (try apply, status)", file=sys.stderr)
+        return 2
+    if not cfg.get("_wallpaper_enabled"):
+        payload = {"ok": True, "enabled": False, "applied": [], "summary": "disabled"}
+        print(json.dumps(payload, indent=2))
+        return 0
+    if wallpaper_adapter_path(cfg) is None:
+        print("wallpaper adapter not found (install adapters/wallpaper or pin adapters.wallpaper.path)")
+        return 0
+    data = invoke_wallpaper(cfg, "info" if action == "status" else "apply", timeout=25.0)
+    if data is None:
+        print("wallpaper adapter not found (install adapters/wallpaper or pin adapters.wallpaper.path)")
+        return 0
+    printable = {key: value for key, value in data.items() if not str(key).startswith("_")}
+    print(json.dumps(printable, indent=2))
+    if printable.get("enabled") is False:
+        return 0
+    rc = data.get("_returncode")
+    try:
+        return int(rc) if rc is not None else (0 if data.get("ok", True) else 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _lower_host_arg(value: str) -> str:
     """Argparse type so `LNX` and `Tower` match configured ids."""
     return str(value).strip().lower()
@@ -3592,6 +3898,9 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
         help="status | info",
     )
     weather.add_argument("--json", action="store_true", help="print adapter JSON")
+    wallpaper = sub.add_parser("wallpaper", help="per-output wallpaper (off unless configured)")
+    wallpaper.add_argument("verb", nargs="?", default="apply", help="apply | status")
+    wallpaper.add_argument("--json", action="store_true", help="print adapter JSON")
     return parser
 
 
@@ -3621,6 +3930,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_kettle(cfg, args.verb, args.temp, as_json=args.json)
     if args.cmd == "weather":
         return cmd_weather(cfg, args.verb, as_json=args.json)
+    if args.cmd == "wallpaper":
+        return cmd_wallpaper(cfg, args.verb, as_json=args.json)
     return 2
 
 

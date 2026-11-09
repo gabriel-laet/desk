@@ -11,7 +11,7 @@ to a configured host, optionally follow an
 
 ```
 core     = config · status · watch · to/full/pbp · adapter registry · slots
-adapters = mouse / keyboard / display / smarthome / kettle / weather
+adapters = mouse / keyboard / display / smarthome / kettle / weather / wallpaper
 shells   = macOS DeskSwitchBar + Omarchy tray — they paint `slots`, nothing else
 ```
 
@@ -37,6 +37,7 @@ The host where the keyboard arrives runs `desk to` itself.
 | **alexa** | smarthome | list devices + desk light on/off (wraps alexacli) |
 | **kettle** | kettle | Fellow-style kettle on the LAN (heat / off / status) |
 | **weather** | weather | Open-Meteo ambient ° + altitude |
+| **wallpaper** | wallpaper | Per-output image from aspect or exact resolution. Off unless enabled |
 
 Pin with `adapters.<role>.backend` / `path`, or drop a binary +
 `*.manifest.json` in `~/.local/lib/desk/` (`$DESK_LIB`). Third parties
@@ -161,6 +162,7 @@ Put `~/.local/bin` on `PATH`. `git pull && make install` from the clone.
 ~/.local/lib/desk/alexa                  # smarthome reference (wraps alexacli)
 ~/.local/lib/desk/kettle                 # Fellow-style LAN kettle
 ~/.local/lib/desk/weather                # Open-Meteo ambient ° + altitude
+~/.local/lib/desk/wallpaper              # per-output wallpaper (off unless enabled)
 ~/.local/lib/desk/*.manifest.json        # api_version: 1
 ~/.local/bin/mxswitch                    # compat shim → lib/
 ~/.local/bin/lgdualup                    # compat shim → lib/
@@ -334,6 +336,8 @@ desk kettle status --json
 desk kettle heat 93
 desk kettle off
 desk weather status --json
+desk wallpaper apply     # no-op unless adapters.wallpaper.enabled
+desk wallpaper status --json
 desk --version
 ```
 
@@ -399,6 +403,15 @@ Edit [`config.example.json`](config.example.json) →
       "longitude": 0,
       "timezone": "UTC",
       "label": "Home"
+    },
+    "wallpaper": {
+      "enabled": false,
+      "landscape": "~/Pictures/wallpaper-landscape.jpg",
+      "portrait": "~/Pictures/wallpaper-portrait.jpg",
+      "exact_dir": "~/Pictures/wallpapers",
+      "exact_prefix": "desk",
+      "primary_output": "",
+      "outputs": {}
     }
   },
   "ui": {
@@ -423,6 +436,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.smarthome` | Smart-home role. Optional `device` is the speaker that hears light phrases |
 | `adapters.kettle` | Fellow-style LAN kettle. Set `host` (DHCP moves it). See [`adapters/kettle/`](adapters/kettle/) |
 | `adapters.weather` | Open-Meteo ambient. Set `latitude` / `longitude` / `timezone` / `label`. See [`adapters/weather/`](adapters/weather/) |
+| `adapters.wallpaper` | Optional per-output images. Off unless `enabled` is true. See [Wallpaper](#wallpaper) |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
 | `ui.tray.lights` | If true, `bar_strip` may include a lights on/off mark |
 | `ui.tray.slots` | Order + show/hide + flavor. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
@@ -629,7 +643,8 @@ Display adapters list `display.input` / `display.pbp` / `display.full` /
 `layout.apply`. Keyboard adapters list `keyboard.presence`. Smart-home
 adapters list `smarthome.list` / `smarthome.status` / `light.on` /
 `light.off`. Kettle adapters list `appliance.status` / `appliance.heat` /
-`appliance.off`. Weather adapters list `weather.status`.
+`appliance.off`. Weather adapters list `weather.status`. Wallpaper
+adapters list `wallpaper.apply`.
 
 ## Alexa / smart-home
 
@@ -676,6 +691,86 @@ kettle → DualUp; `ui.tray.slots` reorders and hides.
 
 Prefer `desk kettle …`. Optional `kettle` on PATH is a shim to
 `~/.local/lib/desk/kettle`.
+
+## Wallpaper
+
+Optional. Nothing is set unless `adapters.wallpaper.enabled` is true.
+The reference adapter does not know a particular monitor: it lists the
+host's outputs and picks an image per output.
+
+Resolution for the pick is the **mode size after rotation**, not the
+scaled layout size. A 2560×1440 panel at scale 2 still looks up
+`2560x1440`. Hyprland transforms 1, 3, 5, and 7 swap width and height
+first (`hyprctl` `width`/`height` are the mode). macOS uses
+`NSScreen` pixels (points × backing scale), which are already oriented.
+
+1. **Exact file** in `exact_dir`, when that directory is set.
+   `{exact_prefix}-<W>x<H>.png` wins (`desk-2560x1440.png`,
+   `desk-1920x1080.png`, `desk-2560x2880.png`). If that file is absent,
+   a single `*-<W>x<H>.*` in the same directory is used. Several matches
+   are ignored.
+2. **Portrait** when the rotated height is greater than the width,
+   otherwise **landscape** (a square uses landscape). A per-output entry
+   under `outputs` (connector or display name) replaces the global path
+   for that orientation only.
+
+Fit is cover/fill: crop, never stretch. Source files are not modified.
+A setter that cannot crop writes a derived file under
+`~/.cache/desk/wallpaper/`.
+
+```bash
+desk wallpaper apply
+desk wallpaper status --json
+```
+
+`desk full`, `desk pbp`, `desk layout`, and `desk to` (including USB
+arrival inside `desk watch`) apply afterwards. Failures are logged and
+do not fail the command. `desk watch` polls logical geometry every few
+seconds and applies again when the set of output plus rotated pixel
+size stays changed for about 2 seconds.
+
+macOS sets each display with System Events (`desktop N`'s picture,
+matched to the NSScreen name, else index) and then
+`NSWorkspace.setDesktopImageURL` with
+`NSWorkspaceDesktopImageScalingKey` =
+`NSImageScaleProportionallyUpOrDown` (**3**) and
+`NSWorkspaceDesktopImageAllowClippingKey` = true. Scaling **2** is
+center and is not used.
+
+Linux / Hyprland, first setter that applies:
+
+1. **hyprpaper running** — per output (`preload`, then `wallpaper NAME,path`). Cover.
+2. **swaybg running** — stop `swaybg`, start one `swaybg -o NAME -i PATH -m fill` per output.
+3. **`omarchy-shell background setForScreen`** or **`omarchy-theme-bg-set --monitor`** — per output, only when that interface is present.
+4. **Stock Omarchy** (`omarchy-theme-bg-set` / `background set`) — one image. The stock setter has no per-output path. The image is the one for `primary_output` when that output is connected, otherwise the largest output. The shell crops.
+5. **`swaybg` installed and nothing else owns the background** — same per-output `-m fill` as (2).
+
+A running hyprpaper or swaybg is preferred over Omarchy's single image.
+On a stock Omarchy shell neither daemon is running, so (4) is what
+runs. Detail: [`adapters/wallpaper/`](adapters/wallpaper/).
+
+```json
+{
+  "adapters": {
+    "wallpaper": {
+      "enabled": true,
+      "landscape": "~/Pictures/wallpaper-landscape.jpg",
+      "portrait": "~/Pictures/wallpaper-portrait.jpg",
+      "exact_dir": "~/Pictures/wallpapers",
+      "exact_prefix": "desk",
+      "primary_output": "DP-1",
+      "outputs": {
+        "DP-2": { "portrait": "~/Pictures/wallpaper-portrait.jpg" }
+      }
+    }
+  }
+}
+```
+
+Host setup is `make install`, the config above, and on Linux one of
+`hyprpaper`, `swaybg`, or Omarchy's background tools. `hyprctl` lists
+outputs. macOS only needs `osascript`. `desk watch` (the existing login
+watcher) re-applies on hotplug, mode, and rotation.
 
 ## Troubleshooting
 

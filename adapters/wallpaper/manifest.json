@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "wallpaper",
+  "name": "Per-output wallpaper",
+  "capabilities": ["wallpaper.apply"]
+}
