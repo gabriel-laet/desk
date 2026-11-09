@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "hardware",
+  "name": "LAN hardware metrics",
+  "capabilities": ["hardware.status"]
+}

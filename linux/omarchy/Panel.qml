@@ -185,7 +185,47 @@ Panel {
       return "mode"
     if (id === "host")
       return "host"
+    if (id === "hardware")
+      return "table"
     return slot && slot.face ? "face" : "chip"
+  }
+
+  function chipSlots() {
+    const items = root.slotList()
+    const out = []
+    for (let i = 0; i < items.length; i++) {
+      if (root.slotKind(items[i]) === "table")
+        continue
+      out.push(items[i])
+    }
+    return out
+  }
+
+  function tableSlots() {
+    const items = root.slotList()
+    const out = []
+    for (let i = 0; i < items.length; i++) {
+      if (root.slotKind(items[i]) === "table")
+        out.push(items[i])
+    }
+    return out
+  }
+
+  // Metrics table plus the optional per-host AI block. Both are already
+  // formatted by core; this shell does not name metrics or tools.
+  function hardwareText(slot) {
+    const lines = []
+    if (slot && slot.header)
+      lines.push(String(slot.header))
+    const rows = slot && slot.rows ? slot.rows : []
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] || {}
+      if (row.line)
+        lines.push(String(row.line))
+    }
+    if (slot && slot.ai_text)
+      lines.push(String(slot.ai_text))
+    return lines.join("\n")
   }
 
   function faceSlot() {
@@ -214,6 +254,8 @@ Panel {
     for (let i = 0; i < items.length; i++) {
       const slot = items[i]
       if (!slot || (face && slot.id === face.id))
+        continue
+      if (root.slotKind(slot) === "table")
         continue
       const label = String(slot.label || "")
       if (label)
@@ -268,7 +310,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(280))
+    contentWidth: panel.fittedContentWidth(Style.space(root.tableSlots().length ? 420 : 280))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -353,12 +395,29 @@ Panel {
           StatusChip { visible: root.peerChip() !== ""; chipLabel: "PEER"; chipValue: root.peerChip(); chipOk: root.peerChip().indexOf("unreachable") === -1 }
         }
 
-        Flow {
-          visible: root.slots && root.slots.length
+        Column {
+          visible: root.tableSlots().length > 0
           width: parent.width
           spacing: Style.space(6)
           Repeater {
-            model: root.slots || []
+            model: root.tableSlots()
+            delegate: Text {
+              width: parent.width
+              text: root.hardwareText(modelData)
+              color: root.barForeground
+              wrapMode: Text.Wrap
+              font.family: "monospace"
+              font.pixelSize: Style.font.subtitle
+            }
+          }
+        }
+
+        Flow {
+          visible: root.chipSlots().length
+          width: parent.width
+          spacing: Style.space(6)
+          Repeater {
+            model: root.chipSlots()
             delegate: StatusChip {
               chipLabel: String(modelData.glyph || "")
               chipValue: String(modelData.label || "") + (modelData.detail ? " · " + modelData.detail : "")
