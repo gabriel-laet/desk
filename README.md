@@ -10,7 +10,7 @@ to a configured host, optionally follow an
 `mac` and `linux` are the defaults. Any other id in `adapters.hosts` is a host too.
 
 ```
-core     = config · status · watch · to/full/pbp · adapter registry · slots
+core     = config · status · watch · to/full/pbp/layout · adapter registry · slots
 adapters = mouse / keyboard / display / smarthome / kettle / weather / wallpaper
 shells   = macOS DeskSwitchBar + Omarchy tray — they paint `slots`, nothing else
 ```
@@ -93,15 +93,18 @@ unless `ui.tray.lights` is true. Slot order and HUD prefs live in `ui`
 — see [docs/ui-config.md](docs/ui-config.md).
 
 A desk often shows two hosts at once: one on the main monitor and another
-on a second, or both in PBP. `adapters.hosts.arrival_moves_display` (default
-true) chooses whether arrival changes display inputs. Set it false and
-arrival only brings the mouse; the monitors stay. `desk to <host>` typed
-at the command line still changes the display. Named layouts — which
-monitor shows which host, PBP top and bottom — are not selected yet.
-Arrival builds a small plan (`mouse`, `displays`, `layout`). `layout`
-stays empty, and the blanket input switch runs only when `displays` is
-`move`. A later change can fill `layout` and apply that arrangement
-instead of sending every input to this host.
+on a second, or both in PBP. `desk layout <name>` applies a named
+arrangement. `status --json` reports `active_layout` and the per-monitor
+assignment; the display slot label is that layout name.
+
+Keyboard arrival still builds a plan (`mouse`, `displays`, `layout`).
+With no active layout, `layout` stays empty and the blanket input switch
+runs only when `displays` is `move`. With one active, arrival moves the
+mouse and leaves the monitors alone when this host is already shown.
+Otherwise, and only when `arrival_moves_display` is on, it switches the
+monitors that layout marks `follow` (default: the primary monitor, and
+only while that monitor is full). A PBP monitor stays split unless
+`follow` is set. `desk to <host>` typed at the command line is unchanged.
 
 A rising USB sample is the legacy `follow_hhkb_usb` edge: it also runs
 `desk to` this host when the keyboard was already connected over Bluetooth.
@@ -453,7 +456,10 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.dualup.inputs.*` | Display input for that host (`adapters.display.inputs` is the same map). PBP uses Mac=`hdmi1`, Linux=`dp` when empty. `desk to` with neither this nor `hosts.<id>.dualup_input` / `hosts.<id>.input` says so and leaves the input unchanged |
 | `adapters.hosts.<id>.ssh` | Optional SSH target for that host (`user@192.0.2.10`). Relay and `pre_switch` use it |
 | `adapters.hosts.<id>.pre_switch` | Optional shell command run on that host before `desk to` changes its display input |
-| `adapters.display.relay_hosts` | Ordered host ids. When the local display adapter reports the device absent, try these peers and stop at the first success. `adapters.dualup.relay_hosts` is the same list |
+| `adapters.display.relay_hosts` | Ordered host ids. When the local display adapter reports the device absent, try these peers and stop at the first success. `adapters.dualup.relay_hosts` is the same list. Each monitor can set its own |
+| `layouts` | Named arrangements. `desk layout <name>` applies one and stores it as `active_layout` |
+| `adapters.displays` | Map of monitor id → display instance. Absent: the single `adapters.display` object is monitor id `display` |
+| `pbp_splits` | On a DualUp instance. `side` defaults to 5. `stacked` is the code `lgdualup get pbp` prints. Codes 0 and 2 are not sent |
 | `adapters.display.relay_path` | Optional remote executable. Default is `$HOME/.local/lib/desk/<adapter id>` |
 | `adapters.mouse.relay_hosts` | Ordered host ids for the mouse. When the local mouse adapter reports the device absent, try these and stop at the first success. When omitted, the display `relay_hosts` list is used |
 | `adapters.mouse.relay_path` | Optional remote mouse executable. Default is `$HOME/.local/lib/desk/<mouse adapter id>` |
@@ -646,6 +652,98 @@ adapters list `smarthome.list` / `smarthome.status` / `light.on` /
 `appliance.off`. Weather adapters list `weather.status`. Wallpaper
 adapters list `wallpaper.apply`.
 
+## Named layouts
+
+`layouts` names an arrangement of monitors. A monitor id is a key of
+`adapters.displays`, or `display` when the file still has one
+`adapters.display` / `adapters.dualup` object. Core does not know VCP
+codes. It asks the display adapter to select an input, and, for PBP,
+to set a split name and then the sub input and the main input.
+
+```json
+{
+  "layouts": {
+    "split": {
+      "monitors": {
+        "display": {
+          "mode": "pbp",
+          "top": "mac",
+          "bottom": "linux",
+          "split": "stacked"
+        },
+        "side": { "mode": "full", "host": "tower", "follow": false }
+      }
+    },
+    "focus": {
+      "monitors": {
+        "display": { "mode": "full", "host": "mac" }
+      }
+    }
+  },
+  "adapters": {
+    "displays": {
+      "display": {
+        "backend": "lgdualup",
+        "inputs": { "mac": "hdmi1", "linux": "dp", "tower": "hdmi2" },
+        "relay_hosts": ["mac", "linux", "tower"],
+        "pbp_splits": { "side": 5 }
+      },
+      "side": {
+        "backend": "ddc",
+        "inputs": { "mac": "0x11", "linux": "0x12", "tower": "0x0f" }
+      }
+    }
+  }
+}
+```
+
+`desk layout split` walks each monitor. Only a host that currently holds
+that monitor's control link can send, so each command is tried locally
+and then on `relay_hosts`, and tried once more after the settle delay:
+the link moves when the input changes. PBP order is the split, then the
+top host as the sub input, then the bottom host as the main input, with
+`layout_settle_s` (default 0.5s) after each. When the monitor is set,
+OS layout runs on **every** host shown there — locally on this machine,
+over SSH (`ssh` or `peer`) on the others — via that host's
+`dualup-layout` (or the instance's `layout_helper` / `peer_layout`).
+
+`follow` defaults to the primary monitor, and only in `full` mode. Set
+it on a PBP monitor only when arrival should leave that split.
+
+The applied name is stored in `~/.local/state/desk/state.json`
+(`$XDG_STATE_HOME/desk`, or `$DESK_STATE_DIR`). `desk status --json`
+includes `active_layout` and `monitors`. The display slot's label is
+the layout name while one is active.
+
+### Reading the stacked PBP code
+
+On this DualUp, VCP `0xD7` at `0x51` is the picture split. `1` is full,
+`5` is 50-50 side by side, `3` is 66/33 side by side. `0` and `2`
+stretch the panel and are never sent. The top/bottom 1:1 code is not
+known ahead of time. Set that picture from the monitor's own menu, then
+read it from the machine that has the USB upstream:
+
+```bash
+lgdualup get pbp
+lgdualup --read 0xD7
+```
+
+Both send a DDC/CI get (opcode `0x01`) in the same HID wrapper as a
+set, and parse the reply (opcode `0x02`). The line looks like
+`pbp 0xD7 @ 0x51 = 4 (0x04)`. Put that number on the DualUp instance:
+
+```json
+"pbp_splits": { "stacked": 4, "side": 5 }
+```
+
+`desk layout` forwards the map as `--splits` and does not interpret it.
+Until `stacked` is set, `lgdualup pbp stacked` exits without writing.
+Side-by-side halves are 1280x2880 (the previous PBP default). Stacked
+halves are 2560x1440 with no rotation:
+`dualup-layout pbp --split stacked` uses Hyprland
+`2560x1440@59.95` transform 0, and displayplacer `res:2560x1440`
+`degree:0`.
+
 ## Alexa / smart-home
 
 The `alexa` adapter is a thin wrapper around [`alexacli`](https://github.com/buddyh/alexa-cli).
@@ -723,9 +821,9 @@ desk wallpaper apply
 desk wallpaper status --json
 ```
 
-`desk full`, `desk pbp`, `desk layout`, and `desk to` (including USB
-arrival inside `desk watch`) apply afterwards. Failures are logged and
-do not fail the command. `desk watch` polls logical geometry every few
+`desk full`, `desk pbp`, `desk layout` (a named arrangement, or the live
+full/PBP reapply), and `desk to` (including USB arrival inside `desk watch`)
+apply afterwards. Failures are logged and do not fail the command. `desk watch` polls logical geometry every few
 seconds and applies again when the set of output plus rotated pixel
 size stays changed for about 2 seconds.
 

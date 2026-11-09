@@ -4,13 +4,14 @@
 Used by the desk-switch dualup adapter after `lgdualup pbp`. Not a
 user-facing command — call `desk-switch full` / `desk-switch pbp`.
 
-    dualup-layout full|pbp [--id connector] [--res WxH] [--degree N]
+    dualup-layout full|pbp [--id connector] [--res WxH] [--degree N] [--split side|stacked]
 
 `--id` is a Hyprland connector (`DP-2`) or a description substring.
 
-Confirmed Omarchy modes (DP-2; matches Mac 2880x1280@270 / 2880x2560@270):
+Confirmed modes (DP-2):
   full → 2560x2880, transform 3
-  pbp  → 1280x2880, transform 3   (not 2880x1280 t3 / not 1280x2880 t0)
+  pbp --split side → 1280x2880, transform 3   (tall half; the default)
+  pbp --split stacked → 2560x1440@59.95, transform 0   (each half landscape)
 
 Omarchy / Hyprland ≥0.55 Lua config is applied with
 ``hyprctl eval 'hl.monitor({ … })'``. Hosts still on hyprlang fall back
@@ -38,8 +39,11 @@ from pathlib import Path
 FULL_RES = "2560x2880"
 FULL_RES_FALLBACKS = ("2560x2880", "2880x2560")
 PBP_RES_CANDIDATES = ("1280x2880", "2880x1280")
+STACKED_RES = "2560x1440"
+STACKED_HZ = "59.95"
 FULL_TRANSFORM = 3
 PBP_TRANSFORM = 3
+STACKED_TRANSFORM = 0
 DUALUP_MARKERS = (
     "2560x2880",
     "2880x2560",
@@ -123,7 +127,7 @@ def pick_from(mon: dict, candidates: tuple[str, ...]) -> str | None:
     return None
 
 
-def pick_res(mode: str, mon: dict, requested: str) -> str | None:
+def pick_res(mode: str, mon: dict, requested: str, split: str = "side") -> str | None:
     if requested:
         offered = mode_offered(mon, requested)
         if offered is False:
@@ -131,6 +135,8 @@ def pick_res(mode: str, mon: dict, requested: str) -> str | None:
         return requested
     if mode == "full":
         return pick_from(mon, FULL_RES_FALLBACKS)
+    if split == "stacked":
+        return pick_from(mon, (STACKED_RES,))
     return pick_from(mon, PBP_RES_CANDIDATES)
 
 
@@ -208,8 +214,20 @@ def print_hypr(proc: subprocess.CompletedProcess) -> None:
         print(err, file=sys.stderr if proc.returncode else sys.stdout)
 
 
-def hz_for(mon: dict, res: str) -> str:
-    for item in available_modes(mon):
+def split_kind(raw: str) -> str:
+    key = (raw or "").strip().lower()
+    if key in ("stacked", "stack", "top-bottom", "tb"):
+        return "stacked"
+    return "side"
+
+
+def hz_for(mon: dict, res: str, prefer: str = "") -> str:
+    modes = available_modes(mon)
+    if prefer:
+        for item in modes:
+            if res in str(item) and prefer in str(item):
+                return prefer
+    for item in modes:
         match = re.search(rf"{re.escape(res)}@([\d.]+)", str(item))
         if match:
             return match.group(1).rstrip(".")
@@ -222,7 +240,9 @@ def hz_for(mon: dict, res: str) -> str:
             return f"{hz:.2f}".rstrip("0").rstrip(".")
     except (TypeError, ValueError):
         pass
-    return "60"
+    if prefer and not modes:
+        return prefer
+    return prefer or "60"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -231,12 +251,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--id", default=os.environ.get("DUALUP_DISPLAY_ID", ""))
     parser.add_argument("--res", default="")
     parser.add_argument("--degree", type=int, default=None)
+    parser.add_argument("--split", default="", help="pbp geometry: side (1280x2880) or stacked (2560x1440)")
     args = parser.parse_args(argv)
 
+    kind = split_kind(args.split) if args.mode == "pbp" else "side"
     if args.degree is not None:
-        transform = DEGREE_TO_TRANSFORM.get(int(args.degree) % 360, PBP_TRANSFORM)
+        fallback = STACKED_TRANSFORM if kind == "stacked" else PBP_TRANSFORM
+        transform = DEGREE_TO_TRANSFORM.get(int(args.degree) % 360, fallback)
+    elif args.mode == "full":
+        transform = FULL_TRANSFORM
+    elif kind == "stacked":
+        transform = STACKED_TRANSFORM
     else:
-        transform = PBP_TRANSFORM if args.mode == "pbp" else FULL_TRANSFORM
+        transform = PBP_TRANSFORM
 
     hyprctl = hyprctl_bin()
     if not hyprctl:
@@ -254,9 +281,16 @@ def main(argv: list[str] | None = None) -> int:
         print("dualup-layout: DualUp monitor not found yet (set adapters.dualup.display_id)", file=sys.stderr)
         return 2
 
-    res = pick_res(args.mode, mon, args.res.strip())
+    res = pick_res(args.mode, mon, args.res.strip(), kind)
     if not res:
-        want = args.res.strip() or (FULL_RES if args.mode == "full" else " / ".join(PBP_RES_CANDIDATES))
+        if args.res.strip():
+            want = args.res.strip()
+        elif args.mode == "full":
+            want = FULL_RES
+        elif kind == "stacked":
+            want = STACKED_RES
+        else:
+            want = " / ".join(PBP_RES_CANDIDATES)
         print(f"dualup-layout: {want} not in EDID yet", file=sys.stderr)
         return 2
 
@@ -267,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         scale = float(mon.get("scale") or 1.0)
     except (TypeError, ValueError):
         scale = 1.0
-    hz = hz_for(mon, res)
+    prefer = STACKED_HZ if kind == "stacked" and args.mode == "pbp" else ""
+    hz = hz_for(mon, res, prefer)
     scale_s = str(int(scale)) if scale == int(scale) else str(scale)
     mode_s = f"{res}@{hz}"
     position = f"{x}x{y}"
