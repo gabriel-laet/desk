@@ -701,6 +701,10 @@ class DualupAdapterTests(unittest.TestCase):
             self.assertIn("input-sub", src)
             self.assertIn("0x55", src)
             self.assertIn("0xF6", src)
+            self.assertIn("get pbp", src)
+            self.assertIn("--read", src)
+            self.assertIn("0x01", src)
+            self.assertIn("not sent", src)
 
 
 class DualupLayoutScriptTests(unittest.TestCase):
@@ -1054,6 +1058,62 @@ class DualupLayoutScriptTests(unittest.TestCase):
             proc = self._run_script(self.LNX, ["pbp", "--id", "DP-2"], bin_dir)
         self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
         self.assertNotIn("2560x1440", proc.stdout)
+
+    def test_linux_pbp_split_side_stays_1280x2880_transform_3(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_hyprctl(
+                bin_dir,
+                self._linux_monitors(
+                    1280,
+                    2880,
+                    ["1280x2880@59.96Hz", "2560x1440@59.95Hz"],
+                ),
+            )
+            proc = self._run_script(self.LNX, ["pbp", "--split", "side", "--id", "DP-2"], bin_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn('mode = "1280x2880@59.96"', proc.stdout)
+        self.assertIn("transform = 3", proc.stdout)
+        self.assertNotIn("2560x1440", proc.stdout)
+
+    def test_linux_pbp_split_stacked_is_2560x1440_transform_0(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._write_hyprctl(
+                bin_dir,
+                self._linux_monitors(
+                    2560,
+                    1440,
+                    ["2560x1440@59.95Hz", "1280x2880@59.96Hz"],
+                ),
+            )
+            proc = self._run_script(
+                self.LNX, ["pbp", "--split", "stacked", "--id", "DP-2"], bin_dir
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn(
+            'hl.monitor({ output = "DP-2", mode = "2560x1440@59.95", '
+            'position = "0x0", scale = 1, transform = 0 })',
+            proc.stdout,
+        )
+        self.assertNotIn("transform = 3", proc.stdout)
+        self.assertNotIn("1280x2880", proc.stdout)
+
+    def test_macos_pbp_split_stacked_is_2560x1440_degree_0(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            listed = self._macos_list(
+                "2560x1440",
+                0,
+                ["  mode 0: res:2560x1440 hz:59.95", "  mode 1: res:1280x2880 hz:60"],
+            )
+            self._write_displayplacer(bin_dir, listed, listed)
+            proc = self._run_script(self.MAC, ["pbp", "--split", "stacked", "--id", self.DID], bin_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn(f"res:2560x1440", proc.stdout)
+        self.assertIn("degree:0", proc.stdout)
+        self.assertNotIn("degree:270", proc.stdout)
+        self.assertNotIn("res:2880x1280", proc.stdout)
 
 
 class LinuxDualupLayoutUnitTests(unittest.TestCase):
@@ -3760,7 +3820,7 @@ class KeyboardArrivalTests(unittest.TestCase):
             rc = ds.apply_arrival(cfg, plan, dry_run=False, reason="keyboard arrived")
         self.assertEqual(rc, 0)
         self.assertEqual(seen, ["mouse:3"])
-        self.assertIn("arrival layout pbp-top is not available yet", buf.getvalue())
+        self.assertIn("arrival layout pbp-top is not configured", buf.getvalue())
         self.assertIn("leaving displays unchanged", buf.getvalue())
 
         typed = io.StringIO()
@@ -4461,6 +4521,30 @@ class WallpaperTests(unittest.TestCase):
         ), mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(ds.cmd_full(cfg), 0)
             self.assertEqual(ds.cmd_pbp(cfg, "50-50"), 0)
+        named = {
+            "_wallpaper_enabled": True,
+            "this_host": "mac",
+            "hosts": {"mac": {"channel": 1, "input": "hdmi1"}},
+            "layouts": {
+                "focus": {"monitors": {"display": {"mode": "full", "host": "mac"}}}
+            },
+        }
+        with mock.patch.object(ds, "execute_layout_steps", return_value=0), mock.patch.object(
+            ds, "save_active_layout"
+        ), mock.patch.object(ds, "apply_wallpaper", return_value=0) as named_apply, mock.patch(
+            "sys.stdout", io.StringIO()
+        ):
+            self.assertEqual(ds.cmd_layout(named, "focus"), 0)
+        named_apply.assert_called_once()
+        with mock.patch.object(ds, "execute_layout_steps", return_value=0), mock.patch.object(
+            ds, "save_active_layout"
+        ), mock.patch.object(
+            ds, "apply_wallpaper", side_effect=RuntimeError("setter down")
+        ), mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(ds.cmd_layout(named, "focus"), 0)
+        with mock.patch.object(ds, "apply_wallpaper") as skipped, mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(ds.cmd_layout(named, "missing"), 2)
+        skipped.assert_not_called()
 
     def test_watch_debounce(self) -> None:
         state: dict = {}
@@ -4495,6 +4579,325 @@ class WallpaperTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         data = json.loads(proc.stdout)
         self.assertFalse(data["enabled"])
+
+
+class NamedLayoutTests(unittest.TestCase):
+    def _cfg(self, **extra: object) -> dict:
+        cfg = {
+            "this_host": "mac",
+            "arrival_moves_display": True,
+            "_active_layout": None,
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "mac.example", "input": "hdmi1"},
+                "linux": {"channel": 2, "ssh": "linux.example", "input": "dp"},
+                "tower": {"channel": 3, "ssh": "tower.example", "input": "hdmi2"},
+            },
+            "adapters": {
+                "displays": {
+                    "main": {
+                        "backend": "lgdualup",
+                        "primary": True,
+                        "inputs": {"mac": "hdmi1", "linux": "dp", "tower": "hdmi2"},
+                        "pbp_splits": {"side": 5, "stacked": 4},
+                        "relay_hosts": ["mac", "linux", "tower"],
+                    },
+                    "side": {
+                        "backend": "ddc",
+                        "inputs": {"mac": "0x11", "linux": "0x12"},
+                    },
+                }
+            },
+            "layouts": {
+                "work": {
+                    "monitors": {
+                        "main": {"mode": "full", "host": "mac"},
+                        "side": {"mode": "full", "host": "linux"},
+                    }
+                },
+                "stack": {
+                    "monitors": {
+                        "main": {
+                            "mode": "pbp",
+                            "top": "mac",
+                            "bottom": "linux",
+                            "split": "stacked",
+                        }
+                    }
+                },
+            },
+        }
+        cfg.update(extra)
+        return cfg
+
+    def _ops(self, steps: list[dict]) -> list[tuple]:
+        out = []
+        for step in steps:
+            out.append(
+                (
+                    step.get("op"),
+                    step.get("monitor"),
+                    tuple(step.get("args") or []),
+                    step.get("host"),
+                    step.get("mode"),
+                    step.get("split"),
+                )
+            )
+        return out
+
+    def test_legacy_single_display_is_monitor_display(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "display": {
+                                "backend": "lgdualup",
+                                "inputs": {"mac": "hdmi1", "linux": "dp"},
+                                "pbp_splits": {"side": 5},
+                            },
+                            "hosts": {"this_host": "mac"},
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)), mock.patch.object(
+                ds, "default_this_host", return_value="mac"
+            ):
+                cfg = ds.load_config()
+        instances = ds.display_instances(cfg)
+        self.assertEqual([item["id"] for item in instances], ["display"])
+        self.assertTrue(instances[0]["legacy"])
+        self.assertTrue(instances[0]["primary"])
+        self.assertEqual(instances[0]["inputs"]["mac"], "hdmi1")
+        self.assertEqual(instances[0]["pbp_splits"]["side"], 5)
+        self.assertEqual(cfg["_layouts"], {})
+        self.assertIsNone(ds.arrival_plan(cfg)["layout"])
+        self.assertEqual(ds.arrival_plan(cfg)["displays"], "move")
+
+    def test_displays_map_and_dualup_alias_still_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "cfg.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "adapters": {
+                            "hosts": {
+                                "this_host": "linux",
+                                "mac": {"channel": 1},
+                                "linux": {"channel": 2},
+                            },
+                            "dualup": {"inputs": {"mac": "hdmi1", "linux": "dp"}},
+                            "displays": {
+                                "dualup": {"backend": "lgdualup", "inputs": {"mac": "hdmi1"}},
+                                "side": {"backend": "ddc", "bus": "i2c-3", "inputs": {"linux": "0x12"}},
+                            },
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (cfg_path,)):
+                cfg = ds.load_config()
+        self.assertEqual([item["id"] for item in ds.display_instances(cfg)], ["dualup", "side"])
+        self.assertEqual(cfg["hosts"]["mac"]["dualup_input"], "hdmi1")
+        self.assertEqual(cfg["hosts"]["linux"]["channel"], 2)
+        self.assertTrue(cfg["follow_keyboard_arrival"])
+
+    def test_plan_mixed_monitors_and_pbp_top_bottom(self) -> None:
+        cfg = self._cfg()
+        work = self._ops(ds.layout_apply_steps(cfg, "work"))
+        self.assertEqual(
+            work,
+            [
+                ("adapter", "main", ("pbp", "full"), None, None, None),
+                ("settle", "main", (), None, None, None),
+                ("adapter", "main", ("input", "hdmi1"), None, None, None),
+                ("settle", "main", (), None, None, None),
+                ("os-layout", "main", (), "mac", "full", ""),
+                ("adapter", "side", ("input", "0x12"), None, None, None),
+                ("settle", "side", (), None, None, None),
+            ],
+        )
+        stack = ds.layout_apply_steps(cfg, "stack")
+        self.assertEqual(
+            [step["args"] for step in stack if step["op"] == "adapter"],
+            [
+                ["pbp", "stacked", "--splits", "side=5,stacked=4"],
+                ["input-sub", "hdmi1"],
+                ["input-main", "dp"],
+            ],
+        )
+        layouts = [
+            (step["host"], step["mode"], step["split"])
+            for step in stack
+            if step["op"] == "os-layout"
+        ]
+        self.assertEqual(layouts, [("mac", "pbp", "stacked"), ("linux", "pbp", "stacked")])
+        self.assertNotIn("side", [step["monitor"] for step in stack])
+
+    def test_arrival_is_noop_when_host_is_already_visible(self) -> None:
+        cfg = self._cfg(_active_layout="work", this_host="linux")
+        plan = ds.arrival_plan(cfg)
+        self.assertEqual(plan["layout"], "work")
+        self.assertTrue(plan["mouse"])
+        self.assertEqual(plan["displays"], "leave")
+        self.assertEqual(
+            [item["action"] for item in plan["monitors"]],
+            ["leave", "leave"],
+        )
+        self.assertTrue(all(item["reason"] == "already-visible" for item in plan["monitors"]))
+        with mock.patch.object(ds, "execute_layout_steps") as execute, mock.patch.object(
+            ds, "switch_mouse", return_value=0
+        ), mock.patch.object(ds, "switch_monitor") as monitor, mock.patch("sys.stdout", io.StringIO()):
+            rc = ds.apply_arrival(cfg, plan, dry_run=False, reason="keyboard arrived")
+        self.assertEqual(rc, 0)
+        execute.assert_not_called()
+        monitor.assert_not_called()
+
+    def test_arrival_switches_only_the_primary_full_monitor(self) -> None:
+        cfg = self._cfg(_active_layout="work", this_host="tower")
+        plan = ds.arrival_plan(cfg)
+        self.assertEqual(plan["displays"], "move")
+        self.assertEqual(plan["monitors"][0], {"id": "main", "action": "switch", "host": "tower", "mode": "full"})
+        self.assertEqual(plan["monitors"][1]["action"], "leave")
+        self.assertEqual(plan["monitors"][1]["reason"], "not-follow")
+
+    def test_arrival_does_not_break_pbp_unless_follow_is_set(self) -> None:
+        cfg = self._cfg(_active_layout="stack", this_host="tower")
+        plan = ds.arrival_plan(cfg)
+        self.assertEqual(plan["monitors"], [{"id": "main", "action": "leave", "reason": "pbp"}])
+        self.assertEqual(plan["displays"], "leave")
+
+        cfg["layouts"]["stack"]["monitors"]["main"]["follow"] = True
+        # Raw layouts are normalized on read. Drop a cached copy if one was stored.
+        cfg.pop("_layouts", None)
+        followed = ds.arrival_monitor_plan(cfg, "tower", "stack")
+        self.assertEqual(followed[0]["action"], "switch")
+        self.assertEqual(followed[0]["host"], "tower")
+
+    def test_apply_retries_relay_and_lays_out_every_host(self) -> None:
+        cfg = self._cfg(_dualup_layout_settle_s=0.0, _dualup_layout_retries=2)
+        calls: list[list[str]] = []
+
+        def fake_relay(conf, local, **kwargs):
+            calls.append(list(kwargs["args"]))
+            if len(calls) == 1:
+                return 1
+            return 0
+
+        ran: list[list[str]] = []
+
+        def fake_run(cmd, timeout=3.0):
+            ran.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            helper = Path(tmp) / "lgdualup"
+            helper.write_text("#!/bin/sh\nexit 0\n")
+            helper.chmod(0o755)
+            cfg["adapters"]["displays"]["main"]["path"] = str(helper)
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(state)}), mock.patch.object(
+                ds, "relay_adapter", side_effect=fake_relay
+            ), mock.patch.object(ds, "run", side_effect=fake_run), mock.patch.object(
+                ds.time, "sleep"
+            ), mock.patch("sys.stdout", io.StringIO()):
+                rc = ds.apply_named_layout(cfg, "stack")
+            self.assertEqual(rc, 0, ran)
+            self.assertEqual(calls[0], ["pbp", "stacked", "--splits", "side=5,stacked=4"])
+            self.assertEqual(calls[1], ["pbp", "stacked", "--splits", "side=5,stacked=4"])
+            self.assertEqual(
+                calls[2:],
+                [["input-sub", "hdmi1"], ["input-main", "dp"]],
+            )
+            local = [cmd for cmd in ran if cmd and cmd[0].endswith("dualup-layout")]
+            remote = [cmd for cmd in ran if cmd and cmd[0] == "ssh"]
+            self.assertTrue(local and local[0][-2:] == ["--split", "stacked"], local)
+            self.assertEqual(local[0][1], "pbp")
+            self.assertTrue(remote, ran)
+            self.assertIn("linux.example", remote[0])
+            self.assertIn("dualup-layout pbp --split stacked", remote[0][-1])
+            saved = json.loads((state / "state.json").read_text())
+            self.assertEqual(saved["active_layout"], "stack")
+
+    def test_status_exposes_layout_and_slot_name(self) -> None:
+        cfg = self._cfg(
+            _active_layout="work",
+            _dualup_enabled=True,
+            target_channel=2,
+            _config_path="(test)",
+        )
+        with mock.patch.object(ds, "hhkb_probe", return_value={"present": False, "usb": False, "bluetooth": False, "transport": "absent"}), mock.patch.object(
+            ds, "mouse_snapshot", return_value={"info": "", "channel": 1, "channel_live": 1, "online": True, "source": "mouse"}
+        ), mock.patch.object(ds, "lgdualup_path", return_value=None), mock.patch.object(
+            ds, "detect_dualup_mode", return_value="full"
+        ), mock.patch.object(ds, "invoke_smarthome", return_value=None), mock.patch.object(
+            ds, "invoke_kettle", return_value=None
+        ), mock.patch.object(ds, "invoke_weather", return_value=None):
+            state = ds.collect_status(cfg, local_only=True)
+        self.assertEqual(state["active_layout"], "work")
+        self.assertEqual(
+            [(item["id"], item["mode"], item.get("host"), item["follow"]) for item in state["monitors"]],
+            [("main", "full", "mac", True), ("side", "full", "linux", False)],
+        )
+        slot = next(item for item in state["slots"] if item["id"] == "dualup")
+        self.assertEqual(slot["label"], "work")
+
+
+class LgdualupSplitTests(unittest.TestCase):
+    SH = ROOT / "adapters" / "lgdualup" / "linux" / "lgdualup.sh"
+
+    def _run(self, *args: str, home: Path | None = None, config: dict | None = None) -> subprocess.CompletedProcess:
+        env = os.environ.copy()
+        root = home or Path("/tmp")
+        env["HOME"] = str(root)
+        env["XDG_CONFIG_HOME"] = str(root / ".config")
+        env.pop("LGDUALUP_PBP_SPLITS", None)
+        if config is not None:
+            path = root / ".config" / "desk"
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "config.json").write_text(json.dumps(config))
+        return subprocess.run(
+            ["bash", str(self.SH), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def test_refuses_broken_codes_and_unconfigured_stacked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for code in ("0", "2", "0x0", "0x2"):
+                proc = self._run("pbp", code, home=home)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertIn("not sent", proc.stderr)
+                self.assertNotIn("hidraw", proc.stderr)
+            missing = self._run("pbp", "stacked", home=home)
+            self.assertEqual(missing.returncode, 2, missing.stderr)
+            self.assertIn("get pbp", missing.stderr)
+            self.assertIn("--read 0xD7", missing.stderr)
+            self.assertNotIn("hidraw", missing.stderr)
+            side = self._run("pbp", "side", home=home)
+            self.assertEqual(side.returncode, 1, side.stderr)
+            self.assertIn("found", side.stderr.lower())
+
+    def test_stacked_code_comes_from_config_or_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = {
+                "adapters": {
+                    "displays": {
+                        "display": {"backend": "lgdualup", "pbp_splits": {"stacked": 4, "side": 5}}
+                    }
+                }
+            }
+            from_cfg = self._run("pbp", "stacked", home=home, config=config)
+            self.assertEqual(from_cfg.returncode, 1, from_cfg.stderr)
+            self.assertIn("found", from_cfg.stderr.lower())
+            self.assertNotIn("no code", from_cfg.stderr)
+            refused = self._run("--splits", "stacked=0", "pbp", "side", home=home)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("not sent", refused.stderr)
 
 
 if __name__ == "__main__":

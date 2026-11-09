@@ -29,6 +29,8 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
     desk switch mac        # same as: to mac
     desk pbp <mode>
     desk full
+    desk layout <name>     # named monitors: full host, or PBP top/bottom
+    desk layout            # re-apply full or PBP from the live display
     desk smarthome list     # smart-home devices (adapter)
     desk smarthome status
     desk smarthome on|off   # desk light via the bound adapter
@@ -58,7 +60,7 @@ from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
@@ -278,6 +280,7 @@ def load_config() -> dict:
         cfg["push_on_leave"] = bool(cfg["push_on_leave"])
     if isinstance(user.get("adapters"), dict):
         cfg["adapters"] = user["adapters"]
+    cfg["_layouts"] = normalize_layouts(user)
     return cfg
 
 
@@ -2515,8 +2518,15 @@ def cmd_full(cfg: dict) -> int:
     return rc
 
 
-def cmd_layout(cfg: dict) -> int:
-    """Re-apply full or PBP from the live OS geometry (USB + layout)."""
+def cmd_layout(cfg: dict, name: str | None = None) -> int:
+    """Apply a named layout, or re-apply full/PBP from the live display."""
+    if name:
+        rc = apply_named_layout(cfg, name)
+        # An unknown name does not change a monitor. A real apply, even a
+        # partial one, asks wallpaper the same way full, pbp, and to do.
+        if rc != 2:
+            _after_display_change(cfg)
+        return rc
     mode = detect_dualup_mode(cfg)
     if mode == "full":
         return cmd_full(cfg)
@@ -2852,7 +2862,15 @@ def normalize_slot(raw: object) -> dict | None:
 
 def display_slot(state: dict) -> dict | None:
     mode = str(state.get("dualup_mode") or "unknown").lower()
-    if mode == "pbp":
+    active = str(state.get("active_layout") or "").strip()
+    monitors = state.get("monitors") if isinstance(state.get("monitors"), list) else []
+    split = mode == "pbp" or any(
+        isinstance(item, dict) and item.get("mode") == "pbp" for item in monitors
+    )
+    if active:
+        glyph = "display.split" if split else "display.full"
+        label = active
+    elif mode == "pbp":
         glyph, label = "display.split", "PBP"
     elif mode == "full":
         glyph, label = "display.full", "FULL"
@@ -3196,6 +3214,9 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         mouse_source = None
 
     hhkb_for_hint = bool(probe.get("present")) and not probe.get("unknown")
+    active_layout = active_layout_name(cfg)
+    known_layout = active_layout if active_layout in layouts_config(cfg) else None
+    assignment = monitor_assignment(cfg, known_layout)
     hint, hint_source = resolve_target_hint(
         cfg,
         mouse_channel=channel,
@@ -3273,6 +3294,8 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "dualup_mode": dual_mode,
         "dualup_usb": dual_usb,
         "dualup_inputs": inputs,
+        "active_layout": active_layout,
+        "monitors": assignment,
         "peer": peer,
         "adapters": adapters,
         "ui": format_public_ui(cfg),
@@ -3313,6 +3336,19 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
         f"push_on_leave={str(bool(state.get('push_on_leave'))).lower()}  "
         f"arrival_moves_display={str(bool(state.get('arrival_moves_display', True))).lower()}"
     )
+    if state.get("active_layout"):
+        print(f"layout        : {state['active_layout']}")
+        for mon in state.get("monitors") or []:
+            if not isinstance(mon, dict):
+                continue
+            if mon.get("mode") == "pbp":
+                detail = f"pbp top={mon.get('top') or '-'} bottom={mon.get('bottom') or '-'}"
+                if mon.get("split"):
+                    detail += f" split={mon['split']}"
+            else:
+                detail = f"full host={mon.get('host') or '-'}"
+            follow = "follow" if mon.get("follow") else "stay"
+            print(f"  {mon.get('id')}: {detail}  {follow}")
     print(f"target_hint   : {state['target_hint']}  source={state.get('target_hint_source', '?')}")
     print(f"bar           : {state.get('bar_label', state['target_hint'])}")
     print("adapters")
@@ -3425,6 +3461,708 @@ def watch_usb_rising_edge(last_usb: bool | None, usb_now: bool, follow_usb: bool
     return bool(usb_now), fire
 
 
+def state_dir() -> Path:
+    """Persistent desk state. `DESK_STATE_DIR` overrides the XDG location."""
+    override = os.environ.get("DESK_STATE_DIR")
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_STATE_HOME")
+    root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    return root / "desk"
+
+
+def state_path() -> Path:
+    return state_dir() / "state.json"
+
+
+def load_desk_state() -> dict:
+    try:
+        raw = json.loads(state_path().read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_desk_state(state: dict) -> None:
+    path = state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2) + "\n")
+    except OSError:
+        return
+
+
+def save_active_layout(name: str) -> None:
+    state = load_desk_state()
+    state["active_layout"] = name
+    save_desk_state(state)
+
+
+def active_layout_name(cfg: dict) -> str | None:
+    """Last layout `desk layout` applied, else the config fallback.
+
+    `_active_layout` on the in-memory cfg (including an explicit empty
+    value) wins, so a caller can pin the answer without reading state.
+    """
+    if "_active_layout" in cfg:
+        text = str(cfg.get("_active_layout") or "").strip()
+        return text or None
+    text = str(load_desk_state().get("active_layout") or "").strip()
+    if text:
+        return text
+    configured = str(cfg.get("active_layout") or "").strip()
+    return configured or None
+
+
+def _parse_pbp_splits(raw: object) -> dict:
+    """Opaque split-name → code map. The display adapter interprets it."""
+    out: dict[str, int] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        name = str(key).strip().lower()
+        if not name or value in (None, ""):
+            continue
+        try:
+            out[name] = int(str(value), 0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _splits_blob(splits: dict) -> str:
+    parts = []
+    for key in sorted(splits):
+        value = splits[key]
+        if value in (None, ""):
+            continue
+        try:
+            parts.append(f"{key}={int(value)}")
+        except (TypeError, ValueError):
+            continue
+    return ",".join(parts)
+
+
+def normalize_monitor_layout(raw: object, *, layout: str, monitor: str) -> dict:
+    spec = _as_dict(raw)
+    mode = str(spec.get("mode") or "full").strip().lower()
+    if mode not in ("full", "pbp"):
+        raise SystemExit(f"layout {layout} monitor {monitor}: mode must be full or pbp")
+    out: dict = {"mode": mode}
+    if mode == "full":
+        host = str(spec.get("host") or "").strip()
+        if host:
+            out["host"] = normalize_host(host)
+    else:
+        for key in ("top", "bottom"):
+            value = str(spec.get(key) or "").strip()
+            if value:
+                out[key] = normalize_host(value)
+        split = str(spec.get("split") or "").strip()
+        if split:
+            out["split"] = split
+    if "follow" in spec:
+        out["follow"] = _as_bool(spec.get("follow"), False)
+    return out
+
+
+def normalize_layouts(user: dict) -> dict:
+    """Named arrangements. Top-level `layouts`, or `adapters.layouts` when
+    each entry has `monitors`. Geometry overrides under a display adapter
+    stay where they are.
+    """
+    raw = user.get("layouts") if isinstance(user.get("layouts"), dict) else None
+    if raw is None:
+        candidate = _as_dict(_as_dict(user.get("adapters")).get("layouts"))
+        if candidate and any(isinstance(item, dict) and "monitors" in item for item in candidate.values()):
+            raw = candidate
+        else:
+            raw = {}
+    out: dict = {}
+    for name, body in raw.items():
+        key = str(name).strip()
+        if not key or not isinstance(body, dict):
+            continue
+        monitors_raw = body.get("monitors")
+        if not isinstance(monitors_raw, dict):
+            raise SystemExit(f"layout {key} needs a monitors object")
+        monitors: dict = {}
+        for mid, spec in monitors_raw.items():
+            monitor_id = str(mid).strip()
+            if not monitor_id:
+                continue
+            monitors[monitor_id] = normalize_monitor_layout(spec, layout=key, monitor=monitor_id)
+        out[key] = {"monitors": monitors}
+    return out
+
+
+def layouts_config(cfg: dict) -> dict:
+    stored = cfg.get("_layouts")
+    if isinstance(stored, dict):
+        return stored
+    if isinstance(cfg.get("layouts"), dict):
+        return normalize_layouts({"layouts": cfg["layouts"]})
+    adapters = _as_dict(cfg.get("adapters"))
+    candidate = adapters.get("layouts")
+    if isinstance(candidate, dict):
+        return normalize_layouts({"adapters": {"layouts": candidate}})
+    return {}
+
+
+def _normalize_instance(monitor_id: str, raw: dict, *, legacy: bool) -> dict:
+    spec = _as_dict(raw)
+    backend = str(spec.get("backend") or "").strip()
+    if not backend and legacy:
+        backend = "lgdualup"
+    inputs: dict[str, str] = {}
+    for key, value in _as_dict(spec.get("inputs")).items():
+        text = str(value or "").strip()
+        if text:
+            inputs[str(key).strip()] = text
+    relay = _coerce_relay_hosts(spec.get("relay_hosts")) if "relay_hosts" in spec else None
+    caps = [str(item) for item in spec["capabilities"]] if isinstance(spec.get("capabilities"), list) else []
+    settle = spec.get("layout_settle_s")
+    return {
+        "id": monitor_id,
+        "backend": backend,
+        "inputs": inputs,
+        "relay_hosts": relay,
+        "relay_path": str(spec.get("relay_path") or "").strip(),
+        "path": str(spec.get("path") or "").strip(),
+        "enabled": bool(spec.get("enabled", True)),
+        "layout": bool(spec.get("layout", True)),
+        "display_id": str(spec.get("display_id") or "").strip(),
+        "pbp_splits": _parse_pbp_splits(spec.get("pbp_splits")),
+        "bus": str(spec.get("bus") or "").strip(),
+        "serial": str(spec.get("serial") or "").strip(),
+        "primary": bool(spec.get("primary", False)),
+        "legacy": legacy,
+        "peer_layout": str(spec.get("peer_layout") or "").strip(),
+        "layout_helper": str(spec.get("layout_helper") or "").strip(),
+        "layout_settle_s": settle,
+        "capabilities": caps,
+    }
+
+
+def display_instances(cfg: dict) -> list[dict]:
+    """Monitors this desk can switch.
+
+    `adapters.displays` is a map of id → instance. A legacy single
+    `adapters.display` / `adapters.dualup` object is one monitor, id
+    `display`, when that map is absent.
+    """
+    adapters = _as_dict(cfg.get("adapters"))
+    raw_map = adapters.get("displays")
+    instances: list[dict] = []
+    if isinstance(raw_map, dict) and raw_map:
+        for key, raw in raw_map.items():
+            if not isinstance(raw, dict):
+                continue
+            instances.append(_normalize_instance(str(key).strip(), raw, legacy=False))
+        if instances:
+            if not any(item.get("primary") for item in instances):
+                instances[0]["primary"] = True
+            return instances
+    legacy = display_adapter_cfg(cfg)
+    inst = _normalize_instance("display", legacy, legacy=True)
+    inst["primary"] = True
+    if inst.get("relay_hosts") is None and "_display_relay_hosts" in cfg:
+        inst["relay_hosts"] = list(cfg.get("_display_relay_hosts") or [])
+    return [inst]
+
+
+def primary_monitor_id(cfg: dict) -> str:
+    for inst in display_instances(cfg):
+        if inst.get("primary"):
+            return str(inst["id"])
+    return "display"
+
+
+def instance_capabilities(instance: dict) -> set[str]:
+    caps = {str(item) for item in (instance.get("capabilities") or [])}
+    backend = str(instance.get("backend") or "").strip()
+    if backend:
+        manifest = manifest_for(backend)
+        caps.update(str(item) for item in (manifest.get("capabilities") or []))
+    if not caps and (backend == "lgdualup" or instance.get("legacy")):
+        caps.update(ROLE_CAPABILITIES["display"])
+    if not caps:
+        caps.add("display.input")
+    return caps
+
+
+def instance_relay_hosts(cfg: dict, instance: dict) -> list[str]:
+    raw = instance.get("relay_hosts")
+    if raw is None:
+        return display_relay_host_ids(cfg)
+    return list(raw)
+
+
+def instance_adapter_path(cfg: dict, instance: dict) -> Path | None:
+    if instance.get("enabled") is False:
+        return None
+    backend = str(instance.get("backend") or "").strip()
+    configured = str(instance.get("path") or "").strip() or None
+    legacy_lg = bool(instance.get("legacy")) or (
+        instance.get("id") == "display" and backend in ("", "lgdualup")
+    )
+    if legacy_lg:
+        if configured:
+            found = which_adapter(backend or "lgdualup", configured)
+            if found:
+                return found
+        return lgdualup_path(cfg)
+    if not backend and not configured:
+        return None
+    return which_adapter(backend or (configured or ""), configured)
+
+
+def monitor_input_code(cfg: dict, instance: dict, host: str) -> str:
+    """Input token for `host` on this monitor. Empty means it is not wired."""
+    host_id = _host_id(host)
+    for key, value in (instance.get("inputs") or {}).items():
+        try:
+            key_id = normalize_host(str(key))
+        except SystemExit:
+            key_id = str(key).strip()
+        if key_id == host_id:
+            text = str(value or "").strip()
+            if text:
+                return text
+    if instance.get("legacy") or instance.get("primary") or instance.get("id") == "display":
+        return configured_display_input(cfg, host_id)
+    return ""
+
+
+def hosts_on_monitor(spec: dict) -> list[str]:
+    if spec.get("mode") == "pbp":
+        found: list[str] = []
+        for key in ("top", "bottom"):
+            host = str(spec.get(key) or "").strip()
+            if host and host not in found:
+                found.append(host)
+        return found
+    host = str(spec.get("host") or "").strip()
+    return [host] if host else []
+
+
+def monitor_follow_enabled(spec: dict, *, primary: bool) -> bool:
+    """Whether keyboard arrival may retarget this monitor.
+
+    Explicit `follow` wins. Otherwise only the primary monitor follows,
+    and only while it is in full mode. A PBP monitor stays split unless
+    the layout sets `follow`.
+    """
+    if "follow" in spec:
+        return bool(spec["follow"])
+    return bool(primary) and spec.get("mode") == "full"
+
+
+def layout_shows_host(layout: dict, host: str) -> bool:
+    host_id = _host_id(host)
+    for spec in (layout.get("monitors") or {}).values():
+        if isinstance(spec, dict) and host_id in hosts_on_monitor(spec):
+            return True
+    return False
+
+
+def layout_settle_seconds(cfg: dict, instance: dict | None = None) -> float:
+    if instance is not None and instance.get("layout_settle_s") not in (None, ""):
+        try:
+            return float(instance["layout_settle_s"])
+        except (TypeError, ValueError):
+            pass
+    raw = cfg.get("_dualup_layout_settle_s")
+    if raw is None:
+        raw = LAYOUT_DEFAULT_SETTLE_S
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return LAYOUT_DEFAULT_SETTLE_S
+
+
+def layout_retry_settings(cfg: dict) -> tuple[int, float]:
+    retries = as_int(cfg.get("_dualup_layout_retries"), LAYOUT_DEFAULT_RETRIES)
+    raw_delay = cfg.get("_dualup_layout_retry_delay_s")
+    if raw_delay is None:
+        raw_delay = LAYOUT_DEFAULT_DELAY_S
+    try:
+        delay = float(raw_delay)
+    except (TypeError, ValueError):
+        delay = LAYOUT_DEFAULT_DELAY_S
+    return max(retries, 1), delay
+
+
+def steps_for_monitor(cfg: dict, instance: dict, spec: dict) -> list[dict]:
+    """USB and OS-layout steps for one monitor. No I/O.
+
+    PBP order is split, then the sub input (top), then the main input
+    (bottom), with a settle after each. Full mode leaves split mode
+    first when the adapter can, then selects the one input. OS layout
+    runs after the monitor is set, once per host shown on it.
+    """
+    mid = str(instance.get("id") or "")
+    caps = instance_capabilities(instance)
+    mode = str(spec.get("mode") or "full")
+    steps: list[dict] = []
+
+    def adapter(args: list[str], label: str) -> None:
+        steps.append({"monitor": mid, "op": "adapter", "args": list(args), "label": label})
+
+    def settle() -> None:
+        steps.append({"monitor": mid, "op": "settle"})
+
+    def maybe_pre(host: str) -> None:
+        if host_text(cfg, host, "pre_switch"):
+            steps.append({"monitor": mid, "op": "pre_switch", "host": host})
+
+    def os_layout(host: str, layout_mode: str, split: str) -> None:
+        if instance.get("layout") is False or "layout.apply" not in caps:
+            return
+        steps.append(
+            {
+                "monitor": mid,
+                "op": "os-layout",
+                "host": host,
+                "mode": layout_mode,
+                "split": split,
+            }
+        )
+
+    if mode == "pbp":
+        if "display.pbp" not in caps:
+            backend = instance.get("backend") or "display"
+            steps.append(
+                {
+                    "monitor": mid,
+                    "op": "error",
+                    "message": f"{mid} cannot set PBP ({backend})",
+                }
+            )
+            return steps
+        split = str(spec.get("split") or "side").strip() or "side"
+        panes: list[tuple[str, str, str, str]] = []
+        for role, key, verb in (("sub", "top", "input-sub"), ("main", "bottom", "input-main")):
+            host = str(spec.get(key) or "").strip()
+            if not host:
+                steps.append(
+                    {"monitor": mid, "op": "error", "message": f"{mid} PBP has no {role} host"}
+                )
+                return steps
+            code = monitor_input_code(cfg, instance, host)
+            if not code:
+                steps.append(
+                    {
+                        "monitor": mid,
+                        "op": "error",
+                        "message": f"no input configured for {host} on {mid}",
+                    }
+                )
+                return steps
+            panes.append((role, host, verb, code))
+        args = ["pbp", split]
+        blob = _splits_blob(instance.get("pbp_splits") or {})
+        if blob:
+            args.extend(["--splits", blob])
+        adapter(args, f"{mid} split {split}")
+        settle()
+        for _role, host, verb, code in panes:
+            maybe_pre(host)
+            adapter([verb, code], f"{mid} {verb} {code}")
+            settle()
+        for host in hosts_on_monitor(spec):
+            os_layout(host, "pbp", split)
+        return steps
+
+    host = str(spec.get("host") or "").strip()
+    if not host:
+        steps.append({"monitor": mid, "op": "error", "message": f"{mid} full mode has no host"})
+        return steps
+    code = monitor_input_code(cfg, instance, host)
+    if not code:
+        steps.append(
+            {"monitor": mid, "op": "error", "message": f"no input configured for {host} on {mid}"}
+        )
+        return steps
+    if "display.full" in caps:
+        adapter(["pbp", "full"], f"{mid} full")
+        settle()
+    maybe_pre(host)
+    adapter(["input", code], f"{mid} input {code}")
+    settle()
+    os_layout(host, "full", "")
+    return steps
+
+
+def layout_apply_steps(cfg: dict, name: str) -> list[dict]:
+    """Ordered steps that apply one named layout. No I/O."""
+    layout = layouts_config(cfg).get(name)
+    if not layout:
+        return [{"monitor": "", "op": "error", "message": f"unknown layout: {name}"}]
+    by_id = {inst["id"]: inst for inst in display_instances(cfg)}
+    steps: list[dict] = []
+    for mid, spec in (layout.get("monitors") or {}).items():
+        inst = by_id.get(mid)
+        if inst is None:
+            steps.append({"monitor": mid, "op": "error", "message": f"unknown monitor {mid}"})
+            continue
+        if inst.get("enabled") is False:
+            continue
+        steps.extend(steps_for_monitor(cfg, inst, spec))
+    return steps
+
+
+def _run_retry(argv: list[str], *, retries: int, delay: float, label: str, timeout: float = 12.0) -> int:
+    last = 1
+    for attempt in range(1, retries + 1):
+        try:
+            proc = run(list(argv), timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"{label} failed to start: {exc}", file=sys.stderr)
+            return 1
+        _print_helper(proc)
+        last = int(proc.returncode or 0)
+        if last == 0:
+            return 0
+        if last != 2 or attempt >= retries:
+            break
+        time.sleep(delay)
+    return last
+
+
+def instance_layout_binary(cfg: dict, instance: dict) -> Path | None:
+    if instance.get("layout") is False:
+        return None
+    helper = str(instance.get("layout_helper") or "").strip()
+    if helper:
+        path = Path(helper).expanduser()
+        if _is_exe(path):
+            return path
+        found = which_cmd(helper)
+        if found:
+            return found
+    if "layout.apply" not in instance_capabilities(instance):
+        return None
+    backend = str(instance.get("backend") or "")
+    if backend in ("", "lgdualup") or instance.get("legacy"):
+        return dualup_layout_path(cfg)
+    return None
+
+
+def remote_layout_command(instance: dict, mode: str, split: str) -> str | None:
+    if instance.get("layout") is False or "layout.apply" not in instance_capabilities(instance):
+        return None
+    helper = str(instance.get("peer_layout") or "~/.local/lib/desk/dualup-layout").strip()
+    parts = [helper, mode]
+    if mode == "pbp" and split:
+        parts.extend(["--split", split])
+    display_id = str(instance.get("display_id") or "").strip()
+    if display_id:
+        parts.extend(["--id", display_id])
+    return " ".join(_shell_token(part) for part in parts)
+
+
+def apply_os_layout_host(cfg: dict, instance: dict, host: str, mode: str, split: str) -> int:
+    """Resolution and rotation on one host that the monitor is showing."""
+    host_id = _host_id(host)
+    retries, delay = layout_retry_settings(cfg)
+    if host_id and host_id == _this_host_id(cfg):
+        path = instance_layout_binary(cfg, instance)
+        if path is None:
+            return 0
+        cmd = [str(path), mode]
+        if mode == "pbp" and split:
+            cmd.extend(["--split", split])
+        display_id = str(instance.get("display_id") or cfg.get("_dualup_display_id") or "").strip()
+        if display_id:
+            cmd.extend(["--id", display_id])
+        print(f"os layout {host_id} → {' '.join(cmd[1:])}")
+        return _run_retry(cmd, retries=retries, delay=delay, label=f"os layout {host_id}")
+    remote = remote_layout_command(instance, mode, split)
+    if not remote:
+        return 0
+    target = host_text(cfg, host_id, "ssh")
+    if not target:
+        print(f"os layout {host_id}: no ssh target configured")
+        return 1
+    print(f"os layout {host_id} → {target}")
+    return _run_retry(
+        ssh_argv(target, remote),
+        retries=retries,
+        delay=delay,
+        label=f"os layout {host_id}",
+        timeout=15.0,
+    )
+
+
+def relay_monitor_command(cfg: dict, instance: dict, args: list[str], *, label: str) -> int:
+    """Run one display command on whichever host currently holds the link.
+
+    The upstream cable follows the active input, so the host that answered
+    the previous command may not hold the device for this one. A failed
+    sweep is tried once more after the settle delay.
+    """
+    if instance.get("enabled") is False:
+        return 0
+    path = instance_adapter_path(cfg, instance)
+    backend = str(instance.get("backend") or (path.name if path else "")).strip()
+    relays = instance_relay_hosts(cfg, instance)
+    others = [item for item in relays if item != _this_host_id(cfg)]
+    if path is None and not others:
+        print(f"{label}: adapter not available")
+        return 1
+    local = [str(path), *args] if path is not None else None
+    remote_path = str(instance.get("relay_path") or "").strip() or None
+    if instance.get("legacy") and not remote_path:
+        remote_path = display_relay_path(cfg)
+
+    def once() -> int:
+        return relay_adapter(
+            cfg,
+            local,
+            adapter_id=backend,
+            args=list(args),
+            label=label,
+            relay_host_ids=relays,
+            remote_path=remote_path,
+        )
+
+    rc = once()
+    if rc == 0:
+        return 0
+    settle = layout_settle_seconds(cfg, instance)
+    if settle > 0:
+        time.sleep(settle)
+    return once()
+
+
+def execute_layout_steps(cfg: dict, steps: list[dict]) -> int:
+    by_id = {inst["id"]: inst for inst in display_instances(cfg)}
+    for step in steps:
+        op = str(step.get("op") or "")
+        mid = str(step.get("monitor") or "")
+        if op == "error":
+            print(step.get("message") or "layout error")
+            return 1
+        inst = by_id.get(mid)
+        if inst is None:
+            print(f"layout: unknown monitor {mid}")
+            return 1
+        if op == "settle":
+            delay = layout_settle_seconds(cfg, inst)
+            if delay > 0:
+                time.sleep(delay)
+            continue
+        if op == "pre_switch":
+            rc = run_pre_switch(cfg, str(step.get("host") or ""))
+            if rc:
+                return rc
+            continue
+        if op == "adapter":
+            rc = relay_monitor_command(
+                cfg,
+                inst,
+                [str(arg) for arg in (step.get("args") or [])],
+                label=str(step.get("label") or mid),
+            )
+            if rc:
+                return rc
+            continue
+        if op == "os-layout":
+            rc = apply_os_layout_host(
+                cfg,
+                inst,
+                str(step.get("host") or ""),
+                str(step.get("mode") or "full"),
+                str(step.get("split") or ""),
+            )
+            if rc:
+                return rc
+            continue
+        print(f"layout: unknown step {op}")
+        return 1
+    return 0
+
+
+def apply_named_layout(cfg: dict, name: str) -> int:
+    key = str(name or "").strip()
+    layouts = layouts_config(cfg)
+    if key not in layouts:
+        known = ", ".join(layouts) or "none"
+        print(f"unknown layout: {key} ({known})")
+        return 2
+    print(f"layout {key}")
+    rc = execute_layout_steps(cfg, layout_apply_steps(cfg, key))
+    if rc == 0:
+        save_active_layout(key)
+    return rc
+
+
+def arrival_monitor_plan(cfg: dict, host: str, layout_name: str) -> list[dict]:
+    """What arrival may change on each monitor. No I/O.
+
+    A host that is already shown somewhere is left alone (mouse still
+    moves). Otherwise only monitors marked follow — by default the
+    primary monitor, and only in full mode — switch to that host.
+    """
+    layout = layouts_config(cfg).get(layout_name) or {}
+    monitors = layout.get("monitors") or {}
+    primary = primary_monitor_id(cfg)
+    visible = layout_shows_host(layout, host) if layout else False
+    move = arrival_moves_display(cfg)
+    actions: list[dict] = []
+    for mid, spec in monitors.items():
+        if not isinstance(spec, dict):
+            continue
+        if not move:
+            actions.append({"id": mid, "action": "leave", "reason": "arrival-leaves-displays"})
+            continue
+        if visible:
+            actions.append({"id": mid, "action": "leave", "reason": "already-visible"})
+            continue
+        if not monitor_follow_enabled(spec, primary=(mid == primary)):
+            reason = "pbp" if spec.get("mode") == "pbp" else "not-follow"
+            actions.append({"id": mid, "action": "leave", "reason": reason})
+            continue
+        actions.append(
+            {
+                "id": mid,
+                "action": "switch",
+                "host": _host_id(host),
+                "mode": "full",
+            }
+        )
+    return actions
+
+
+def monitor_assignment(cfg: dict, name: str | None) -> list[dict]:
+    if not name:
+        return []
+    layout = layouts_config(cfg).get(name)
+    if not layout:
+        return []
+    primary = primary_monitor_id(cfg)
+    out: list[dict] = []
+    for mid, spec in (layout.get("monitors") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        item: dict = {
+            "id": mid,
+            "mode": spec.get("mode"),
+            "hosts": hosts_on_monitor(spec),
+            "follow": monitor_follow_enabled(spec, primary=(mid == primary)),
+        }
+        if spec.get("mode") == "pbp":
+            item["top"] = spec.get("top") or ""
+            item["bottom"] = spec.get("bottom") or ""
+            if spec.get("split"):
+                item["split"] = spec["split"]
+        else:
+            item["host"] = spec.get("host") or ""
+        out.append(item)
+    return out
+
+
 def arrival_moves_display(cfg: dict) -> bool:
     """Whether keyboard arrival may change display inputs. Default on."""
     raw = cfg.get("arrival_moves_display", True)
@@ -3436,32 +4174,64 @@ def arrival_moves_display(cfg: dict) -> bool:
 def arrival_plan(cfg: dict) -> dict:
     """What a keyboard arrival on this host is allowed to change.
 
-    The mouse always follows. Displays move only when
-    `arrival_moves_display` is on, because a desk often shows two hosts
-    at once (one per monitor, or PBP).
+    The mouse always follows. With no active layout, displays move only
+    when `arrival_moves_display` is on (the blanket input switch).
 
-    `layout` is the slot for a later named arrangement: which host is on
-    which monitor, or a PBP top/bottom pair. It stays None until that
-    exists. A set layout is applied instead of the blanket input switch,
-    so arrival does not also send every display to this host.
+    An active layout fills `layout` and `monitors`. A host already shown
+    on any monitor is left on the displays. Otherwise only monitors the
+    layout marks `follow` (default: the primary monitor, and only in
+    full mode) switch to this host. A PBP monitor stays split unless
+    `follow` is set. The blanket input switch does not also run.
     """
-    return {
-        "host": str(cfg.get("this_host") or ""),
+    host = str(cfg.get("this_host") or "")
+    plan = {
+        "host": host,
         "mouse": True,
         "displays": "move" if arrival_moves_display(cfg) else "leave",
         "layout": None,
     }
+    name = active_layout_name(cfg)
+    if not name or name not in layouts_config(cfg):
+        return plan
+    plan["layout"] = name
+    actions = arrival_monitor_plan(cfg, host, name)
+    plan["monitors"] = actions
+    if not any(item.get("action") == "switch" for item in actions):
+        plan["displays"] = "leave"
+    return plan
 
 
 def apply_named_arrival_layout(cfg: dict, name: str) -> int:
-    """Apply one named arrangement. The body is intentionally empty.
+    """Move only the follow monitors. Do not replay the whole layout.
 
-    A later change owns the inputs: per-monitor host assignment, or PBP
-    top/bottom. This must not grow into "switch every display to the
-    host that just saw the keyboard." `cfg` is what that lookup will read.
+    An unknown name, a host that is already visible, or
+    `arrival_moves_display` off leaves every display where it is.
     """
-    print(f"arrival layout {name} is not available yet — leaving displays unchanged")
-    return 0
+    if name not in layouts_config(cfg):
+        print(f"arrival layout {name} is not configured — leaving displays unchanged")
+        return 0
+    host = str(cfg.get("this_host") or "")
+    actions = arrival_monitor_plan(cfg, host, name)
+    switches = [item for item in actions if item.get("action") == "switch"]
+    if not switches:
+        reason = actions[0].get("reason") if actions else ""
+        if reason == "already-visible":
+            print(
+                f"arrival layout {name}: {host} is already on a monitor "
+                "— leaving displays unchanged"
+            )
+        else:
+            print(f"arrival layout {name}: leaving displays unchanged")
+        return 0
+    by_id = {inst["id"]: inst for inst in display_instances(cfg)}
+    steps: list[dict] = []
+    for item in switches:
+        inst = by_id.get(item["id"])
+        if inst is None:
+            print(f"arrival layout {name}: unknown monitor {item['id']}")
+            return 1
+        steps.extend(steps_for_monitor(cfg, inst, {"mode": "full", "host": item["host"]}))
+    return execute_layout_steps(cfg, steps)
 
 
 def apply_arrival(cfg: dict, plan: dict, *, dry_run: bool, reason: str) -> int:
@@ -3872,7 +4642,11 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
     pbp = sub.add_parser("pbp", help="DualUp PBP: USB toggle, input pair, tilted OS layout")
     pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
     sub.add_parser("full", help="DualUp full: USB toggle + 2880x2560 @ 270°")
-    sub.add_parser("layout", help="re-apply DualUp full or PBP from the live display")
+    lay = sub.add_parser(
+        "layout",
+        help="apply a named layout, or re-apply full/PBP from the live display",
+    )
+    lay.add_argument("name", nargs="?", help="name from config layouts")
     smarthome = sub.add_parser("smarthome", help="list devices / light status / on / off (bound adapter)")
     smarthome.add_argument(
         "verb",
@@ -3923,7 +4697,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "full":
         return cmd_full(cfg)
     if args.cmd == "layout":
-        return cmd_layout(cfg)
+        return cmd_layout(cfg, args.name)
     if args.cmd == "smarthome":
         return cmd_smarthome(cfg, args.verb, as_json=args.json)
     if args.cmd == "kettle":

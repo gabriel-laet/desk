@@ -4,14 +4,19 @@
 Used by the desk-switch dualup adapter after `lgdualup pbp`. Not a
 user-facing command — call `desk-switch full` / `desk-switch pbp`.
 
-    dualup-layout full|pbp [--id UUID] [--res WxH] [--degree N]
+    dualup-layout full|pbp [--id UUID] [--res WxH] [--degree N] [--split side|stacked]
 
-The panel is physically tilted. displayplacer lists modes for the *current*
-rotation: at degree 0 the full panel is ``2560x2880`` and PBP is
-``1280x2880``. We always apply the tilted-frame size at degree 270:
+The panel is physically tilted for full and side-by-side. displayplacer
+lists modes for the *current* rotation: at degree 0 the full panel is
+``2560x2880`` and side-by-side PBP is ``1280x2880``. Those apply the
+tilted-frame size at degree 270:
 
   full → 2880x2560 @ 270   (EDID may list 2880x2560 or 2560x2880)
-  pbp  → 2880x1280 @ 270   (EDID may list 2880x1280 or 1280x2880)
+  pbp --split side → 2880x1280 @ 270   (EDID may list 2880x1280 or 1280x2880)
+
+Stacked PBP is two landscape halves with no rotation:
+
+  pbp --split stacked → 2560x1440 degree 0
 
 No fallback to generic landscapes (1920x1080 / 2560x1440) when DualUp
 half/full markers are what we want — wait for the real mode (exit 2).
@@ -43,6 +48,7 @@ FULL_EDID = ("2880x2560", "2560x2880")
 PBP_APPLY_RES = "2880x1280"
 PBP_RES = PBP_APPLY_RES
 PBP_EDID = ("2880x1280", "1280x2880")
+STACKED_RES = "2560x1440"
 RES_RE = re.compile(r"(?:res:)?(\d{3,5})x(\d{3,5})")
 RES_LINE_RE = re.compile(r"^Resolution:\s*(\d{3,5}x\d{3,5})", re.M)
 ROT_LINE_RE = re.compile(r"^Rotation:\s*(-?\d+)", re.M)
@@ -144,7 +150,24 @@ def canonicalize_res(res: str) -> str:
     return res
 
 
-def pick_res(mode: str, text: str, requested: str) -> str | None:
+def split_kind(raw: str) -> str:
+    key = (raw or "").strip().lower()
+    if key in ("stacked", "stack", "top-bottom", "tb"):
+        return "stacked"
+    return "side"
+
+
+def pick_res(mode: str, text: str, requested: str, split: str = "side") -> str | None:
+    if split == "stacked" and mode == "pbp":
+        if requested:
+            if not mode_offered_or_swapped(text, requested):
+                return None
+            if requested in (STACKED_RES, swap_res(STACKED_RES)):
+                return STACKED_RES
+            return requested if mode_offered(text, requested) else swap_res(requested)
+        if mode_offered(text, STACKED_RES) or mode_offered(text, swap_res(STACKED_RES)):
+            return STACKED_RES
+        return None
     if requested:
         if not mode_offered_or_swapped(text, requested):
             return None
@@ -291,9 +314,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--id", default=os.environ.get("DUALUP_DISPLAY_ID", ""))
     parser.add_argument("--res", default="")
     parser.add_argument("--degree", type=int, default=None)
+    parser.add_argument("--split", default="", help="pbp geometry: side (tall half) or stacked (2560x1440)")
     args = parser.parse_args(argv)
 
-    degree = TILT_DEGREE if args.degree is None else args.degree
+    kind = split_kind(args.split) if args.mode == "pbp" else "side"
+    if args.degree is not None:
+        degree = args.degree
+    elif args.mode == "pbp" and kind == "stacked":
+        degree = 0
+    else:
+        degree = TILT_DEGREE
     display_id = (args.id or "").strip()
 
     placer = shutil.which("displayplacer")
@@ -327,9 +357,16 @@ def main(argv: list[str] | None = None) -> int:
             print("dualup-layout: DualUp display not found yet (set adapters.dualup.display_id)", file=sys.stderr)
             return 2
 
-    res = pick_res(args.mode, text, args.res.strip())
+    res = pick_res(args.mode, text, args.res.strip(), kind)
     if not res:
-        want = args.res.strip() or (FULL_RES if args.mode == "full" else "a landscape PBP mode")
+        if args.res.strip():
+            want = args.res.strip()
+        elif args.mode == "full":
+            want = FULL_RES
+        elif kind == "stacked":
+            want = STACKED_RES
+        else:
+            want = "a side-by-side PBP mode"
         print(f"dualup-layout: {want} not in EDID yet", file=sys.stderr)
         return 2
 

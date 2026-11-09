@@ -32,6 +32,9 @@
       "inputs": {
         "mac": "hdmi1",
         "linux": "dp"
+      },
+      "pbp_splits": {
+        "side": 5
       }
     },
     "smarthome": {
@@ -69,6 +72,23 @@
   "sleep_gap_s": 3.0,
   "switch_retries": 8,
   "switch_retry_delay_s": 0.6,
+  "layouts": {
+    "focus": {
+      "monitors": {
+        "display": { "mode": "full", "host": "mac" }
+      }
+    },
+    "split": {
+      "monitors": {
+        "display": {
+          "mode": "pbp",
+          "top": "mac",
+          "bottom": "linux",
+          "split": "stacked"
+        }
+      }
+    }
+  },
   "ui": {
     "tray": {
       "density": "strip",
