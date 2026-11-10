@@ -327,8 +327,17 @@ def metric_map(raw: dict | None, show: list[str]) -> dict[str, float]:
     return out
 
 
+def _account_scoped(tool: dict) -> bool:
+    """Shared-account rows are listed once, not under each host."""
+    return clean_text(str(tool.get("scope") or "")).lower() == "account"
+
+
 def highest_limit_used(ai: object) -> float | None:
-    """Highest tools[].limit_used_pct. Nulls are skipped, not treated as zero."""
+    """Highest host-local tools[].limit_used_pct.
+
+    Nulls are skipped, not treated as zero. Tools with scope "account"
+    are omitted so a shared quota is not painted as this machine's chip.
+    """
     if not isinstance(ai, dict):
         return None
     tools = ai.get("tools")
@@ -336,7 +345,7 @@ def highest_limit_used(ai: object) -> float | None:
         return None
     best: float | None = None
     for tool in tools:
-        if not isinstance(tool, dict):
+        if not isinstance(tool, dict) or _account_scoped(tool):
             continue
         number = metric_number(tool.get("limit_used_pct"))
         if number is None:
@@ -443,7 +452,9 @@ def ai_block_for_host(raw: dict | None, *, host_id: str, label: str, marker: str
     tools = ai.get("tools")
     if isinstance(tools, list):
         for index, tool in enumerate(tools):
-            block = _tool_block(tool, index) if isinstance(tool, dict) else None
+            if not isinstance(tool, dict) or _account_scoped(tool):
+                continue
+            block = _tool_block(tool, index)
             if block:
                 tools_out.append(block)
     line = llama_line(ai.get("llama"))
@@ -487,6 +498,128 @@ def format_ai_text(blocks: list[dict]) -> str:
         if llama.get("line"):
             lines.append(f"  {llama['line']}")
     return "\n".join(lines)
+
+
+def _nullable_number(value: object) -> float | None:
+    """A null or unparsable value stays null. Zero stays zero."""
+    return metric_number(value)
+
+
+def _text_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = clean_text(value)
+    return text or None
+
+
+def local_reset(value: object) -> str:
+    """Clock time on this machine. Empty when the source has no instant."""
+    stamp = parse_timestamp(value)
+    if stamp is None:
+        return ""
+    return datetime.fromtimestamp(stamp).astimezone().strftime("%m-%d %H:%M")
+
+
+def _limit_record(item: object) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    label = clean_text(item.get("label") if isinstance(item.get("label"), str) else "")
+    resets = _text_or_none(item.get("resets_at"))
+    if not label and resets is None and metric_number(item.get("used_pct")) is None:
+        return None
+    return {
+        "label": label,
+        "used_pct": _nullable_number(item.get("used_pct")),
+        "resets_at": resets,
+    }
+
+
+def _host_names(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        text = clean_text(item if isinstance(item, str) else "")
+        if text and text not in names:
+            names.append(text)
+    return names
+
+
+def _account_headline(entry: dict, limits: list[dict]) -> tuple[float | None, str]:
+    """Highest limit percent and that limit's local reset. Nulls are not zero."""
+    best: float | None = None
+    reset = ""
+    for item in limits:
+        pct = item.get("used_pct")
+        if not isinstance(pct, (int, float)):
+            continue
+        if best is not None and float(pct) <= best:
+            continue
+        best = float(pct)
+        reset = local_reset(item.get("resets_at"))
+    if best is None:
+        rolled = _nullable_number(entry.get("limit_used_pct"))
+        if rolled is not None:
+            best = rolled
+    return best, reset
+
+
+def _account_line(name: str, plan: str, pct: float | None, reset: str, entry: dict, hosts: list[str]) -> str:
+    parts: list[str] = [name]
+    if plan:
+        parts.append(plan)
+    if pct is not None:
+        parts.append(format_pct(pct))
+    if reset:
+        parts.append(reset)
+    sessions = _nullable_number(entry.get("today_sessions"))
+    if sessions is not None:
+        parts.append(f"{format_number(sessions)} sessions")
+    tokens = _nullable_number(entry.get("today_tokens"))
+    if tokens is not None:
+        parts.append(f"{format_number(tokens)} tok")
+    if hosts:
+        parts.append(", ".join(hosts))
+    return " · ".join(parts)
+
+
+def parse_accounts(raw: object) -> list[dict]:
+    """Top-level ai_accounts. Missing or malformed input is an empty list.
+
+    Numeric fields stay null when the source says null. They are not stored as zero.
+    """
+    if not isinstance(raw, dict):
+        return []
+    accounts: list[dict] = []
+    for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        raw_id = _text_or_none(entry.get("id")) or clean_text(str(key))
+        name = _text_or_none(entry.get("name")) or raw_id
+        if not raw_id and not name:
+            continue
+        limits: list[dict] = []
+        if isinstance(entry.get("limits"), list):
+            for item in entry["limits"]:
+                record = _limit_record(item)
+                if record:
+                    limits.append(record)
+        hosts = _host_names(entry.get("hosts"))
+        headline, reset = _account_headline(entry, limits)
+        account: dict = {
+            "id": raw_id or name,
+            "name": name or raw_id,
+            "plan": _text_or_none(entry.get("plan")) or "",
+            "limit_used_pct": _nullable_number(entry.get("limit_used_pct")),
+            "limits": limits,
+            "hosts": hosts,
+            "today_tokens": _nullable_number(entry.get("today_tokens")),
+            "today_cost_usd": _nullable_number(entry.get("today_cost_usd")),
+            "today_sessions": _nullable_number(entry.get("today_sessions")),
+            "line": _account_line(name or raw_id, _text_or_none(entry.get("plan")) or "", headline, reset, entry, hosts),
+        }
+        accounts.append(account)
+    return accounts
 
 
 def format_header(columns: list[dict]) -> str:
@@ -571,6 +704,7 @@ def render(
     else:
         indexed = {}
         columns, rows = [], []
+    accounts = parse_accounts(payload.get("ai_accounts")) if isinstance(payload, dict) else []
     blocks: list[dict] = []
     by_id = {row["id"]: row for row in rows}
     for host_id in selected_ids(indexed, config["desk_hosts"], config["extra_hosts"]):
@@ -617,6 +751,7 @@ def render(
         "hosts": hosts_out,
         "focus": focus or None,
         "token": label,
+        "accounts": accounts,
     }
     if error:
         out["error"] = error
@@ -634,6 +769,8 @@ def render(
             slot["ai"] = blocks
             slot["ai_text"] = format_ai_text(blocks)
             out["ai"] = blocks
+        if accounts:
+            slot["accounts"] = accounts
         out["slot"] = slot
     return out
 

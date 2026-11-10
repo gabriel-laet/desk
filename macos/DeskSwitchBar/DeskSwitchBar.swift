@@ -754,9 +754,20 @@ struct TableFlavor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !slot.accounts.isEmpty {
+                Text("Shared accounts")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(slot.accounts) { account in
+                    Text(account.line)
+                        .font(.system(size: 11, design: .rounded))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             if !slot.rows.isEmpty {
                 metrics
-            } else if !slot.label.isEmpty {
+            } else if !slot.label.isEmpty && slot.accounts.isEmpty {
                 ChipFlavor(slot: slot)
             }
             if !slot.aiText.isEmpty {
@@ -1241,6 +1252,21 @@ struct HardwareRow: Identifiable, Equatable {
     var cells: [String]
 }
 
+struct SharedAccount: Identifiable, Equatable {
+    var id: String
+    var line: String
+
+    static func parse(_ raw: Any) -> SharedAccount? {
+        guard let obj = raw as? [String: Any] else { return nil }
+        let id = obj["id"] as? String ?? ""
+        let line = obj["line"] as? String ?? ""
+        let name = obj["name"] as? String ?? ""
+        let shown = line.isEmpty ? name : line
+        guard !shown.isEmpty else { return nil }
+        return SharedAccount(id: id.isEmpty ? shown : id, line: shown)
+    }
+}
+
 struct TraySlot: Identifiable, Equatable {
     var id: String
     var kind: String
@@ -1254,6 +1280,7 @@ struct TraySlot: Identifiable, Equatable {
     var columns: [HardwareColumn] = []
     var rows: [HardwareRow] = []
     var aiText: String = ""
+    var accounts: [SharedAccount] = []
 
     var chipTitle: String {
         if let detail, !detail.isEmpty {
@@ -1322,6 +1349,10 @@ struct TraySlot: Identifiable, Equatable {
             }
         }
         let aiText = obj["ai_text"] as? String ?? ""
+        var accounts: [SharedAccount] = []
+        if let rawAccounts = obj["accounts"] as? [Any] {
+            accounts = rawAccounts.compactMap(SharedAccount.parse)
+        }
         let quietLabel = kind == WidgetKind.table.rawValue && label.isEmpty
         return TraySlot(
             id: id,
@@ -1335,7 +1366,8 @@ struct TraySlot: Identifiable, Equatable {
             actions: actions,
             columns: columns,
             rows: rows,
-            aiText: aiText
+            aiText: aiText,
+            accounts: accounts
         )
     }
 }

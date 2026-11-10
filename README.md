@@ -1000,8 +1000,8 @@ Any of those fields may be null or missing. Which tools appear is up to the endp
 
 Shells paint the slot only when it is enabled:
 
-- **Menu bar and Omarchy strip.** By default one compact mark from `bar_mark` (host letter, full or split, awake bolt). Weather, kettle, and the hardware token stay in the click panel. `ui.tray.bar_slots: true` puts those slot labels back on the bar. `bar_strip` is still the longer focus string.
-- **Click panel, both shells.** A table of CPU %, memory %, CPU temp, and GPU % / temp for each desk host and each `extra_hosts` id. A missing metric is an em dash. `offline` follows `online: false`. `stale` follows `last_seen`. Under the table, each host with AI data lists its tools (name, plan, the highest limit and its reset time, today's tokens and cost when those numbers are present) and a llama line (model, tok/s, slots busy/total) when `llama.running` is true.
+- **Menu bar and Omarchy strip.** By default one compact mark from `bar_mark` (host letter, full or split, awake bolt). Weather, kettle, and the hardware token stay in the click panel. `ui.tray.bar_slots: true` puts those slot labels back on the bar. Shared accounts are not added to the bar. `bar_strip` is still the longer focus string.
+- **Click panel, both shells.** A Shared accounts section, then a table of CPU %, memory %, CPU temp, and GPU % / temp for each desk host and each `extra_hosts` id. A missing metric is an em dash. `offline` follows `online: false`. `stale` follows `last_seen`. Under the table, each host with AI data lists its tools (name, plan, the highest limit and its reset time, today's tokens and cost when those numbers are present) and a llama line (model, tok/s, slots busy/total) when `llama.running` is true. Tools with `scope: "account"` are not listed again here and do not feed the per-host limit percent.
 
 Detail: [`adapters/hardware/`](adapters/hardware/).
 
