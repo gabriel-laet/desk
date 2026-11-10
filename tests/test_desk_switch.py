@@ -5775,6 +5775,118 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertNotIn("ai", data["slot"])
         self.assertNotIn("ai_text", data["slot"])
 
+    def test_shared_accounts_keep_nulls_and_skip_host_sums(self) -> None:
+        import time as time_mod
+
+        payload = self._payload()
+        payload["ai_accounts"] = {
+            "muse": {
+                "id": "muse",
+                "name": "Muse Code",
+                "plan": "Power",
+                "ready": True,
+                "today_tokens": None,
+                "today_cost_usd": None,
+                "today_sessions": 1,
+                "limit_used_pct": 0,
+                "limits": [
+                    {"label": "Window", "used_pct": 0, "resets_at": "2026-11-11T00:30:46Z"},
+                    {"label": "Weekly", "used_pct": 0, "resets_at": "2026-11-16T00:00:00Z"},
+                ],
+                "scope": "account",
+                "hosts": ["linux", "mac", "tower"],
+            },
+            "broken": "nope",
+        }
+        payload["hosts"]["box"]["ai"]["tools"].append(
+            {
+                "id": "muse",
+                "name": "Muse Code",
+                "plan": "Power",
+                "scope": "account",
+                "limit_used_pct": 99,
+                "today_tokens": 5000,
+                "limits": [{"label": "Weekly", "used_pct": 99, "resets_at": "2026-11-16T00:00:00Z"}],
+            }
+        )
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time_mod.tzset()
+        try:
+            data = self.hw.build_snapshot(payload, self._config(), "linux", now=self._now())
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time_mod.tzset()
+        self.assertEqual(data["token"], "38° 80%")
+        text = data["slot"]["ai_text"]
+        self.assertNotIn("Muse Code", text)
+        self.assertNotIn("99%", text)
+        accounts = data["accounts"]
+        self.assertEqual(len(accounts), 1)
+        muse = accounts[0]
+        self.assertEqual(muse["name"], "Muse Code")
+        self.assertEqual(muse["plan"], "Power")
+        self.assertEqual(muse["limit_used_pct"], 0)
+        self.assertIsNone(muse["today_tokens"])
+        self.assertIsNone(muse["today_cost_usd"])
+        self.assertEqual(muse["today_sessions"], 1)
+        self.assertEqual(muse["hosts"], ["linux", "mac", "tower"])
+        self.assertEqual(muse["limits"][0]["used_pct"], 0)
+        self.assertEqual(muse["limits"][0]["resets_at"], "2026-11-11T00:30:46Z")
+        self.assertIn("0%", muse["line"])
+        self.assertIn("11-11 00:30", muse["line"])
+        self.assertIn("1 sessions", muse["line"])
+        self.assertNotIn("tok", muse["line"])
+        self.assertEqual(data["slot"]["accounts"][0]["id"], "muse")
+
+    def test_missing_or_malformed_accounts_are_an_empty_list(self) -> None:
+        plain = self.hw.build_snapshot(self._payload(), self._config(), "linux", now=self._now())
+        self.assertEqual(plain["accounts"], [])
+        for raw in ([], "nope", None, 3):
+            payload = {"hosts": {"linux": {"online": True, "cpu_temp_c": 30}}, "ai_accounts": raw}
+            data = self.hw.build_snapshot(
+                payload,
+                {"desk_hosts": ["linux"], "show": ["cpu_temp_c"]},
+                "linux",
+                now=self._now(),
+            )
+            self.assertEqual(data["accounts"], [])
+
+    def test_account_null_limit_is_not_drawn_as_zero(self) -> None:
+        payload = {
+            "hosts": {"linux": {"online": True, "cpu_temp_c": 30, "ai": {"tools": []}}},
+            "ai_accounts": {
+                "quiet": {
+                    "id": "quiet",
+                    "name": "Quiet",
+                    "plan": "",
+                    "limit_used_pct": None,
+                    "today_tokens": None,
+                    "today_cost_usd": None,
+                    "today_sessions": None,
+                    "limits": [{"label": "Window", "used_pct": None, "resets_at": None}],
+                    "hosts": [],
+                }
+            },
+        }
+        data = self.hw.build_snapshot(
+            payload,
+            {"desk_hosts": ["linux"], "show": ["cpu_temp_c"]},
+            "linux",
+            now=self._now(),
+        )
+        quiet = data["accounts"][0]
+        self.assertIsNone(quiet["limit_used_pct"])
+        self.assertIsNone(quiet["today_tokens"])
+        self.assertIsNone(quiet["today_sessions"])
+        self.assertIsNone(quiet["limits"][0]["used_pct"])
+        self.assertIsNone(quiet["limits"][0]["resets_at"])
+        self.assertNotIn("0%", quiet["line"])
+        self.assertNotIn("0 tok", quiet["line"])
+
     def test_missing_sample_does_not_invent_offline_rows(self) -> None:
         data = self.hw.build_snapshot(None, {"desk_hosts": ["linux", "mac"]}, "linux", reachable=False, source="none")
         self.assertEqual(data["hosts"], {})

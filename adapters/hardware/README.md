@@ -44,12 +44,25 @@ background when the sample is older than `poll_seconds`. `desk watch`
 does not call this adapter.
 
 An optional `hosts.<id>.ai` object is passed through generically.
-Tool ids are not special-cased. Null fields are dropped. The bar token
-adds the focused host's highest `tools[].limit_used_pct`. The panel
-lists each tool's name, plan, highest `limits[]` entry (label, percent,
-reset time), and today's tokens and cost when those numbers exist.
-`llama` is one line (model, tok/s, slots) and only when `running` is
-true.
+Tool ids are not special-cased. Null numbers stay null; they are not
+stored or drawn as zero. The hardware token (only on the bar when
+`ui.tray.bar_slots` is true) adds the focused host's highest
+`tools[].limit_used_pct`, skipping tools whose `scope` is `account`.
+The click panel lists each remaining tool's name, plan, highest
+`limits[]` entry (label, percent, reset time), and today's tokens and
+cost when those numbers exist. `llama` is one line (model, tok/s,
+slots) and only when `running` is true.
+
+A top-level `ai_accounts` object is one row per shared account, not a
+per-machine sum. Each entry uses the same fields as a tool, plus
+`scope: "account"` and `hosts`. The adapter copies that into
+`accounts` on its JSON and on the hardware slot. Missing or malformed
+`ai_accounts` is an empty list. The click panel prints a Shared
+accounts section above the per-host rows: name, plan, the highest
+limit percent, that limit's reset time in this machine's local time,
+today's sessions and tokens when they are not null, and the host
+list. The same account is not repeated under each host and is not
+added into the per-host limit chip. The bar mark is unchanged.
 
 ```bash
 desk hardware status --json

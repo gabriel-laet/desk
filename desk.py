@@ -4180,7 +4180,7 @@ def normalize_slot(raw: object) -> dict | None:
     # bar quiet when the focused host has nothing to show.
     if "label" in raw and not label and glyph:
         slot["label"] = ""
-    for extra_key in ("rows", "columns", "header", "ai", "ai_text"):
+    for extra_key in ("rows", "columns", "header", "ai", "ai_text", "accounts"):
         if extra_key not in raw or raw[extra_key] in (None, "", []):
             continue
         slot[extra_key] = raw[extra_key]
@@ -4835,6 +4835,9 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
     state["bar_tooltip"] = format_bar_tooltip(state)
     state["bar_strip"] = format_bar_strip(paint)
     state["bar_mark"] = format_bar_mark(paint)
+    hardware = adapters.get("hardware") if isinstance(adapters.get("hardware"), dict) else {}
+    raw_accounts = hardware.get("accounts") if isinstance(hardware, dict) else None
+    state["accounts"] = raw_accounts if isinstance(raw_accounts, list) else []
     state["slots"] = collect_slots(state, cfg)
     state.pop("_tray_lights", None)
     return state

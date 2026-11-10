@@ -259,6 +259,16 @@ Panel {
   // formatted by core; this shell does not name metrics or tools.
   function hardwareText(slot) {
     const lines = []
+    const accounts = slot && Array.isArray(slot.accounts) ? slot.accounts : []
+    if (accounts.length) {
+      lines.push("Shared accounts")
+      for (let i = 0; i < accounts.length; i++) {
+        const account = accounts[i] || {}
+        const line = String(account.line || account.name || "")
+        if (line)
+          lines.push(line)
+      }
+    }
     if (slot && slot.header)
       lines.push(String(slot.header))
     const rows = slot && slot.rows ? slot.rows : []
