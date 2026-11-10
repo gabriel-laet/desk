@@ -90,6 +90,9 @@ PEER_CACHE_TTL_S = 20.0
 # A live display read (local USB or the peer that holds it) stays fresh
 # this long so a 15s shell poll does not open SSH every time.
 DISPLAY_READ_TTL_S = 20.0
+# A failed "is the inhibitor still ours?" check must not fork a new
+# caffeinate/systemd-inhibit on every watch tick. One spawn per window.
+AWAKE_RESPAWN_MIN_S = 600
 # Sources that are allowed to say FULL. A framebuffer-sized guess is not one.
 DISPLAY_MODE_SOURCES = ("observed", "peer", "applied", "layout")
 # Relay never waits on a password prompt. ConnectTimeout matches the
@@ -6000,6 +6003,11 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
     agent = SessionAgent(cfg)
     agent.start()
     try:
+        if not dry_run:
+            try:
+                awake_reap_on_start(cfg)
+            except Exception as exc:  # noqa: BLE001 — watcher must still start
+                log(f"awake reap failed: {exc}")
         try:
             awake_reconcile(cfg, dry_run=dry_run)
         except Exception as exc:  # noqa: BLE001 — watcher must still start
@@ -6019,12 +6027,16 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
             here=here,
         )
     finally:
-        if not dry_run:
-            try:
-                awake_release(cfg)
-            except Exception as exc:  # noqa: BLE001
-                log(f"awake release failed: {exc}")
-        agent.stop()
+        # Release can raise (a test's mocked sleep, a killed ps). The session
+        # flag and the listening socket still have to come down.
+        try:
+            if not dry_run:
+                try:
+                    awake_release(cfg)
+                except Exception as exc:  # noqa: BLE001
+                    log(f"awake release failed: {exc}")
+        finally:
+            agent.stop()
 
 
 def _cmd_watch_loop(
@@ -6467,8 +6479,14 @@ def awake_backend_name(cfg: dict) -> str:
     return "none"
 
 
+# In-process backstop. State also records the last spawn so a crash loop
+# cannot start a new inhibitor on every restart.
+_awake_last_spawn_at = 0.0
+_awake_last_idle_toggle_at = 0.0
+
+
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
+    if pid <= 1 or pid == os.getpid():
         return False
     try:
         os.kill(pid, 0)
@@ -6477,54 +6495,205 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _pid_cmdline(pid: int) -> str:
-    proc_path = Path(f"/proc/{pid}/cmdline")
+def _process_table() -> list[tuple[int, int, str]] | None:
+    """pid, ppid, command. None when the listing itself failed.
+
+    `ps` without a terminal truncates the command. `-ww` is required or a
+    live caffeinate looks like it has no argv and the watcher starts another.
+    """
     try:
-        return proc_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
-    except OSError:
-        pass
-    try:
-        proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
+        proc = subprocess.Popen(
+            ["ps", "-axww", "-o", "pid=,ppid=,command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=2,
-            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return proc.stdout or ""
+    except OSError:
+        return None
+    try:
+        text, _err = proc.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return None
+    except BaseException:
+        # communicate() waits with time.sleep. A watcher test mocks that
+        # and raises; kill the ps and reap it without sleeping again.
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            os.waitpid(proc.pid, 0)
+        except OSError:
+            pass
+        proc.returncode = -9
+        raise
+    if proc.returncode not in (0, None) and not (text or "").strip():
+        return None
+    rows: list[tuple[int, int, str]] = []
+    for line in text.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        rows.append((pid, ppid, parts[2] if len(parts) > 2 else ""))
+    return rows
 
 
-def _inhibitor_markers(cfg: dict) -> tuple[str, ...]:
-    spec = _awake_cfg(cfg)
-    custom = str(spec.get("inhibit") or "").strip()
-    first = shlex.split(custom)[0] if custom else ""
-    name = Path(first).name if first else ""
-    return tuple(item for item in ("caffeinate", "systemd-inhibit", name, "desk awake") if item)
+def _command_is_desk_inhibitor(command: str, cfg: dict) -> bool:
+    """True for this desk's assertion, not for someone else's caffeinate."""
+    text = " ".join(str(command or "").split())
+    if not text:
+        return False
+    if "caffeinate" in text and "-dimsu" in text:
+        return True
+    if "systemd-inhibit" in text and "desk awake" in text:
+        return True
+    custom = str(_awake_cfg(cfg).get("inhibit") or "").strip()
+    return bool(custom) and custom in text
+
+
+def _is_legacy_caffeinate(command: str) -> bool:
+    """The old `caffeinate -dimsu sleep 86400` form. Its sleep child outlives it."""
+    text = " ".join(str(command or "").split())
+    return "caffeinate" in text and "-dimsu" in text and "86400" in text
+
+
+def _is_leaked_sleep(ppid: int, command: str) -> bool:
+    text = " ".join(str(command or "").split())
+    if ppid not in (0, 1):
+        return False
+    return text in ("sleep 86400", "/bin/sleep 86400", "sleep infinity", "/bin/sleep infinity")
+
+
+def _tied_to_this_process(command: str) -> bool:
+    return f"-w {os.getpid()}" in f" {command} "
+
+
+def _inhibitor_pids(cfg: dict, table: list[tuple[int, int, str]]) -> list[int]:
+    return [pid for pid, _ppid, command in table if _command_is_desk_inhibitor(command, cfg)]
 
 
 def _pid_is_inhibitor(pid: int, cfg: dict) -> bool:
-    if not _pid_alive(pid):
+    if pid <= 1:
         return False
-    text = _pid_cmdline(pid)
-    return any(mark and mark in text for mark in _inhibitor_markers(cfg))
+    table = _process_table()
+    if not table:
+        return False
+    for row_pid, _ppid, command in table:
+        if row_pid == pid and _command_is_desk_inhibitor(command, cfg):
+            return True
+    return False
+
+
+def _kill_pid(pid: int) -> None:
+    if pid <= 1 or pid == os.getpid():
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+        return
+    except OSError:
+        pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
+def _spawn_recent() -> bool:
+    now = time.time()
+    if _awake_last_spawn_at and now - _awake_last_spawn_at < AWAKE_RESPAWN_MIN_S:
+        return True
+    try:
+        stamp = float(load_desk_state().get("awake_spawned_at") or 0)
+    except (TypeError, ValueError):
+        stamp = 0.0
+    return bool(stamp) and now - stamp < AWAKE_RESPAWN_MIN_S
+
+
+def _mark_spawned(pid: int) -> None:
+    global _awake_last_spawn_at
+    _awake_last_spawn_at = time.time()
+    state = load_desk_state()
+    state["awake_pid"] = pid
+    state["awake_spawned_at"] = _awake_last_spawn_at
+    save_desk_state(state)
+
+
+def _remember_inhibitor(pid: int) -> None:
+    state = load_desk_state()
+    try:
+        current = int(state.get("awake_pid") or 0)
+    except (TypeError, ValueError):
+        current = 0
+    if current == pid:
+        return
+    state["awake_pid"] = pid
+    save_desk_state(state)
+
+
+def _prefer_inhibitor(pids: list[int], table: list[tuple[int, int, str]], stored: int) -> int:
+    commands = {pid: command for pid, _ppid, command in table}
+    for pid in pids:
+        if _tied_to_this_process(commands.get(pid, "")):
+            return pid
+    if stored in pids:
+        return stored
+    return pids[0]
+
+
+def awake_reap_on_start(cfg: dict) -> None:
+    """Drop leaked assertions before the watch loop holds one.
+
+    The old spawn was `caffeinate -dimsu sleep 86400`. Those caffeinate
+    processes and their reparented `sleep 86400` children are not reused.
+    """
+    table = _process_table()
+    if table is None:
+        log("awake: cannot list processes; not cleaning inhibitors")
+        return
+    current: list[int] = []
+    for pid, ppid, command in table:
+        if _is_leaked_sleep(ppid, command) or _is_legacy_caffeinate(command):
+            log(f"awake: stopping stale inhibitor pid {pid}")
+            _kill_pid(pid)
+            continue
+        if _command_is_desk_inhibitor(command, cfg):
+            current.append(pid)
+    keep = _prefer_inhibitor(current, table, 0) if current else 0
+    for pid in current:
+        if pid != keep:
+            log(f"awake: stopping extra inhibitor pid {pid}")
+            _kill_pid(pid)
+    if keep:
+        _remember_inhibitor(keep)
 
 
 def _spawn_inhibitor(cfg: dict) -> int | None:
-    """Hold a user-level assertion. No sudo, no pmset, no sysadminctl."""
+    """Hold one user-level assertion. No sudo, no pmset, no sysadminctl.
+
+    macOS waits on this process (`-w`) and does not start a `sleep` child.
+    When the watcher exits, caffeinate exits with it. Omarchy's idle toggle
+    is not a process we spawn; systemd-inhibit is only the fallback backend.
+    """
     spec = _awake_cfg(cfg)
     custom = str(spec.get("inhibit") or "").strip()
-    if custom:
+    backend = awake_backend_name(cfg)
+    if custom or backend == "custom":
+        if not custom:
+            return None
         try:
             argv = shlex.split(custom)
         except ValueError:
             return None
-    elif SYSTEM == "Darwin":
-        # `-u` alone exits after a few seconds. A utility keeps every
-        # assertion, including the user-active one, until this process dies.
-        argv = ["caffeinate", "-dimsu", "sleep", "86400"]
-    elif shutil.which("systemd-inhibit"):
+    elif backend == "caffeinate":
+        argv = ["caffeinate", "-dimsu", "-w", str(os.getpid())]
+    elif backend == "systemd-inhibit":
         argv = [
             "systemd-inhibit",
             "--what=idle:sleep",
@@ -6635,15 +6804,29 @@ def _hypridle_start() -> bool:
     return proc.returncode == 0
 
 
+def _idle_toggle_recent() -> bool:
+    if not _awake_last_idle_toggle_at:
+        return False
+    return time.time() - _awake_last_idle_toggle_at < AWAKE_RESPAWN_MIN_S
+
+
 def _linux_hold_idle(cfg: dict) -> None:
     """Prefer Omarchy's stay-awake toggle. Otherwise stop the user hypridle.
 
-    Runs once per awake session. The watch loop must not poll Omarchy.
+    Runs once per awake session. A lost ready flag must not toggle every tick.
     """
+    global _awake_last_idle_toggle_at
     state = load_desk_state()
     if state.get("awake_idle_ready"):
         return
+    if _idle_toggle_recent():
+        log(
+            "awake: not toggling idle again "
+            f"(cap is one toggle per {AWAKE_RESPAWN_MIN_S}s)"
+        )
+        return
     if _omarchy_stay_awake() is not None:
+        _awake_last_idle_toggle_at = time.time()
         if _omarchy_stay_awake() is False and _omarchy_set(True):
             state = load_desk_state()
             state["awake_omarchy"] = True
@@ -6651,6 +6834,7 @@ def _linux_hold_idle(cfg: dict) -> None:
         state["awake_idle_ready"] = True
         save_desk_state(state)
         return
+    _awake_last_idle_toggle_at = time.time()
     if _hypridle_running() and _hypridle_stop():
         state = load_desk_state()
         state["awake_hypridle"] = True
@@ -6670,30 +6854,63 @@ def _linux_release_idle(state: dict) -> None:
 
 
 def awake_inhibitor_running(cfg: dict) -> bool:
-    state = load_desk_state()
-    try:
-        pid = int(state.get("awake_pid") or 0)
-    except (TypeError, ValueError):
-        pid = 0
-    if _pid_is_inhibitor(pid, cfg):
+    table = _process_table()
+    if table is None:
+        state = load_desk_state()
+        try:
+            pid = int(state.get("awake_pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        return _pid_alive(pid)
+    if _inhibitor_pids(cfg, table):
         return True
+    state = load_desk_state()
     if state.get("awake_omarchy") and _omarchy_stay_awake() is True:
         return True
     return False
 
 
+def _needs_inhibitor_process(cfg: dict) -> bool:
+    return awake_backend_name(cfg) in ("caffeinate", "systemd-inhibit", "custom")
+
+
 def awake_acquire(cfg: dict) -> None:
-    state = load_desk_state()
-    try:
-        pid = int(state.get("awake_pid") or 0)
-    except (TypeError, ValueError):
-        pid = 0
-    if not _pid_is_inhibitor(pid, cfg):
-        spawned = _spawn_inhibitor(cfg)
-        if spawned:
-            state = load_desk_state()
-            state["awake_pid"] = spawned
-            save_desk_state(state)
+    """One inhibitor per host. Never spawn while one is already alive."""
+    table = _process_table()
+    if table is None:
+        log("awake: cannot list processes; not spawning an inhibitor")
+    else:
+        state = load_desk_state()
+        try:
+            stored = int(state.get("awake_pid") or 0)
+        except (TypeError, ValueError):
+            stored = 0
+        pids = _inhibitor_pids(cfg, table)
+        for pid, ppid, command in table:
+            if _is_leaked_sleep(ppid, command):
+                log(f"awake: stopping leaked sleep pid {pid}")
+                _kill_pid(pid)
+        if pids:
+            keep = _prefer_inhibitor(pids, table, stored)
+            for pid in pids:
+                if pid != keep:
+                    log(f"awake: stopping extra inhibitor pid {pid}")
+                    _kill_pid(pid)
+            _remember_inhibitor(keep)
+        elif _needs_inhibitor_process(cfg):
+            if _spawn_recent():
+                log(
+                    "awake: refusing to spawn another inhibitor "
+                    f"(cap is one spawn per {AWAKE_RESPAWN_MIN_S}s). "
+                    "The stored pid was not a live desk caffeinate or systemd-inhibit."
+                )
+            else:
+                spawned = _spawn_inhibitor(cfg)
+                if spawned:
+                    _mark_spawned(spawned)
+                    log(f"awake: inhibitor pid {spawned}")
+                else:
+                    log("awake: inhibitor did not start")
     if SYSTEM != "Darwin":
         _linux_hold_idle(cfg)
 
@@ -6702,18 +6919,31 @@ def awake_release(cfg: dict) -> None:
     state = load_desk_state()
     changed = False
     try:
-        pid = int(state.get("awake_pid") or 0)
+        stored_pid = int(state.get("awake_pid") or 0)
     except (TypeError, ValueError):
-        pid = 0
-    if pid and _pid_is_inhibitor(pid, cfg):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        stored_pid = 0
+    table = _process_table()
+    if table is not None:
+        for victim in _inhibitor_pids(cfg, table):
+            log(f"awake: stopping inhibitor pid {victim}")
+            _kill_pid(victim)
+            changed = True
+        for victim, ppid, command in table:
+            if _is_leaked_sleep(ppid, command):
+                log(f"awake: stopping leaked sleep pid {victim}")
+                _kill_pid(victim)
+                changed = True
+    elif stored_pid and _pid_alive(stored_pid):
+        _kill_pid(stored_pid)
+        changed = True
+    if state.get("awake_pid"):
         state["awake_pid"] = 0
         changed = True
-    elif state.get("awake_pid"):
-        state["awake_pid"] = 0
+    global _awake_last_spawn_at, _awake_last_idle_toggle_at
+    _awake_last_spawn_at = 0.0
+    _awake_last_idle_toggle_at = 0.0
+    if state.get("awake_spawned_at"):
+        state["awake_spawned_at"] = 0
         changed = True
     before_omarchy = bool(state.get("awake_omarchy"))
     before_hypr = bool(state.get("awake_hypridle"))
@@ -6723,7 +6953,7 @@ def awake_release(cfg: dict) -> None:
         if before_omarchy or before_hypr or before_ready:
             changed = True
     release = str(_awake_cfg(cfg).get("release") or "").strip()
-    if release and (before_omarchy or before_hypr or pid):
+    if release and (before_omarchy or before_hypr or stored_pid):
         try:
             run(["bash", "-lc", release], timeout=4.0)
         except (OSError, subprocess.TimeoutExpired):
