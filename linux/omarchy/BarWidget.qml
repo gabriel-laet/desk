@@ -30,6 +30,8 @@ BarWidget {
   // Mac writes this file. TODO: Omarchy drag-reorder settings UI — read
   // the same schema, do not fork it. Modular kind HUD is macOS-first.
   property var uiConfig: ({})
+  property bool barSlots: false
+  property var barMark: ({ text: "desk" })
 
   readonly property bool opened: panelLoader.item
     ? panelLoader.item.opened === true
@@ -102,9 +104,11 @@ BarWidget {
     let hosts = []
     let layouts = []
     let focus = ""
+    let parsed = null
     if (raw.charAt(0) === "{") {
       try {
         const data = JSON.parse(raw)
+        parsed = data
         hint = String(data.target_hint || "")
         if (hint === "?")
           hint = ""
@@ -180,9 +184,13 @@ BarWidget {
       label = hint
     if (!label)
       label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")
-    if (density === "chips") {
+    const barSlots = !!(uiConfig && uiConfig.tray && uiConfig.tray.bar_slots === true)
+    const mark = parsed && parsed.bar_mark && typeof parsed.bar_mark === "object" ? parsed.bar_mark : null
+    if (!barSlots && mark && mark.text) {
+      strip = String(mark.text)
+    } else if (density === "chips") {
       strip = label || strip || "desk"
-    } else if (slots.length) {
+    } else if (barSlots && slots.length) {
       const slotTitle = root.slotsTitle(slots)
       const head = []
       if (focus)
@@ -201,7 +209,7 @@ BarWidget {
       strip = hint || (layoutName || (mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "desk")))
     root.hint = hint
     root.barLabel = label
-    root.stripTitle = density === "chips" ? (label || strip || "desk") : strip
+    root.stripTitle = (density === "chips" && barSlots) ? (label || strip || "desk") : strip
     root.trayDensity = density
     root.barTooltip = tooltip
     root.dualUpAvailable = dual
@@ -217,6 +225,8 @@ BarWidget {
     root.layouts = layouts
     root.slots = slots
     root.uiConfig = uiConfig
+    root.barSlots = barSlots
+    root.barMark = mark || {}
     root.injectPanel()
   }
 
@@ -319,10 +329,29 @@ BarWidget {
   }
 
   function runAction(args) {
+    root.actionOut = ""
+    root.actionErr = ""
     actionProc.command = ["bash", "-lc", "export PATH=\"$HOME/.local/bin:$PATH\"; desk " + args]
     if (actionProc.running)
       actionProc.running = false
     actionProc.running = true
+  }
+
+  property string actionOut: ""
+  property string actionErr: ""
+
+  function finishAction() {
+    const err = String(root.actionErr || "").trim()
+    const out = String(root.actionOut || "").trim()
+    const ok = err.length === 0
+    const body = ok ? out : err
+    const line = body ? body.split("\n")[0] : (ok ? "ok" : "failed")
+    const mode = root.barMark && root.barMark.display ? String(root.barMark.display) : root.dualupMode
+    const host = root.barMark && root.barMark.host ? String(root.barMark.host) : root.hint
+    const layoutName = root.barMark && root.barMark.layout ? String(root.barMark.layout) : root.activeLayout
+    if (hudLoader.item)
+      hudLoader.item.show(host, layoutName, mode, line, ok)
+    root.refresh()
   }
 
   implicitWidth: button.implicitWidth
@@ -349,11 +378,30 @@ BarWidget {
   Process {
     id: actionProc
     stdout: StdioCollector {
-      onStreamFinished: root.refresh()
+      onStreamFinished: {
+        root.actionOut = this.text
+        flashTimer.restart()
+      }
     }
     stderr: StdioCollector {
-      onStreamFinished: root.refresh()
+      onStreamFinished: {
+        root.actionErr = this.text
+        flashTimer.restart()
+      }
     }
+  }
+
+  Timer {
+    id: flashTimer
+    interval: 40
+    repeat: false
+    onTriggered: root.finishAction()
+  }
+
+  Loader {
+    id: hudLoader
+    active: true
+    source: Qt.resolvedUrl("HudToast.qml")
   }
 
   Loader {

@@ -35,11 +35,11 @@ struct MenuBarLabel: View {
 
     var body: some View {
         Group {
-            if model.ui.trayDensity == "chips" || model.visibleSlots.isEmpty {
+            if model.ui.barSlots && (model.ui.trayDensity == "chips" || model.visibleSlots.isEmpty) {
                 Text(model.ui.trayDensity == "chips" ? model.barLabel : model.stripTitle)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .help(model.summary)
-            } else {
+            } else if model.ui.barSlots {
                 Image(
                     nsImage: MenuBarStatusItemRenderer.image(
                         prefix: model.menuPrefix,
@@ -51,6 +51,12 @@ struct MenuBarLabel: View {
                 .help(model.summary)
                 .accessibilityLabel(model.slotAccessibility)
                 .id(model.slotSetID + "|" + model.menuPrefix)
+            } else {
+                Image(nsImage: MenuBarStatusItemRenderer.compact(model.barMark))
+                    .renderingMode(.template)
+                    .help(model.summary)
+                    .accessibilityLabel(model.barMark.text)
+                    .id(model.barMark.text)
             }
         }
     }
@@ -156,12 +162,166 @@ enum MenuBarStatusItemRenderer {
         image.isTemplate = true
         return image
     }
+
+    /// One menu-bar glyph: host letter, full or split, optional awake bolt.
+    static func compact(_ mark: BarMark) -> NSImage {
+        let size = NSSize(width: mark.awake ? 28 : 22, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let letter = NSAttributedString(string: mark.letter, attributes: attrs)
+        letter.draw(at: NSPoint(x: 1, y: 2))
+        let symbolName = mark.symbol == "split" ? "rectangle.split.1x2" : (mark.symbol == "full" ? "rectangle" : "circle")
+        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        if let icon = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(config) {
+            icon.draw(
+                in: NSRect(x: 12, y: 2, width: 12, height: 14),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1
+            )
+        }
+        if mark.awake, let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 7, weight: .bold)) {
+            bolt.draw(
+                in: NSRect(x: 20, y: 9, width: 7, height: 8),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1
+            )
+        }
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+}
+
+struct BarMark: Equatable {
+    var host = ""
+    var letter = "•"
+    var symbol = "idle"
+    var awake = false
+    var text = "desk"
+    var layout = ""
+    var display = ""
+
+    static func parse(_ raw: Any?) -> BarMark {
+        guard let obj = raw as? [String: Any] else { return BarMark() }
+        let letter = (obj["letter"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "•"
+        return BarMark(
+            host: obj["host"] as? String ?? "",
+            letter: letter,
+            symbol: obj["symbol"] as? String ?? "idle",
+            awake: (obj["awake"] as? String) == "on",
+            text: obj["text"] as? String ?? "desk",
+            layout: obj["layout"] as? String ?? "",
+            display: obj["display"] as? String ?? ""
+        )
+    }
+}
+
+/// Borderless status card. It does not become key, so a hotkey flash
+/// does not steal focus from the front app. Dismisses itself.
+final class DeskFlashPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+final class DeskFlash {
+    static let shared = DeskFlash()
+    private var panel: DeskFlashPanel?
+    private var timer: Timer?
+
+    func show(mark: BarMark, line: String, ok: Bool) {
+        let card = DeskFlashCard(mark: mark, line: line, ok: ok)
+        let host = NSHostingView(rootView: card)
+        host.frame = NSRect(x: 0, y: 0, width: 380, height: 132)
+        let panel = self.panel ?? DeskFlashPanel(
+            contentRect: host.frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .statusBar
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.contentView = host
+        if let screen = NSScreen.main?.visibleFrame {
+            let origin = NSPoint(
+                x: screen.midX - host.frame.width / 2,
+                y: screen.midY - host.frame.height / 2
+            )
+            panel.setFrameOrigin(origin)
+        }
+        panel.orderFrontRegardless()
+        self.panel = panel
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+            self?.panel?.orderOut(nil)
+        }
+        if let timer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+}
+
+struct DeskFlashCard: View {
+    var mark: BarMark
+    var line: String
+    var ok: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: mark.symbol == "split" ? "rectangle.split.1x2" : (mark.symbol == "full" ? "rectangle" : "circle"))
+                .font(.system(size: 28, weight: .semibold))
+                .frame(width: 44, height: 44)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                Text(line.isEmpty ? (ok ? "ok" : "failed") : line)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(ok ? Color.secondary : Color.red)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(width: 380, height: 132)
+        .background(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.96))
+        .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var title: String {
+        let host = mark.host.isEmpty ? mark.letter : mark.host
+        if !mark.layout.isEmpty {
+            return host + "  " + mark.layout
+        }
+        if mark.display == "pbp" {
+            return host + "  PBP"
+        }
+        if mark.display == "full" {
+            return host + "  FULL"
+        }
+        return host
+    }
 }
 
 final class DeskSwitchModel: ObservableObject {
     @Published var hint = ""
     @Published var barLabel = "desk"
     @Published var stripTitle = "desk"
+    @Published var barMark = BarMark()
     @Published var summary = "Refresh to probe HHKB / MX / DualUp"
     @Published var hhkbLine = "HHKB  …"
     @Published var mouseLine = "MX  …"
@@ -261,6 +421,7 @@ final class DeskSwitchModel: ObservableObject {
                     self.hint = parsed.hint
                     self.barLabel = parsed.barLabel
                     self.stripTitle = parsed.stripTitle
+                    self.barMark = parsed.barMark
                     self.hhkbLine = parsed.hhkbLine
                     self.mouseLine = parsed.mouseLine
                     self.dualLine = parsed.dualLine
@@ -354,7 +515,9 @@ final class DeskSwitchModel: ObservableObject {
                 let out = try DeskSwitchCLI.run(args, timeout: timeout)
                 DispatchQueue.main.async {
                     self.holdActionError = false
-                    self.lastLine = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let text = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.lastLine = text
+                    DeskFlash.shared.show(mark: self.barMark, line: text.isEmpty ? "ok" : text, ok: true)
                     self.refresh()
                 }
             } catch {
@@ -364,6 +527,7 @@ final class DeskSwitchModel: ObservableObject {
                     self.lastLine = text
                     let hint = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
                     self.summary = hint
+                    DeskFlash.shared.show(mark: self.barMark, line: hint, ok: false)
                     self.refresh()
                 }
             }
@@ -1209,6 +1373,7 @@ struct StatusSnapshot {
     var hint = ""
     var barLabel = "desk"
     var stripTitle = "desk"
+    var barMark = BarMark()
     var summary = "Refresh to probe HHKB / MX / DualUp"
     var hhkbLine = "HHKB  …"
     var mouseLine = "MX  …"
@@ -1400,6 +1565,7 @@ struct StatusSnapshot {
             hint: shownHint,
             barLabel: barLabel,
             stripTitle: stripTitle,
+            barMark: BarMark.parse(obj["bar_mark"]),
             summary: summary,
             hhkbLine: "HHKB  \(hhkbValue)",
             mouseLine: "MX  \(mouseValue)",
@@ -1497,6 +1663,7 @@ struct DeskUIConfig: Equatable {
     var showAltitude: Bool
     var showFaces: Bool
     var hudDensity: String
+    var barSlots: Bool = false
 
     var compact: Bool { hudDensity == "compact" }
 
@@ -1536,6 +1703,9 @@ struct DeskUIConfig: Equatable {
         let hud = ui["hud"] as? [String: Any] ?? [:]
         if let density = tray["density"] as? String, !density.isEmpty {
             cfg.trayDensity = density.lowercased() == "chips" ? "chips" : "strip"
+        }
+        if let extra = tray["bar_slots"] as? Bool {
+            cfg.barSlots = extra
         }
         cfg.lights = tray["lights"] as? Bool ?? false
         if let rawSlots = tray["slots"] as? [Any] {
@@ -1605,6 +1775,7 @@ struct DeskUIConfig: Equatable {
             "tray": [
                 "density": trayDensity,
                 "lights": lightsOn,
+                "bar_slots": barSlots,
                 "slots": slots.map { pref -> [String: Any] in
                     var obj: [String: Any] = [
                         "id": pref.id,
