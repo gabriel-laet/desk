@@ -131,8 +131,8 @@ class CliTests(unittest.TestCase):
                 env=env,
             )
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("lgdualup not on PATH", proc.stdout)
-        self.assertIn("no host could run it", proc.stdout)
+        self.assertIn("no input configured", proc.stdout)
+        self.assertNotIn("50-50", proc.stdout)
 
     def test_full_without_lgdualup_is_noop(self) -> None:
         env = os.environ.copy()
@@ -505,7 +505,8 @@ class DualupAdapterTests(unittest.TestCase):
     def test_pbp_invokes_usb_inputs_then_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lg, layout, _log = self._helpers(tmp)
-            cfg = self._cfg(lg, layout)
+            cfg = self._cfg(lg, layout, this_host="mac")
+            cfg["hosts"]["linux"]["ssh"] = "linux.example"
             calls: list[list[str]] = []
 
             def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
@@ -520,11 +521,12 @@ class DualupAdapterTests(unittest.TestCase):
             ), mock.patch.object(ds.time, "sleep"):
                 rc = ds.cmd_pbp(cfg, None)
             self.assertEqual(rc, 0)
-            self.assertEqual(calls[0][1:], ["pbp", "50-50"])
-            self.assertEqual(calls[1][1:], ["pbp-assign", "hdmi1", "dp"])
-            self.assertEqual(calls[2], [str(layout), "pbp"])
-            self.assertIn("ok:pbp 50-50", buf.getvalue())
-            self.assertIn("ok:pbp", buf.getvalue())
+            adapter = [cmd[1:] for cmd in calls if cmd and cmd[0] == str(lg)]
+            self.assertEqual(adapter[0][:2], ["pbp", "stacked"])
+            self.assertNotIn("50-50", [part for cmd in adapter for part in cmd])
+            self.assertEqual(adapter[1], ["input-sub", "dp"])
+            self.assertEqual(adapter[2], ["input-main", "hdmi1"])
+            self.assertIn("ok:pbp stacked", buf.getvalue())
 
     def test_full_invokes_usb_then_layout_without_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -575,7 +577,8 @@ class DualupAdapterTests(unittest.TestCase):
     def test_pbp_settles_after_assign_before_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lg, layout, _log = self._helpers(tmp)
-            cfg = self._cfg(lg, layout, _dualup_layout_settle_s=0.4)
+            cfg = self._cfg(lg, layout, _dualup_layout_settle_s=0.4, this_host="mac")
+            cfg["hosts"]["linux"]["ssh"] = "linux.example"
             order: list[str] = []
 
             def fake_run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
@@ -597,7 +600,20 @@ class DualupAdapterTests(unittest.TestCase):
             ), mock.patch.object(ds.time, "sleep", side_effect=fake_sleep):
                 rc = ds.cmd_pbp(cfg, "50-50")
             self.assertEqual(rc, 0)
-            self.assertEqual(order, ["usb", "assign", "sleep:0.4", "layout"])
+            self.assertEqual(
+                order,
+                [
+                    "usb",
+                    "sleep:0.4",
+                    "usb",
+                    "sleep:0.4",
+                    "usb",
+                    "sleep:0.4",
+                    "layout",
+                    "layout",
+                ],
+            )
+            self.assertNotIn("assign", order)
 
     def test_layout_retries_when_edid_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -840,6 +856,77 @@ class DualupLayoutScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self._assert_verbose_apply(proc.stdout, "2880x2560")
         self.assertNotIn("fallback", proc.stdout)
+
+    def test_macos_keeps_dualup_at_origin_and_secondary_to_the_right(self) -> None:
+        side = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            before = (
+                f"Persistent screen id: {side}\n"
+                "Type: 16 inch external screen\n"
+                "Resolution: 1920x1080\n"
+                "Hertz: 60\n"
+                "Color Depth: 8\n"
+                "Scaling: off\n"
+                "Origin: (0,0) - main display\n"
+                "Rotation: 0\n"
+                "Enabled: true\n"
+                f"Persistent screen id: {self.DID}\n"
+                "Type: 28 inch external screen\n"
+                "Resolution: 2880x1280\n"
+                "Hertz: 60\n"
+                "Color Depth: 8\n"
+                "Scaling: off\n"
+                "Origin: (1280,0)\n"
+                "Rotation: 270\n"
+                "Enabled: true\n"
+                f"Resolutions for persistent screen id: {self.DID}\n"
+                "  mode 0: res:2880x1280 hz:60\n"
+            )
+            after = before.replace("Resolution: 2880x1280\n", "Resolution: 2880x1280\n", 1)
+            self._write_displayplacer(bin_dir, before, after)
+            proc = self._run_script(self.MAC, ["pbp", "--id", self.DID, "--secondary", side], bin_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn(f"id:{self.DID} res:2880x1280", proc.stdout)
+        self.assertIn("origin:(0,0)", proc.stdout)
+        self.assertIn(f"id:{side} res:1920x1080", proc.stdout)
+        self.assertIn("origin:(2880,0)", proc.stdout)
+        self.assertNotIn("origin:(1280,0)", proc.stdout)
+
+    def test_macos_stacked_secondary_uses_dualup_width(self) -> None:
+        side = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            before = (
+                f"Persistent screen id: {self.DID}\n"
+                "Type: 28 inch external screen\n"
+                "Resolution: 2560x1440\n"
+                "Hertz: 60\n"
+                "Color Depth: 8\n"
+                "Scaling: off\n"
+                "Origin: (1920,0)\n"
+                "Rotation: 0\n"
+                "Enabled: true\n"
+                f"Resolutions for persistent screen id: {self.DID}\n"
+                "  mode 0: res:2560x1440 hz:60\n"
+                f"Persistent screen id: {side}\n"
+                "Type: 16 inch external screen\n"
+                "Resolution: 1920x1080\n"
+                "Hertz: 60\n"
+                "Color Depth: 8\n"
+                "Scaling: off\n"
+                "Origin: (0,0) - main display\n"
+                "Rotation: 0\n"
+                "Enabled: true\n"
+            )
+            self._write_displayplacer(bin_dir, before)
+            proc = self._run_script(
+                self.MAC, ["pbp", "--split", "stacked", "--id", self.DID], bin_dir
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn(f"id:{self.DID} res:2560x1440", proc.stdout)
+        self.assertIn("origin:(0,0) degree:0", proc.stdout)
+        self.assertIn("origin:(2560,0)", proc.stdout)
 
     def test_macos_pbp_prefers_2880x1280_at_270(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4899,8 +4986,10 @@ class WallpaperTests(unittest.TestCase):
             self.assertEqual(ds.cmd_to(cfg, "mac"), 0)
         apply.assert_called_once()
         with mock.patch.object(ds, "dualup_set_mode", return_value=0), mock.patch.object(
-            ds, "apply_wallpaper", side_effect=RuntimeError("setter down")
-        ), mock.patch("sys.stdout", io.StringIO()):
+            ds, "apply_pbp_layout", return_value=0
+        ), mock.patch.object(ds, "apply_wallpaper", side_effect=RuntimeError("setter down")), mock.patch(
+            "sys.stdout", io.StringIO()
+        ):
             self.assertEqual(ds.cmd_full(cfg), 0)
             self.assertEqual(ds.cmd_pbp(cfg, "50-50"), 0)
         named = {
@@ -5357,6 +5446,61 @@ class LgdualupSplitTests(unittest.TestCase):
         self.assertIn("not which way the picture is split", proc.stderr)
         self.assertNotIn("set pbp_splits.stacked to 0", proc.stderr)
         self.assertEqual([line for line in proc.stdout.splitlines() if line], ["on", "off"])
+
+    def test_side_by_side_read_does_not_pretend_stacked_was_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proc = self._run(
+                "pbp",
+                "stacked",
+                home=home,
+                extra_env={"LGDUALUP_FAKE_PBP_READ": "5"},
+            )
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("side-by-side", proc.stderr)
+        self.assertIn("0xD7=5", proc.stderr)
+        self.assertIn("lgdualup probe", proc.stderr)
+        self.assertNotIn("0x00", proc.stdout)
+        self.assertNotIn("not written", proc.stdout)
+
+    def test_configured_stacked_code_writes_only_when_different(self) -> None:
+        config = {
+            "adapters": {
+                "display": {"pbp_splits": {"stacked": 4, "side": 5}}
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            same = self._run(
+                "pbp",
+                "stacked",
+                home=home,
+                config=config,
+                extra_env={"LGDUALUP_FAKE_PBP_READ": "4"},
+            )
+            different = self._run(
+                "pbp",
+                "stacked",
+                home=home,
+                config=config,
+                extra_env={"LGDUALUP_FAKE_PBP_READ": "5"},
+            )
+            probe = self._run(
+                "probe",
+                home=home,
+                config=config,
+                extra_env={"LGDUALUP_FAKE_PBP_READ": "5"},
+            )
+        self.assertEqual(same.returncode, 0, same.stderr)
+        self.assertIn("already, not written", same.stdout)
+        self.assertNotIn("pbp ->", same.stdout)
+        self.assertEqual(different.returncode, 0, different.stderr)
+        self.assertIn("pbp -> stacked", different.stdout)
+        self.assertNotIn("(0x00)", different.stdout)
+        self.assertNotIn("(0x02)", different.stdout)
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertIn("pbp 0xD7 @ 0x51 = 5", probe.stdout)
+        self.assertIn("stacked write code: 4", probe.stdout)
 
     def test_stacked_code_comes_from_config_or_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6200,21 +6344,16 @@ class DisplayWriteRelayTests(unittest.TestCase):
             ):
                 rc = ds.cmd_pbp(cfg, None)
             saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
-            cached = json.loads((Path(tmp) / "cache" / "dualup-mode.json").read_text())
         self.assertEqual(rc, 0)
-        ssh = [cmd for cmd in calls if cmd and cmd[0] == "ssh"]
-        self.assertGreaterEqual(len(ssh), 2)
-        self.assertTrue(all("tower.example" in cmd for cmd in ssh), ssh)
-        joined = "\n".join(cmd[-1] for cmd in ssh)
-        self.assertIn("pbp", joined)
-        self.assertIn("50-50", joined)
-        self.assertIn("pbp-assign", joined)
+        ssh = [cmd[-1] for cmd in calls if cmd and cmd[0] == "ssh"]
+        joined = "\n".join(ssh)
+        self.assertIn("pbp stacked", joined)
+        self.assertNotIn("50-50", joined)
+        self.assertNotIn("pbp-assign", joined)
         self.assertEqual(saved["display_mode"], "pbp")
         self.assertEqual(saved["display_mode_source"], "applied")
-        self.assertEqual(saved["display_mode_host"], "tower")
-        self.assertEqual(cached["mode"], "pbp")
         paper.assert_called_once()
-        self.assertIn("DualUp pbp → 50-50 via tower", out.getvalue())
+        self.assertNotIn("DualUp pbp → 50-50 via tower", out.getvalue())
 
     def test_full_relays_the_same_way(self) -> None:
         cfg = self._cfg()
@@ -6291,6 +6430,211 @@ class DisplayWriteRelayTests(unittest.TestCase):
         ssh = [cmd[-1] for cmd in calls if cmd and cmd[0] == "ssh"]
         self.assertTrue(any("hdmi2" in cmd for cmd in ssh), ssh)
         paper.assert_called_once()
+
+
+class MacTowerPbpTests(unittest.TestCase):
+    """desk pbp and desk layout mac-tower keep stacked and the top/bottom pair."""
+
+    def _cfg(self) -> dict:
+        return {
+            "this_host": "mac",
+            "target_channel": 2,
+            "pbp_mode": "50-50",
+            "_config_path": "(test)",
+            "_dualup_layout_settle_s": 0,
+            "_dualup_layout": True,
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "mac.example", "input": "hdmi1"},
+                "linux": {"channel": 2, "ssh": "linux.example", "input": "dp"},
+                "tower": {"channel": 3, "ssh": "tower.example", "input": "hdmi2"},
+            },
+            "layouts": {
+                "focus": {"monitors": {"display": {"mode": "full", "host": "mac"}}},
+                "mac-tower": {
+                    "monitors": {
+                        "display": {
+                            "mode": "pbp",
+                            "top": "mac",
+                            "bottom": "tower",
+                            "split": "stacked",
+                        }
+                    }
+                },
+            },
+            "adapters": {
+                "display": {
+                    "backend": "lgdualup",
+                    "inputs": {"mac": "hdmi1", "linux": "dp", "tower": "hdmi2"},
+                    "pbp_splits": {"side": 5, "stacked": None},
+                    "relay_hosts": ["linux"],
+                }
+            },
+        }
+
+    def _adapter_args(self, calls: list[list[str]], binary: str) -> list[list[str]]:
+        return [cmd[1:] for cmd in calls if cmd and cmd[0] == binary]
+
+    def test_shortcut_is_bare_desk_pbp(self) -> None:
+        row = next(item for item in ds.public_shortcuts(self._cfg()) if item["id"] == "pbp")
+        self.assertEqual(row["argv"], ["pbp"])
+        self.assertEqual(row["mac"], "⌘⌥⇧P")
+        self.assertIn("SUPER + ALT + SHIFT + P", row["hypr"])
+
+    def test_bare_pbp_uses_mac_tower_locally(self) -> None:
+        cfg = self._cfg()
+        binary = "/opt/desk/lgdualup"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "lgdualup_path", return_value=Path(binary)
+            ), mock.patch.object(ds, "dualup_layout_path", return_value=Path("/opt/desk/dualup-layout")), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds.time, "sleep"), mock.patch.object(
+                ds, "note_wallpaper"
+            ), mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+                rc = ds.cmd_pbp(cfg, None)
+            saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
+        self.assertEqual(rc, 0)
+        adapter = self._adapter_args(calls, binary)
+        self.assertEqual(
+            adapter[:3],
+            [
+                ["pbp", "stacked", "--splits", "side=5,stacked=keep"],
+                ["input-sub", "hdmi2"],
+                ["input-main", "hdmi1"],
+            ],
+        )
+        flat = [part for cmd in adapter for part in cmd]
+        self.assertNotIn("50-50", flat)
+        self.assertNotIn("0xD7", flat)
+        self.assertNotIn("pbp-assign", flat)
+        self.assertEqual(saved["active_layout"], "mac-tower")
+        self.assertEqual(saved["last_pbp_layout"], "mac-tower")
+
+    def test_bare_pbp_relays_the_same_argv(self) -> None:
+        cfg = self._cfg()
+        binary = "/opt/desk/lgdualup"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            if cmd and cmd[0] == "ssh":
+                return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+            if cmd and cmd[0].endswith("dualup-layout"):
+                return subprocess.CompletedProcess(cmd, 0, "layout\n", "")
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "No LG Monitor Controls device (043e:9a39) found.\n"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "lgdualup_path", return_value=Path(binary)
+            ), mock.patch.object(ds, "dualup_layout_path", return_value=Path("/opt/desk/dualup-layout")), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds.time, "sleep"), mock.patch.object(
+                ds, "note_wallpaper"
+            ), mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+                rc = ds.cmd_pbp(cfg, None)
+        self.assertEqual(rc, 0, calls)
+        ssh = [cmd[-1] for cmd in calls if cmd and cmd[0] == "ssh" and "lgdualup" in cmd[-1]]
+        joined = "\n".join(ssh)
+        self.assertIn("pbp stacked --splits side=5,stacked=keep", joined)
+        self.assertIn("input-sub hdmi2", joined)
+        self.assertIn("input-main hdmi1", joined)
+        self.assertNotIn("50-50", joined)
+        self.assertNotIn("0xD7", joined)
+        self.assertNotIn("pbp-assign", joined)
+
+    def test_explicit_side_mode_is_the_only_split_change(self) -> None:
+        cfg = self._cfg()
+        binary = "/opt/desk/lgdualup"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "lgdualup_path", return_value=Path(binary)
+            ), mock.patch.object(ds, "dualup_layout_path", return_value=None), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds.time, "sleep"), mock.patch.object(
+                ds, "note_wallpaper"
+            ), mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+                kept = ds.cmd_pbp(cfg, "stacked")
+                calls.clear()
+                changed = ds.cmd_pbp(cfg, "50-50")
+        self.assertEqual(kept, 0)
+        self.assertEqual(changed, 0)
+        adapter = self._adapter_args(calls, binary)
+        self.assertEqual(adapter[0][:2], ["pbp", "side"])
+        self.assertEqual(adapter[1], ["input-sub", "hdmi2"])
+        self.assertEqual(adapter[2], ["input-main", "hdmi1"])
+
+    def test_relayed_layout_is_active_for_status_and_later_pbp(self) -> None:
+        cfg = self._cfg()
+        binary = "/opt/desk/lgdualup"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            if cmd and cmd[0] == "ssh":
+                return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+            if cmd and str(cmd[0]).endswith("dualup-layout"):
+                return subprocess.CompletedProcess(cmd, 0, "layout\n", "")
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "No LG Monitor Controls device (043e:9a39) found.\n"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = str(Path(tmp) / "state")
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": state_dir}), mock.patch.object(
+                ds, "lgdualup_path", return_value=Path(binary)
+            ), mock.patch.object(ds, "dualup_layout_path", return_value=Path("/opt/desk/dualup-layout")), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds.time, "sleep"), mock.patch.object(
+                ds, "note_wallpaper"
+            ), mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+                rc = ds.cmd_layout(cfg, "mac-tower")
+            self.assertEqual(rc, 0, calls)
+            saved = json.loads((Path(state_dir) / "state.json").read_text())
+            self.assertEqual(saved["active_layout"], "mac-tower")
+            self.assertEqual(saved["last_pbp_layout"], "mac-tower")
+            peer = {
+                "reachable": True,
+                "this_host": "linux",
+                "dualup_mode": "pbp",
+                "dualup_mode_source": "observed",
+                "dualup_usb": True,
+                "active_layout": None,
+                "mouse_channel": 2,
+                "mouse_online": True,
+            }
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": state_dir}), mock.patch.object(
+                ds, "hhkb_probe", return_value={"present": False, "usb": False, "bluetooth": False, "transport": "absent"}
+            ), mock.patch.object(
+                ds, "mouse_snapshot", return_value={"info": "", "channel": 1, "channel_live": 1, "online": True, "source": "mouse"}
+            ), mock.patch.object(ds, "lgdualup_path", return_value=None), mock.patch.object(
+                ds, "detect_dualup_mode", return_value="full"
+            ), mock.patch.object(ds, "read_display_mode_from_peers", return_value=None), mock.patch.object(
+                ds, "peek_peer_status", return_value=peer
+            ), mock.patch.object(ds, "invoke_smarthome", return_value=None), mock.patch.object(
+                ds, "invoke_kettle", return_value=None
+            ), mock.patch.object(ds, "invoke_weather", return_value=None):
+                status = ds.collect_status(cfg, local_only=False)
+            again = json.loads((Path(state_dir) / "state.json").read_text())
+        self.assertEqual(status["active_layout"], "mac-tower")
+        self.assertEqual(status["last_pbp_layout"], "mac-tower")
+        self.assertEqual(status["dualup_mode"], "pbp")
+        self.assertIn("mac-tower", status["bar_strip"]["title"])
+        self.assertIn("PBP", status["bar_strip"]["title"])
+        self.assertEqual(again["active_layout"], "mac-tower")
 
 
 if __name__ == "__main__":

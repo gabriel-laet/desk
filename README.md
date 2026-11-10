@@ -291,7 +291,7 @@ active one is marked. Applying one runs `desk layout <name>`.
 | Switch to `<host>` | `desk to <id>` — one button per configured host |
 | `<layout>` | `desk layout <name>` — one button per saved layout. Hidden when `layouts` is empty |
 | DualUp Full  ⌘⌥⇧F | `desk full` — hidden unless DualUp is present or mode is known |
-| DualUp PBP  ⌘⌥⇧P | `desk pbp` — uses `pbp_mode` from config |
+| DualUp PBP  ⌘⌥⇧P | `desk pbp` — the active PBP layout, else the last one, else the first |
 | Auto layout  ⌘⌥U | `desk layout` — re-applies full or PBP from the live display |
 
 Polls about every 15s. Looks up `desk` via `bash -lc` with `~/.local/bin`
@@ -357,8 +357,8 @@ desk to tower            # any id configured in adapters.hosts
 desk to linux --mouse-only
 desk switch mac          # same as `to mac`
 desk switch 2            # mouse only, Easy-Switch 1|2|3
-desk pbp                 # USB PBP + hdmi1/dp inputs + OS layout
-desk pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
+desk pbp                 # reapply the PBP layout (stacked pair from config, not 50-50)
+desk pbp 50-50           # explicit split; side/50-50 is what leaves stacked
 desk full                # USB full + OS layout
 desk layout <name>       # apply layouts.<name> (full host, or PBP top/bottom)
 desk layout              # re-apply full or PBP from a real reading (never a FULL guess)
@@ -828,12 +828,31 @@ written.
 
 `stacked` therefore defaults to **keep**. `split: "keep"`, or
 `pbp_splits.stacked: null`, is the same: do not write `0xD7`.
+There is no stacked code in this tree. `1` is full, `5` is side-by-side
+50-50, `3` is 66/33, and `0` / `2` stretch the panel. A layout whose
+split is stacked reads `0xD7` first. If that read is already the
+configured stacked code, it is left alone. If a stacked code is
+configured and the read differs, that code is written. If no stacked
+code is configured and the read is `3` or `5`, the command fails
+instead of leaving the panel side-by-side and pretending it worked.
 
-- If the monitor already reads as PBP (the value is not `1`), desk only
-  sets the sub input, the main input, and the OS layout.
+On the machine that holds the monitor USB, after the joystick is set
+to stacked top/bottom:
+
+```bash
+~/.local/lib/desk/lgdualup probe
+```
+
+The number it prints (not `0` or `2`) is what belongs in
+`pbp_splits.stacked`.
+
+- If the read is `0` (PBP on, direction unknown) and no stacked code is
+  configured, desk does not write `0xD7`. It still sets the sub input,
+  the main input, and the OS layout.
+- If the read is `5` or `3` (side-by-side) and no stacked code is
+  configured, the layout command fails and names `lgdualup probe`.
 - If it reads `1` (full), desk logs `PBP is off; enable PBP 1:1 in the
-  monitor OSD once`, still sets the inputs, and still does not write
-  `0xD7`.
+  monitor OSD once` and still does not write `0xD7`.
 
 Set the 1:1 picture from the OSD once. After that, `desk layout` leaves
 it alone. Side-by-side is different: `split: "side"` still writes `5`.
