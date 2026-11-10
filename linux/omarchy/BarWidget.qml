@@ -271,7 +271,8 @@ BarWidget {
       return false
     const list = items || []
     for (let i = 0; i < list.length; i++) {
-      if (String((list[i] || {}).label || "") === want)
+      const text = String((list[i] || {}).label || "")
+      if (text === want || text.indexOf(want + " ") === 0)
         return true
     }
     return false
@@ -290,7 +291,9 @@ BarWidget {
       "display.split": "▣",
       "display.full": "▭",
       "light.on": "💡",
-      "light.off": "○"
+      "light.off": "○",
+      "awake.on": "⚡",
+      "awake.off": "☾"
     }
     return map[String(glyph || "")] || ""
   }

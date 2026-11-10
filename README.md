@@ -271,8 +271,11 @@ omarchy plugin add https://github.com/gabriel-laet/desk.git --enable
 That clones into `~/.config/omarchy/plugins/glaet.desk-switch/` and places
 a widget on the **right** section. The strip stays short. Quiet density
 paints the focus token and, when a named layout is active, that name
-(`TWR  work`, from `bar_strip.title`). `FULL` or `PBP` stands in when
-no named layout is set. Enabled slot labels follow the same token.
+(`TWR  work`, from `bar_strip.title`). A PBP layout keeps the mode too
+(`MAC  mac-tower  PBP`). `FULL` or `PBP` stands in when no named layout
+is set, and a remembered mode is marked with `~`. A full-size
+framebuffer is never shown as `FULL`. Enabled slot labels follow the
+same token. An awake assertion adds a bolt token.
 `ui.tray.density: "chips"` paints `bar_label`, which leads with the
 same host and layout, then the keyboard and mouse marks.
 
@@ -292,7 +295,9 @@ active one is marked. Applying one runs `desk layout <name>`.
 | Auto layout  ⌘⌥U | `desk layout` — re-applies full or PBP from the live display |
 
 Polls about every 15s. Looks up `desk` via `bash -lc` with `~/.local/bin`
-on `PATH`.
+on `PATH`. Global chords are not inside the widget: `desk shortcuts
+install` writes them into `~/.config/hypr/bindings.lua`. See
+[Shortcuts](#shortcuts).
 
 Already cloned this repo on the machine? Enable the checkout instead of
 re-adding, then `omarchy plugin validate .`. Without Omarchy:
@@ -325,9 +330,11 @@ make install-menubar         # ~/Applications/DeskSwitchBar.app
 open -a DeskSwitchBar
 ```
 
-Refresh every ~15s and again when the panel opens. DualUp rows show
-Karabiner-style shortcuts: **⌘⌥⇧F** full, **⌘⌥⇧P** PBP, **⌘⌥U** auto
-layout. Those keys should run `desk full` / `pbp` / `layout`.
+Refresh every ~15s and again when the panel opens. The app registers
+the chords in [Shortcuts](#shortcuts) as global hotkeys: **⌘⌥⇧F** full,
+**⌘⌥⇧P** PBP, **⌘⌥U** auto layout, **⌘⌥⇧1/2/3** switch host,
+**⌘⌥1/2/…** named layouts, **⌘⌥⇧A** awake, **⌘⌥⌃1/2/3** secondary
+display. Rebuild with `make menubar` after pulling so the hotkeys exist.
 
 Login item:
 
@@ -354,7 +361,12 @@ desk pbp                 # USB PBP + hdmi1/dp inputs + OS layout
 desk pbp 50-50           # or 50 / 50/50 / on  (lgdualup also accepts full/off)
 desk full                # USB full + OS layout
 desk layout <name>       # apply layouts.<name> (full host, or PBP top/bottom)
-desk layout              # re-apply full or PBP from the live display geometry
+desk layout              # re-apply full or PBP from a real reading (never a FULL guess)
+desk secondary <host>    # put <host> on the secondary display (not the primary monitor)
+desk awake on|off|status|toggle
+desk awake on --all      # same verb on this host and every peer with ssh
+desk shortcuts           # print the chord table
+desk shortcuts install   # write Omarchy binds into ~/.config/hypr/bindings.lua
 desk watch               # HHKB leave → mouse away; USB appear → this host's channel
 desk watch --dry-run
 desk smarthome list      # devices (and entities when that API works)
@@ -497,6 +509,8 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.hosts.<id>.pre_switch` | Optional shell command run on that host before `desk to` changes its display input |
 | `adapters.display.relay_hosts` | Ordered host ids. When the local display adapter reports the device absent, try these peers and stop at the first success. `adapters.dualup.relay_hosts` is the same list. Each monitor can set its own |
 | `layouts` | Named arrangements. `desk layout <name>` applies one and stores it as `active_layout` |
+| `awake.schedule.start` / `end` | Local `HH:MM` window. `desk watch` holds awake inside it. Omit both to leave the schedule off |
+| `awake.inhibit` / `awake.release` | Optional commands that replace the platform assertion and run on the way back |
 | `adapters.displays` | Map of monitor id → display instance. Absent: the single `adapters.display` object is monitor id `display` |
 | `pbp_splits` | On a DualUp instance. `side` defaults to 5 (written). `stacked` defaults to keep: null does not write `0xD7`. A number other than 0 or 2 is written. 0 and 2 are never sent |
 | `adapters.display.relay_path` | Optional remote executable. Default is `$HOME/.local/lib/desk/<adapter id>` |
@@ -617,6 +631,30 @@ specific to one monitor. On success desk prints `display input <name> via <host>
 `relay_hosts` when the control device stays on the machine that runs
 `desk to`. A target with no input configured prints that and does not
 guess one.
+
+### Display mode
+
+The host that holds the monitor's control link is the only one that can
+read the mode (`get pbp` on the display adapter). A full-size framebuffer
+on any other host is not a mode. `desk status --json` does not report
+`full` from that guess.
+
+Order, on every host:
+
+1. Read the adapter locally when the control link is here.
+2. Otherwise ask `relay_hosts` over the same SSH path `desk to` and
+   `desk layout` use, and take the first real reading. The peer's active
+   layout name comes back with it.
+3. Otherwise use the active named layout. A layout with any PBP monitor
+   is `pbp`, and the bar shows that name and `PBP` (`MAC  mac-tower  PBP`).
+4. Otherwise use the last applied or observed mode in
+   `~/.local/state/desk/state.json` and mark it cached (`PBP~`,
+   `dualup_mode_cached: true`).
+5. Otherwise `unknown`.
+
+`status --json --local` skips the SSH read and still shows a cached or
+layout mode. `dualup_mode_source` is `observed`, `peer`, `applied`,
+`layout`, or `geometry` (a PBP-sized framebuffer only).
 
 ### Mouse relay
 
@@ -1024,6 +1062,80 @@ Host setup is `make install`, the config above, and on Linux one of
 outputs. macOS only needs `osascript`. `desk watch` (the existing login
 watcher) re-applies on hotplug, mode, and rotation.
 
+## Awake
+
+`desk awake` keeps this host from idle-sleeping, blanking, starting the
+screensaver, or auto-locking. Turning it off, or leaving the optional
+schedule, restores the normal timers. Nothing here needs sudo, and it
+does not change `pmset` or `sysadminctl`.
+
+```bash
+desk awake on
+desk awake off
+desk awake status
+desk awake toggle
+desk awake on --all          # this host, then each other host over SSH
+```
+
+```json
+"awake": { "schedule": { "start": "09:00", "end": "19:00" } }
+```
+
+`desk watch` is what applies the schedule. With a schedule and no manual
+choice, the assertion is held inside the window and dropped outside it.
+`desk awake on` holds it until `off`, and still drops it outside the
+window. `desk awake off` stays off even inside the window. A window that
+crosses midnight (`22:00`–`06:00`) is fine.
+
+The assertion is a process the watcher owns:
+
+| Platform | What it holds | Restore |
+|---|---|---|
+| macOS | `caffeinate -dimsu sleep 86400` (display, idle, disk, system, user-active). Restarted by `desk watch` if it exits | kill that process |
+| Linux / Omarchy | `omarchy toggle idle` when `omarchy` or `omarchy-shell` can report `stayAwake` (that is the stay-awake control; it covers the shell's screensaver and lock). Otherwise `systemctl --user stop hypridle`, started again on release. Plus `systemd-inhibit --what=idle:sleep` when that binary exists, so logind sleep is held too | toggle idle back only if desk turned it on; start hypridle only if desk stopped it; kill the inhibit process |
+
+`awake.inhibit` replaces the held command. `awake.release` is an optional
+shell command run on the way back to normal. `status --json` includes
+`awake` (`effective`, `reason`, `schedule`, `backend`, `running`). Both
+shells paint a bolt when it is on and a toggle (`⌘⌥⇧A`).
+
+## Shortcuts
+
+One set on every host. Numbers follow `host_list` order, then `layouts`
+order, and stop at 9. The macOS menu bar registers them as global hotkeys
+while DeskSwitchBar is running (Carbon, no Accessibility grant). Omarchy
+gets the same chords as SUPER+ALT+SHIFT from `desk shortcuts install`,
+which writes a marked block into `~/.config/hypr/bindings.lua` using
+`o.bind(..., hl.dsp.exec_cmd("bash -lc 'desk …'"))`.
+
+Hyprland treats modifier order as the same chord. A few of these are
+Omarchy defaults, so the snippet `hl.unbind`s only those before binding
+desk: silent move-to-workspace on SUPER+ALT+SHIFT+number, file manager
+in the current directory on SUPER+ALT+SHIFT+F, and Grok on
+SUPER+ALT+SHIFT+A. Layouts (SUPER+ALT+number), auto layout
+(SUPER+ALT+U), PBP (SUPER+ALT+SHIFT+P), and secondary
+(SUPER+ALT+CTRL+number) are not Omarchy defaults. `Super+Ctrl+I` stays
+Omarchy's own idle toggle.
+
+| Action | macOS | Hyprland | Command |
+|---|---|---|---|
+| Switch to host 1 / 2 / 3 (mac, linux, tower when that is the order) | ⌘⌥⇧1 / ⌘⌥⇧2 / ⌘⌥⇧3 | SUPER+ALT+SHIFT+1 / 2 / 3 | `desk to <host>` |
+| Named layout 1 / 2 / … | ⌘⌥1 / ⌘⌥2 / … | SUPER+ALT+1 / 2 / … | `desk layout <name>` |
+| Full | ⌘⌥⇧F | SUPER+ALT+SHIFT+F | `desk full` |
+| PBP | ⌘⌥⇧P | SUPER+ALT+SHIFT+P | `desk pbp` |
+| Auto layout | ⌘⌥U | SUPER+ALT+U | `desk layout` |
+| Awake toggle | ⌘⌥⇧A | SUPER+ALT+SHIFT+A | `desk awake toggle` |
+| Host 1 / 2 / 3 on the secondary display | ⌘⌥⌃1 / ⌘⌥⌃2 / ⌘⌥⌃3 | SUPER+ALT+CTRL+1 / 2 / 3 | `desk secondary <host>` |
+
+```bash
+desk shortcuts
+desk shortcuts install
+```
+
+The reference block is also in
+[`linux/omarchy/bindings.lua`](linux/omarchy/bindings.lua). Re-run
+install after adding a host or a layout. No sudo.
+
 ## Troubleshooting
 
 **`desk status` first.** Check `target_hint` / `bar_label`,
@@ -1068,6 +1180,14 @@ not have the radio.
 
 **Mouse hidraw denied (Linux).** udev rule `42-logitech-hidpp.rules`, user
 in `input`, then a new login.
+
+**Bar shows `FULL` while the panel is in PBP.** That host does not hold
+the monitor link, so a full-size framebuffer is not the mode. Set
+`adapters.display.relay_hosts` (and `ssh` on those hosts) so status can
+ask the machine that does. Until a reading or a named layout exists,
+the bar says `unknown`, not `FULL`. A remembered mode is marked `~` /
+`cached`. Applying `desk layout mac-tower` (or whichever name is the
+split) shows that name and `PBP`.
 
 **Display input not found.** The control device is only on the host that
 holds the monitor's USB upstream. `desk to` runs the display adapter

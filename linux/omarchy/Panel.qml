@@ -119,7 +119,10 @@ Panel {
     const data = parsedStatus()
     const mode = data && data.dualup_mode ? String(data.dualup_mode) : root.dualupMode
     const inputs = data && data.dualup_inputs ? data.dualup_inputs : null
-    const label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "unknown")
+    const cached = data && data.dualup_mode_cached === true
+    let label = mode === "pbp" ? "PBP" : (mode === "full" ? "FULL" : "unknown")
+    if (cached && label !== "unknown")
+      label += " · cached"
     const parts = []
     if (inputs) {
       const keys = Object.keys(inputs)
@@ -171,6 +174,47 @@ Panel {
 
   // Stub-read slot flavors. macOS HUD paints by kind; this panel still
   // uses the dump layout. Do not fork the schema — same tokens as core.
+  function shortcutMac(argv) {
+    const data = root.parsedStatus()
+    const list = data && Array.isArray(data.shortcuts) ? data.shortcuts : []
+    const want = (argv || []).join("\u0000")
+    for (let i = 0; i < list.length; i++) {
+      const args = list[i] && list[i].argv
+      if (!Array.isArray(args))
+        continue
+      if (args.map(function(part) { return String(part) }).join("\u0000") === want)
+        return String(list[i].mac || "")
+    }
+    return ""
+  }
+
+  function secondaryShortcuts() {
+    const data = root.parsedStatus()
+    const list = data && Array.isArray(data.shortcuts) ? data.shortcuts : []
+    const out = []
+    for (let i = 0; i < list.length; i++) {
+      const row = list[i] || {}
+      if (String(row.id || "").indexOf("secondary:") === 0 && Array.isArray(row.argv))
+        out.push(row)
+    }
+    return out
+  }
+
+  function shortcutSuffix(argv) {
+    const mark = root.shortcutMac(argv)
+    return mark ? "    " + mark : ""
+  }
+
+  function glyphMark(glyph) {
+    const map = {
+      "awake.on": "⚡",
+      "awake.off": "☾",
+      "display.split": "▣",
+      "display.full": "▭"
+    }
+    return map[String(glyph || "")] || String(glyph || "")
+  }
+
   function slotKind(slot) {
     if (slot && slot.kind)
       return String(slot.kind)
@@ -179,7 +223,7 @@ Panel {
       return "face"
     if (id === "weather")
       return "chip"
-    if (id === "lights")
+    if (id === "lights" || id === "awake")
       return "toggle"
     if (id === "dualup")
       return "mode"
@@ -277,7 +321,7 @@ Panel {
         if (!Array.isArray(argv) || !argv.length)
           continue
         out.push({
-          label: String(action.label || argv[0]),
+          label: String(action.label || argv[0]) + (action.shortcut ? "    " + action.shortcut : ""),
           args: argv.map(function(part) { return String(part) }).join(" ")
         })
       }
@@ -419,7 +463,7 @@ Panel {
           Repeater {
             model: root.chipSlots()
             delegate: StatusChip {
-              chipLabel: String(modelData.glyph || "")
+              chipLabel: root.glyphMark(modelData.glyph)
               chipValue: String(modelData.label || "") + (modelData.detail ? " · " + modelData.detail : "")
               chipOk: modelData.hot === true || !!modelData.label
             }
@@ -452,7 +496,7 @@ Panel {
         Repeater {
           model: root.hosts || []
           delegate: DeskButton {
-            label: (modelData.current ? "● " : "") + root.hostTitle(modelData.id)
+            label: (modelData.current ? "● " : "") + root.hostTitle(modelData.id) + root.shortcutSuffix(["to", modelData.id])
             current: modelData.current === true
             onClicked: root.actionRequested("to " + root.quoteArg(modelData.id))
           }
@@ -469,10 +513,29 @@ Panel {
           font.bold: true
         }
 
+        Text {
+          visible: root.secondaryShortcuts().length
+          width: parent.width
+          text: "Secondary"
+          color: root.barForeground
+          opacity: 0.65
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+        }
+
+        Repeater {
+          model: root.secondaryShortcuts()
+          delegate: DeskButton {
+            label: modelData.label + (modelData.mac ? "    " + modelData.mac : "")
+            onClicked: root.actionRequested((modelData.argv || []).join(" "))
+          }
+        }
+
         Repeater {
           model: root.layouts || []
           delegate: DeskButton {
-            label: (modelData.active ? "● " : "") + modelData.name
+            label: (modelData.active ? "● " : "") + modelData.name + root.shortcutSuffix(["layout", modelData.name])
             current: modelData.active === true
             onClicked: root.actionRequested("layout " + root.quoteArg(modelData.name))
           }
