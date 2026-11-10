@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+from datetime import datetime
 import shlex
 import subprocess
 import sys
@@ -1486,7 +1487,9 @@ class HintAndCacheTests(unittest.TestCase):
             "target_channel": 2,
         }
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(ds, "cache_dir", return_value=Path(tmp)), mock.patch.object(
+            with mock.patch.object(ds, "cache_dir", return_value=Path(tmp)), mock.patch.dict(
+                os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}
+            ), mock.patch.object(
                 ds,
                 "hhkb_probe",
                 return_value={
@@ -5826,6 +5829,326 @@ class HardwareCoreTests(unittest.TestCase):
             ds.attach_hardware(disabled, adapters, "linux")
         popen_off.assert_not_called()
         invoke_off.assert_not_called()
+
+
+class DisplayModeReportTests(unittest.TestCase):
+    def test_parse_pbp_read_splits_full_from_on(self) -> None:
+        self.assertEqual(ds.parse_pbp_read("pbp 0xD7 @ 0x51 = 1 (0x01)\n"), "full")
+        self.assertEqual(ds.parse_pbp_read("pbp 0xD7 @ 0x51 = 0 (0x00)\n"), "pbp")
+        self.assertEqual(ds.parse_pbp_read("pbp 0xD7 @ 0x51 = 5 (0x05)\n"), "pbp")
+        self.assertIsNone(ds.parse_pbp_read("no VCP reply\n"))
+
+    def test_geometry_full_is_not_a_mode(self) -> None:
+        self.assertEqual(
+            ds.detect_dualup_mode_macos("Resolution: 2880x2560\n"),
+            "full",
+        )
+        with mock.patch.object(ds, "SYSTEM", "Darwin"), mock.patch.object(
+            ds, "detect_dualup_mode_macos", return_value="full"
+        ):
+            self.assertEqual(ds.detect_dualup_mode({}), "unknown")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "detect_dualup_mode", return_value="full"
+            ):
+                report = ds.reported_display_mode(
+                    {"this_host": "mac", "hosts": {}},
+                    local_only=True,
+                    active_layout=None,
+                    dual_usb=False,
+                    dual_path=None,
+                )
+        self.assertEqual(report["mode"], "unknown")
+        self.assertNotEqual(report["mode"], "full")
+
+    def test_named_pbp_layout_shows_name_and_pbp(self) -> None:
+        cfg = {
+            "this_host": "mac",
+            "hosts": {"mac": {"channel": 1}, "tower": {"channel": 3}},
+            "layouts": {
+                "mac-tower": {
+                    "monitors": {
+                        "display": {"mode": "pbp", "top": "mac", "bottom": "tower", "split": "stacked"}
+                    }
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}):
+                report = ds.reported_display_mode(
+                    cfg,
+                    local_only=True,
+                    active_layout="mac-tower",
+                    dual_usb=False,
+                    dual_path=None,
+                )
+        self.assertEqual(report["mode"], "pbp")
+        self.assertEqual(report["source"], "layout")
+        self.assertTrue(report["cached"])
+        strip = ds.format_bar_strip(
+            {
+                "target_hint": "MAC",
+                "dualup_mode": "pbp",
+                "dualup_mode_cached": True,
+                "active_layout": "mac-tower",
+            }
+        )
+        self.assertEqual(strip["title"], "MAC  mac-tower  PBP~")
+        self.assertEqual(strip["layout"], "mac-tower")
+        slot = ds.display_slot(
+            {"dualup_mode": "pbp", "dualup_mode_cached": True, "active_layout": "mac-tower"}
+        )
+        self.assertIsNotNone(slot)
+        assert slot is not None
+        self.assertEqual(slot["label"], "mac-tower  PBP~")
+
+    def test_applied_record_is_cached_and_beats_a_full_guess(self) -> None:
+        cfg = {"this_host": "mac", "hosts": {"mac": {"channel": 1}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "detect_dualup_mode", return_value="full"
+            ):
+                ds.save_display_record("pbp", "applied", host="tower", layout="mac-tower")
+                report = ds.reported_display_mode(
+                    cfg,
+                    local_only=True,
+                    active_layout=None,
+                    dual_usb=False,
+                    dual_path=None,
+                )
+        self.assertEqual(report["mode"], "pbp")
+        self.assertTrue(report["cached"])
+        self.assertEqual(report["layout"], "mac-tower")
+
+    def test_peer_read_reports_the_panel_mode(self) -> None:
+        cfg = {
+            "this_host": "mac",
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "mac.example"},
+                "tower": {"channel": 3, "ssh": "tower.example"},
+            },
+            "_display_relay_hosts": ["tower"],
+            "_display_backend": "display",
+        }
+        payload = (
+            "pbp 0xD7 @ 0x51 = 0 (0x00)\n"
+            "--DESK--\n"
+            + json.dumps({"active_layout": "mac-tower", "dualup_usb": True, "this_host": "tower"})
+        )
+
+        def fake_run(cmd, timeout=3.0):
+            self.assertEqual(cmd[0], "ssh")
+            self.assertIn("tower.example", cmd)
+            self.assertIn("get pbp", cmd[-1])
+            return subprocess.CompletedProcess(cmd, 0, payload, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "detect_dualup_mode", return_value="full"):
+                report = ds.reported_display_mode(
+                    cfg,
+                    local_only=False,
+                    active_layout=None,
+                    peer=None,
+                    dual_usb=False,
+                    dual_path=None,
+                )
+                saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
+        self.assertEqual(report["mode"], "pbp")
+        self.assertEqual(report["source"], "peer")
+        self.assertFalse(report["cached"])
+        self.assertEqual(report["host"], "tower")
+        self.assertEqual(report["layout"], "mac-tower")
+        self.assertEqual(saved["active_layout"], "mac-tower")
+        self.assertEqual(saved["display_mode"], "pbp")
+
+
+class AwakeTests(unittest.TestCase):
+    def _cfg(self, **extra: object) -> dict:
+        cfg = {
+            "this_host": "mac",
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "mac.example"},
+                "linux": {"channel": 2, "ssh": "linux.example"},
+            },
+            "_awake": {"start": "09:00", "end": "19:00", "inhibit": "", "release": "", "backend": ""},
+        }
+        cfg.update(extra)
+        return cfg
+
+    def test_schedule_and_manual_switch(self) -> None:
+        noon = datetime(2026, 11, 10, 12, 0)
+        night = datetime(2026, 11, 10, 21, 30)
+        cfg = self._cfg()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}):
+                auto = ds.awake_desired(cfg, now=noon)
+                self.assertTrue(auto["effective"])
+                self.assertEqual(auto["reason"], "schedule")
+                outside = ds.awake_desired(cfg, now=night)
+                self.assertFalse(outside["effective"])
+                self.assertEqual(outside["reason"], "outside-schedule")
+                ds.set_awake_manual("off")
+                held_off = ds.awake_desired(cfg, now=noon)
+                self.assertFalse(held_off["effective"])
+                self.assertEqual(held_off["reason"], "off")
+                ds.set_awake_manual("on")
+                forced = ds.awake_desired(cfg, now=night)
+                self.assertFalse(forced["effective"])
+                self.assertEqual(forced["reason"], "outside-schedule")
+                plain = self._cfg(_awake={"start": "", "end": "", "inhibit": "", "release": "", "backend": ""})
+                self.assertTrue(ds.awake_desired(plain, now=night)["effective"])
+                self.assertEqual(ds.awake_desired(plain, now=night)["reason"], "on")
+
+    def test_on_spawns_a_user_assertion_and_off_releases_it(self) -> None:
+        cfg = self._cfg(_awake={"start": "", "end": "", "inhibit": "", "release": "", "backend": ""})
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "SYSTEM", "Darwin"
+            ), mock.patch.object(ds.shutil, "which", return_value="/usr/bin/caffeinate"), mock.patch.object(
+                ds.subprocess, "Popen"
+            ) as popen, mock.patch.object(ds, "_pid_is_inhibitor", return_value=False), mock.patch.object(
+                ds, "_linux_hold_idle"
+            ):
+                popen.return_value.pid = 4242
+                with mock.patch("sys.stdout", io.StringIO()):
+                    rc = ds.cmd_awake(cfg, "on")
+                    self.assertEqual(rc, 0)
+                    argv = popen.call_args.args[0]
+                    self.assertEqual(argv[:2], ["caffeinate", "-dimsu"])
+                    self.assertNotIn("pmset", argv)
+                    self.assertNotIn("sudo", argv)
+                    self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
+                    rc = ds.cmd_awake(cfg, "off")
+                self.assertEqual(rc, 0)
+                saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
+        self.assertEqual(saved["awake_manual"], "off")
+
+    def test_all_relays_the_verb(self) -> None:
+        cfg = self._cfg(_awake={"start": "", "end": "", "inhibit": "", "release": "", "backend": ""})
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "awake on\n", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "_spawn_inhibitor", return_value=None), mock.patch.object(
+                ds, "_linux_hold_idle"
+            ), mock.patch("sys.stdout", io.StringIO()):
+                rc = ds.cmd_awake(cfg, "on", all_hosts=True)
+        self.assertEqual(rc, 0)
+        ssh = [cmd for cmd in calls if cmd and cmd[0] == "ssh"]
+        self.assertEqual(len(ssh), 1)
+        self.assertIn("linux.example", ssh[0])
+        self.assertIn("desk awake on", ssh[0][-1])
+        self.assertNotIn("sudo", ssh[0][-1])
+
+    def test_config_schedule_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"awake": {"schedule": {"start": "09:00", "end": "19:00"}}}))
+            with mock.patch.object(ds, "CONFIG_CANDIDATES", (path,)):
+                cfg = ds.load_config()
+        self.assertEqual(cfg["_awake"]["start"], "09:00")
+        self.assertEqual(cfg["_awake"]["end"], "19:00")
+
+
+class ShortcutAndSecondaryTests(unittest.TestCase):
+    def _cfg(self) -> dict:
+        return {
+            "this_host": "mac",
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "mac.example", "input": "hdmi1"},
+                "linux": {"channel": 2, "ssh": "linux.example", "input": "dp"},
+                "tower": {"channel": 3, "ssh": "tower.example", "input": "hdmi2"},
+            },
+            "adapters": {
+                "displays": {
+                    "main": {
+                        "backend": "lgdualup",
+                        "primary": True,
+                        "inputs": {"mac": "hdmi1", "linux": "dp", "tower": "hdmi2"},
+                    },
+                    "side": {
+                        "backend": "ddc",
+                        "inputs": {"mac": "0x11", "linux": "0x12", "tower": "0x0f"},
+                    },
+                }
+            },
+            "layouts": {
+                "mac-tower": {
+                    "monitors": {
+                        "main": {"mode": "pbp", "top": "mac", "bottom": "tower", "split": "stacked"}
+                    }
+                }
+            },
+        }
+
+    def test_shortcuts_cover_hosts_layouts_display_awake_and_secondary(self) -> None:
+        rows = ds.public_shortcuts(self._cfg())
+        by_id = {row["id"]: row for row in rows}
+        self.assertEqual(by_id["to:mac"]["mac"], "⌘⌥⇧1")
+        self.assertEqual(by_id["to:linux"]["hypr"], "SUPER + ALT + SHIFT + 2")
+        self.assertEqual(by_id["to:tower"]["argv"], ["to", "tower"])
+        self.assertEqual(by_id["layout:mac-tower"]["mac"], "⌘⌥1")
+        self.assertEqual(by_id["full"]["mac"], "⌘⌥⇧F")
+        self.assertEqual(by_id["pbp"]["hypr"], "SUPER + ALT + SHIFT + P")
+        self.assertEqual(by_id["layout"]["mac"], "⌘⌥U")
+        self.assertEqual(by_id["awake"]["argv"], ["awake", "toggle"])
+        self.assertEqual(by_id["awake"]["mac"], "⌘⌥⇧A")
+        self.assertEqual(by_id["secondary:tower"]["argv"], ["secondary", "tower"])
+        self.assertIn("CTRL", by_id["secondary:mac"]["hypr"])
+        lua = ds.shortcuts_lua(self._cfg())
+        self.assertIn('hl.unbind("SUPER + ALT + SHIFT + F")', lua)
+        self.assertIn('hl.unbind("SUPER + SHIFT + ALT + A")', lua)
+        self.assertIn("hl.dsp.exec_cmd(", lua)
+        self.assertIn("o.bind(", lua)
+        self.assertIn("desk to tower", lua)
+        self.assertNotIn("sudo", lua)
+
+    def test_install_replaces_the_marked_block(self) -> None:
+        cfg = self._cfg()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bindings = home / ".config" / "hypr" / "bindings.lua"
+            bindings.parent.mkdir(parents=True)
+            bindings.write_text('o.bind("SUPER + RETURN", "Terminal", "x")\n')
+            with mock.patch.object(ds.Path, "home", return_value=home), mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(ds.install_shortcuts(cfg), 0)
+                self.assertEqual(ds.install_shortcuts(cfg), 0)
+            text = bindings.read_text()
+        self.assertIn('o.bind("SUPER + RETURN", "Terminal", "x")', text)
+        self.assertEqual(text.count("-- desk:shortcuts:begin"), 1)
+        self.assertIn("desk awake toggle", text)
+
+    def test_secondary_targets_the_non_primary_monitor(self) -> None:
+        cfg = self._cfg()
+        self.assertEqual(ds.secondary_monitor_id(cfg), "side")
+        seen: list[list[dict]] = []
+
+        def fake_execute(_cfg, steps):
+            seen.append(steps)
+            return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "execute_layout_steps", side_effect=fake_execute
+            ), mock.patch("sys.stdout", io.StringIO()):
+                rc = ds.cmd_secondary(cfg, "tower")
+        self.assertEqual(rc, 0)
+        ops = [(step.get("op"), step.get("args"), step.get("monitor")) for step in seen[0]]
+        self.assertIn(("adapter", ["input", "0x0f"], "side"), ops)
+        self.assertTrue(all(step.get("monitor") in ("", "side") for step in seen[0]))
+
+    def test_secondary_without_a_second_monitor(self) -> None:
+        cfg = {"this_host": "mac", "hosts": {"mac": {"channel": 1, "input": "hdmi1"}}}
+        with mock.patch("sys.stdout", io.StringIO()):
+            rc = ds.cmd_secondary(cfg, "mac")
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

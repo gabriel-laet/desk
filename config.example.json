@@ -83,6 +83,12 @@
   "sleep_gap_s": 3.0,
   "switch_retries": 8,
   "switch_retry_delay_s": 0.6,
+  "awake": {
+    "schedule": {
+      "start": "09:00",
+      "end": "19:00"
+    }
+  },
   "layouts": {
     "focus": {
       "monitors": {

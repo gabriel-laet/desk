@@ -32,6 +32,11 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
     desk full
     desk layout <name>     # named monitors: full host, or PBP top/bottom
     desk layout            # re-apply full or PBP from the live display
+    desk secondary <host>  # put <host> on the secondary display
+    desk awake on|off|status|toggle
+    desk awake on --all    # same verb on every host with an ssh target
+    desk shortcuts         # print host / layout / display / awake chords
+    desk shortcuts install # write the Omarchy Lua binds into bindings.lua
     desk smarthome list     # smart-home devices (adapter)
     desk smarthome status
     desk smarthome on|off   # desk light via the bound adapter
@@ -57,16 +62,18 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 SYSTEM = platform.system()
 HERE = Path(__file__).resolve().parent
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 ADAPTER_API_VERSION = 1
 LAYOUT_FULL_MODES = ("full", "off", "none", "solo")
 PBP_INPUT_DEFAULTS = {"linux": "dp", "mac": "hdmi1"}  # Studio HDMI1, Omarchy DisplayPort
@@ -80,6 +87,11 @@ HHKB_VID_DEFAULT = 0x04FE
 HHKB_PID_DEFAULT = 0x0016
 MOUSE_CACHE_TTL_S = 24 * 3600  # last-known channel until contradicted (wake lag / other host)
 PEER_CACHE_TTL_S = 20.0
+# A live display read (local USB or the peer that holds it) stays fresh
+# this long so a 15s shell poll does not open SSH every time.
+DISPLAY_READ_TTL_S = 20.0
+# Sources that are allowed to say FULL. A framebuffer-sized guess is not one.
+DISPLAY_MODE_SOURCES = ("observed", "peer", "applied", "layout")
 # Relay never waits on a password prompt. ConnectTimeout matches the
 # brief the display-input hop can spend on a dead peer.
 SSH_RELAY_ARGS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"]
@@ -846,6 +858,15 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
     cfg["_dualup_layout_settle_s"] = float(
         LAYOUT_DEFAULT_SETTLE_S if raw_settle is None else raw_settle
     )
+    awake = _as_dict(user.get("awake"))
+    schedule = _as_dict(awake.get("schedule"))
+    cfg["_awake"] = {
+        "start": str(schedule.get("start") or "").strip(),
+        "end": str(schedule.get("end") or "").strip(),
+        "inhibit": str(awake.get("inhibit") or "").strip(),
+        "release": str(awake.get("release") or "").strip(),
+        "backend": str(awake.get("backend") or "").strip(),
+    }
     apply_ui_section(cfg, ui)
     return cfg
 
@@ -2460,6 +2481,8 @@ def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
         return rc
     if rc != 0:
         return rc
+    if verb in ("full", "pbp"):
+        save_display_record(verb, "applied", host=_this_host_id(cfg))
     if verb == "pbp":
         rc = rc or dualup_assign_pbp_inputs(cfg)
     adapters = display_adapter_cfg(cfg)
@@ -3256,6 +3279,8 @@ def cmd_pbp(cfg: dict, mode: str | None) -> int:
         chosen,
         missing="lgdualup not on PATH — DualUp PBP needs `make install`",
     )
+    if rc == 0:
+        clear_active_layout()
     _after_display_change(cfg)
     return rc
 
@@ -3266,6 +3291,8 @@ def cmd_full(cfg: dict) -> int:
         "full",
         missing="lgdualup not on PATH — DualUp full needs `make install`",
     )
+    if rc == 0:
+        clear_active_layout()
     _after_display_change(cfg)
     return rc
 
@@ -3279,10 +3306,24 @@ def cmd_layout(cfg: dict, name: str | None = None) -> int:
         if rc != 2:
             _after_display_change(cfg)
         return rc
-    mode = detect_dualup_mode(cfg)
+    path = lgdualup_path(cfg)
+    report = reported_display_mode(
+        cfg,
+        local_only=False,
+        active_layout=None,
+        dual_path=path,
+        dual_usb=path is not None,
+    )
+    # Auto layout follows a live or remembered mode. It does not treat a
+    # full framebuffer as full, and it does not re-enter the active layout
+    # (pass active_layout=None above) so a named arrangement is not a loop.
+    mode = report.get("mode")
     if mode == "full":
         return cmd_full(cfg)
-    return cmd_pbp(cfg, None)
+    if mode == "pbp":
+        return cmd_pbp(cfg, None)
+    print("display mode unknown — not guessing full")
+    return 1
 
 
 DUALUP_FULL_RES = {(2880, 2560), (2560, 2880)}
@@ -3386,16 +3427,331 @@ def detect_dualup_mode_macos(placer_list: str | None = None) -> str:
 
 
 def detect_dualup_mode(cfg: dict | None = None) -> str:
+    """Framebuffer size. Only a PBP-sized mode is returned.
+
+    A full-sized framebuffer is not the panel mode. The host that does
+    not hold the monitor's control link often still reports the full
+    raster while the panel is in PBP. An old cache of that guess is not
+    replayed. `reported_display_mode` is what status shows.
+    """
     if SYSTEM == "Linux":
         mode = detect_dualup_mode_linux()
     elif SYSTEM == "Darwin":
         mode = detect_dualup_mode_macos()
     else:
         mode = "unknown"
-    if mode in ("full", "pbp"):
-        save_dualup_mode_cache(mode)
-        return mode
-    return load_dualup_mode_cache() or "unknown"
+    return "pbp" if mode == "pbp" else "unknown"
+
+
+_PBP_READ_RE = re.compile(
+    r"pbp\s+0x[0-9a-fA-F]+\s+@\s+0x[0-9a-fA-F]+\s+=\s+(\d+)",
+    re.I,
+)
+
+
+def parse_pbp_read(text: str) -> str | None:
+    """Map a display-adapter `get pbp` line to full or pbp.
+
+    Value 1 is PBP off (full). Every other successful reading, including
+    0, means PBP is on. The adapter owns the code; core only splits those
+    two states.
+    """
+    match = _PBP_READ_RE.search(text or "")
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return None
+    return "full" if value == 1 else "pbp"
+
+
+def layout_mode_of(cfg: dict, name: str | None) -> str | None:
+    """Mode implied by a named layout. PBP wins when any monitor is split."""
+    items = monitor_assignment(cfg, name)
+    if not items:
+        return None
+    if any(isinstance(item, dict) and item.get("mode") == "pbp" for item in items):
+        return "pbp"
+    if any(isinstance(item, dict) and item.get("mode") == "full" for item in items):
+        return "full"
+    return None
+
+
+def load_display_record() -> dict:
+    raw = load_desk_state()
+    mode = str(raw.get("display_mode") or "").strip().lower()
+    source = str(raw.get("display_mode_source") or "").strip().lower()
+    if mode not in ("full", "pbp") or source not in DISPLAY_MODE_SOURCES:
+        mode = ""
+        source = ""
+    try:
+        ts = float(raw.get("display_mode_ts") or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    layout = str(raw.get("active_layout") or "").strip()
+    host = str(raw.get("display_mode_host") or "").strip()
+    return {
+        "mode": mode,
+        "source": source,
+        "host": host,
+        "ts": ts,
+        "layout": layout,
+    }
+
+
+def save_display_record(
+    mode: str | None,
+    source: str,
+    *,
+    host: str = "",
+    layout: str | None = None,
+) -> None:
+    """Remember an applied or observed mode. `layout=""` clears the name."""
+    state = load_desk_state()
+    key = str(mode or "").strip().lower()
+    origin = str(source or "").strip().lower()
+    if key in ("full", "pbp") and origin in DISPLAY_MODE_SOURCES:
+        state["display_mode"] = key
+        state["display_mode_source"] = origin
+        state["display_mode_host"] = str(host or "").strip()
+        state["display_mode_ts"] = time.time()
+    if layout is not None:
+        state["active_layout"] = str(layout).strip()
+        state["active_layout_ts"] = time.time()
+    save_desk_state(state)
+
+
+def clear_active_layout() -> None:
+    state = load_desk_state()
+    state["active_layout"] = ""
+    state["active_layout_ts"] = time.time()
+    save_desk_state(state)
+
+
+def _display_report(
+    mode: str,
+    source: str,
+    *,
+    cached: bool = False,
+    host: str = "",
+    layout: str = "",
+) -> dict:
+    return {
+        "mode": mode if mode in ("full", "pbp") else "unknown",
+        "source": source or "unknown",
+        "cached": bool(cached),
+        "host": host or "",
+        "layout": layout or "",
+    }
+
+
+def read_adapter_pbp(argv: list[str], *, timeout: float = 6.0) -> str | None:
+    """Run `get pbp` and parse it. Absent device and other failures are None."""
+    try:
+        proc = run(argv, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if proc.returncode != 0 and parse_pbp_read(text) is None:
+        return None
+    return parse_pbp_read(text)
+
+
+def mode_relay_hosts(cfg: dict) -> list[str]:
+    """Peers that may hold the monitor link. Same list `desk to` relays on."""
+    hosts = display_relay_host_ids(cfg)
+    if hosts:
+        return hosts
+    for inst in display_instances(cfg):
+        raw = inst.get("relay_hosts")
+        if inst.get("primary") and raw:
+            return list(raw)
+    return []
+
+
+def _split_peer_mode_payload(text: str) -> tuple[str, dict | None]:
+    marker = "\n--DESK--\n"
+    head, _, tail = (text or "").partition(marker)
+    if not tail:
+        return text or "", None
+    data = None
+    try:
+        parsed = json.loads(tail.strip() or "{}")
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        data = parsed
+    return head, data
+
+
+def read_display_mode_from_peers(cfg: dict) -> dict | None:
+    """Ask each relay host to read the panel. First real reading wins.
+
+    The command is the display adapter `get pbp`, then that host's
+    `desk status --json --local` so the layout name travels with the mode.
+    """
+    adapter_id = display_adapter_id(cfg)
+    remote_path = display_relay_path(cfg)
+    if not adapter_id and not remote_path:
+        path = lgdualup_path(cfg)
+        adapter_id = path.name if path is not None else ""
+    if not adapter_id and not remote_path:
+        return None
+    this_id = _this_host_id(cfg)
+    invocation = remote_adapter_invocation(adapter_id or "display", ["get", "pbp"], remote_path)
+    remote = (
+        f"{invocation}; printf '\\n--DESK--\\n'; "
+        "export PATH=\"$HOME/.local/bin:$PATH\"; "
+        "desk status --json --local 2>/dev/null || true"
+    )
+    for host_id in mode_relay_hosts(cfg):
+        if host_id == this_id:
+            continue
+        target = host_text(cfg, host_id, "ssh")
+        if not target:
+            continue
+        try:
+            proc = run(
+                ssh_argv(
+                    target,
+                    remote,
+                    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=2", "-o", "ConnectionAttempts=1"],
+                ),
+                timeout=8.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        head, peer_state = _split_peer_mode_payload(proc.stdout or "")
+        mode = parse_pbp_read(f"{head}\n{proc.stderr or ''}")
+        if mode is None and isinstance(peer_state, dict):
+            # Trust the peer's own report only when it held the link or
+            # named an authoritative source. A full-size guess does not count.
+            peer_mode = str(peer_state.get("dualup_mode") or "").strip().lower()
+            peer_source = str(peer_state.get("dualup_mode_source") or "").strip().lower()
+            peer_usb = bool(peer_state.get("dualup_usb"))
+            if peer_mode == "pbp" and (peer_usb or peer_source in DISPLAY_MODE_SOURCES or peer_source == "geometry"):
+                mode = "pbp"
+            elif peer_mode == "full" and (peer_usb or peer_source in DISPLAY_MODE_SOURCES):
+                mode = "full"
+        if mode is None:
+            continue
+        layout = ""
+        if isinstance(peer_state, dict):
+            layout = str(peer_state.get("active_layout") or "").strip()
+        return _display_report(mode, "peer", cached=False, host=host_id, layout=layout)
+    return None
+
+
+def _peer_status_mode(peer: dict | None) -> dict | None:
+    """Use a status peek when that peer actually read the panel."""
+    if not isinstance(peer, dict) or not peer.get("reachable"):
+        return None
+    mode = str(peer.get("dualup_mode") or "").strip().lower()
+    source = str(peer.get("dualup_mode_source") or "").strip().lower()
+    usb = bool(peer.get("dualup_usb"))
+    if mode == "full" and not usb and source not in DISPLAY_MODE_SOURCES:
+        mode = ""
+    if mode == "pbp" and not usb and source not in DISPLAY_MODE_SOURCES and source != "geometry":
+        mode = ""
+    if mode not in ("full", "pbp"):
+        return None
+    layout = str(peer.get("active_layout") or "").strip()
+    host = str(peer.get("this_host") or "").strip()
+    cached = bool(peer.get("dualup_mode_cached"))
+    origin = source if source in DISPLAY_MODE_SOURCES else ("observed" if usb else "peer")
+    return _display_report(mode, origin, cached=cached, host=host, layout=layout)
+
+
+def reported_display_mode(
+    cfg: dict,
+    *,
+    local_only: bool = False,
+    active_layout: str | None = None,
+    peer: dict | None = None,
+    dual_path: Path | None = None,
+    dual_usb: bool = False,
+) -> dict:
+    """Mode every host can show.
+
+    Order: a local adapter read, a relay read on the peer that holds the
+    link, that peer's status, the active layout, then the last applied or
+    observed record. A full framebuffer is never the answer. Anything that
+    is not a read from this call is marked cached.
+    """
+    layout_name = str(active_layout or "").strip()
+    if dual_usb and dual_path is not None:
+        live = read_adapter_pbp([str(dual_path), "get", "pbp"])
+        if live in ("full", "pbp"):
+            save_display_record(live, "observed", host=_this_host_id(cfg), layout=None)
+            return _display_report(live, "observed", cached=False, host=_this_host_id(cfg))
+
+    if not local_only:
+        record = load_display_record()
+        age = time.time() - float(record.get("ts") or 0)
+        if (
+            record.get("mode") in ("full", "pbp")
+            and record.get("source") in ("observed", "peer")
+            and 0 <= age <= DISPLAY_READ_TTL_S
+        ):
+            return _display_report(
+                str(record["mode"]),
+                str(record["source"]),
+                cached=False,
+                host=str(record.get("host") or ""),
+                layout=layout_name or str(record.get("layout") or ""),
+            )
+        relayed = read_display_mode_from_peers(cfg)
+        if relayed:
+            learned = str(relayed.get("layout") or "").strip()
+            keep_layout = layout_name or learned
+            save_display_record(
+                relayed["mode"],
+                "peer",
+                host=str(relayed.get("host") or ""),
+                layout=learned if learned and not layout_name else None,
+            )
+            relayed["layout"] = keep_layout
+            return relayed
+        peeked = _peer_status_mode(peer)
+        if peeked:
+            learned = str(peeked.get("layout") or "").strip()
+            save_display_record(
+                peeked["mode"],
+                "peer",
+                host=str(peeked.get("host") or ""),
+                layout=learned if learned and not layout_name else None,
+            )
+            if layout_name:
+                peeked["layout"] = layout_name
+            elif learned:
+                peeked["layout"] = learned
+            return peeked
+
+    derived = layout_mode_of(cfg, layout_name)
+    if derived:
+        return _display_report(derived, "layout", cached=True, layout=layout_name)
+
+    record = load_display_record()
+    if record.get("mode") in ("full", "pbp"):
+        remembered = str(record.get("layout") or "")
+        show_layout = layout_name or remembered
+        if remembered and not layout_name:
+            derived = layout_mode_of(cfg, remembered)
+            mode = derived or str(record["mode"])
+        else:
+            mode = str(record["mode"])
+        return _display_report(
+            mode,
+            str(record.get("source") or "applied"),
+            cached=True,
+            host=str(record.get("host") or ""),
+            layout=show_layout,
+        )
+
+    if detect_dualup_mode(cfg) == "pbp":
+        return _display_report("pbp", "geometry", cached=False)
+    return _display_report("unknown", "unknown", cached=False)
 
 
 def dualup_inputs_map(cfg: dict) -> dict:
@@ -3474,6 +3830,10 @@ def slim_peer_status(data: dict, peer: str) -> dict:
         "mouse_online": data.get("mouse_online"),
         "target_hint": data.get("target_hint"),
         "dualup_mode": data.get("dualup_mode"),
+        "dualup_mode_source": data.get("dualup_mode_source"),
+        "dualup_mode_cached": data.get("dualup_mode_cached"),
+        "dualup_usb": data.get("dualup_usb"),
+        "active_layout": data.get("active_layout"),
     }
 
 
@@ -3553,9 +3913,14 @@ def format_bar_strip(state: dict) -> dict:
     mode = str(state.get("dualup_mode") or "unknown").lower()
     if mode in ("full", "pbp"):
         strip["display"] = mode
+    if state.get("dualup_mode_cached"):
+        strip["cached"] = "1"
     layout = str(state.get("active_layout") or "").strip()
     if layout:
         strip["layout"] = layout
+    awake = state.get("awake") if isinstance(state.get("awake"), dict) else None
+    if awake and awake.get("effective"):
+        strip["awake"] = "on"
     # Lights stay out of the default strip. Opt in with ui.tray.lights.
     if state.get("_tray_lights"):
         lights = ((state.get("adapters") or {}).get("smarthome") or {}).get("lights") or []
@@ -3636,44 +4001,71 @@ def normalize_slot(raw: object) -> dict | None:
             argv = item.get("argv")
             if not isinstance(argv, list) or not argv:
                 continue
-            cleaned.append(
-                {
-                    "label": str(item.get("label") or argv[0]),
-                    "argv": [str(part) for part in argv],
-                }
-            )
+            action = {
+                "label": str(item.get("label") or argv[0]),
+                "argv": [str(part) for part in argv],
+            }
+            shortcut = str(item.get("shortcut") or "").strip()
+            if shortcut:
+                action["shortcut"] = shortcut
+            cleaned.append(action)
         if cleaned:
             slot["actions"] = cleaned
     return slot
 
 
+def display_mode_word(mode: str, *, cached: bool = False) -> str:
+    if mode == "pbp":
+        word = "PBP"
+    elif mode == "full":
+        word = "FULL"
+    else:
+        word = "unknown"
+    if cached and word != "unknown":
+        return f"{word}~"
+    return word
+
+
 def display_slot(state: dict) -> dict | None:
     mode = str(state.get("dualup_mode") or "unknown").lower()
+    cached = bool(state.get("dualup_mode_cached"))
     active = str(state.get("active_layout") or "").strip()
     monitors = state.get("monitors") if isinstance(state.get("monitors"), list) else []
     split = mode == "pbp" or any(
         isinstance(item, dict) and item.get("mode") == "pbp" for item in monitors
     )
+    word = display_mode_word(mode, cached=cached)
+    detail = ""
     if active:
         glyph = "display.split" if split else "display.full"
-        label = active
+        # The bar paints this label. A PBP layout has to show the name and
+        # PBP together; a full layout keeps the name alone.
+        if mode == "pbp":
+            label = f"{active}  {word}"
+        else:
+            label = active
+            if cached and mode == "full":
+                detail = word
     elif mode == "pbp":
-        glyph, label = "display.split", "PBP"
+        glyph, label = "display.split", word
     elif mode == "full":
-        glyph, label = "display.full", "FULL"
+        glyph, label = "display.full", word
     else:
         return None
-    return {
+    slot = {
         "id": "dualup",
         "kind": "mode",
         "glyph": glyph,
         "label": label,
         "actions": [
-            {"label": "Full", "argv": ["full"]},
-            {"label": "PBP", "argv": ["pbp"]},
-            {"label": "Auto layout", "argv": ["layout"]},
+            {"label": "Full", "argv": ["full"], "shortcut": "⌘⌥⇧F"},
+            {"label": "PBP", "argv": ["pbp"], "shortcut": "⌘⌥⇧P"},
+            {"label": "Auto layout", "argv": ["layout"], "shortcut": "⌘⌥U"},
         ],
     }
+    if detail:
+        slot["detail"] = detail
+    return slot
 
 
 def _slot_prefs_from_cfg(cfg: dict | None) -> tuple[list[dict] | None, bool]:
@@ -3713,6 +4105,34 @@ def lights_slot(mark: str) -> dict:
         "actions": [
             {"label": "On", "argv": ["smarthome", "on"]},
             {"label": "Off", "argv": ["smarthome", "off"]},
+        ],
+    }
+
+
+def awake_slot(report: dict) -> dict:
+    """Toggle for the host stay-awake assertion. Shells only paint it."""
+    effective = bool(report.get("effective"))
+    reason = str(report.get("reason") or "")
+    detail = ""
+    if reason == "outside-schedule":
+        detail = "outside schedule"
+    elif reason == "schedule" and effective:
+        detail = "schedule"
+    elif report.get("running") is False and effective:
+        detail = "starting"
+    return {
+        "id": "awake",
+        "kind": "toggle",
+        "glyph": "awake.on" if effective else "awake.off",
+        "label": "AWAKE" if effective else "",
+        "hot": effective,
+        "detail": detail,
+        "actions": [
+            {
+                "label": "Awake" if not effective else "Awake off",
+                "argv": ["awake", "toggle"],
+                "shortcut": "⌘⌥⇧A",
+            }
         ],
     }
 
@@ -3797,21 +4217,42 @@ def collect_slots(state: dict, cfg: dict | None = None) -> list[dict]:
             ordered.append(light)
     if prefs:
         ordered = apply_slot_prefs(ordered, prefs, exclusive=exclusive)
-    return apply_hud_prefs(ordered, cfg)
+    ordered = apply_hud_prefs(ordered, cfg)
+    # Awake is a host assertion, not an adapter. It stays visible even when
+    # a slot list is exclusive, so both shells can paint the toggle.
+    if isinstance(state.get("awake"), dict):
+        awake = normalize_slot(awake_slot(state["awake"]))
+        if awake:
+            if not str(awake.get("label") or "").strip():
+                awake["label"] = ""
+            ordered.append(awake)
+    return ordered
 
 
 def format_strip_title(strip: dict) -> str:
-    """Quiet strip: focus token, then the active layout name or FULL/PBP."""
+    """Quiet strip: focus token, then the active layout name or FULL/PBP.
+
+    A named PBP layout keeps both the name and PBP. A cached mode carries
+    a trailing tilde, the same mark the mouse channel uses when it is stale.
+    """
     focus = str(strip.get("focus") or "?").strip()
     if focus == "?":
         focus = ""
     layout = str(strip.get("layout") or "").strip()
+    display = str(strip.get("display") or "").lower()
+    cached = str(strip.get("cached") or "") in ("1", "true", "yes")
+    mark = ""
     if layout:
         mark = layout
-    else:
-        display = str(strip.get("display") or "").lower()
-        mark = "PBP" if display == "pbp" else ("FULL" if display == "full" else "")
+        if display == "pbp":
+            mark = f"{layout}  PBP" + ("~" if cached else "")
+    elif display == "pbp":
+        mark = "PBP" + ("~" if cached else "")
+    elif display == "full":
+        mark = "FULL" + ("~" if cached else "")
     parts = [part for part in (focus, mark) if part]
+    if strip.get("awake") == "on":
+        parts.append("AWAKE")
     return "  ".join(parts) if parts else "desk"
 
 
@@ -3835,6 +4276,7 @@ def format_bar_label(state: dict) -> str:
     else:
         mx = f"mx{channel}~"
     mode = str(state.get("dualup_mode") or "unknown").lower()
+    cached = bool(state.get("dualup_mode_cached"))
     parts: list[str] = []
     if hint != "?":
         parts.append(hint)
@@ -3843,9 +4285,12 @@ def format_bar_label(state: dict) -> str:
     parts.extend([kb, mx])
     if not layout:
         if mode == "pbp":
-            parts.append("PBP")
+            parts.append("PBP~" if cached else "PBP")
         elif mode == "full":
-            parts.append("FULL")
+            parts.append("FULL~" if cached else "FULL")
+    awake = state.get("awake") if isinstance(state.get("awake"), dict) else None
+    if awake and awake.get("effective"):
+        parts.append("AWAKE")
     return "  ".join(parts) if parts else "desk"
 
 
@@ -4040,7 +4485,6 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
             dual_usb = proc.returncode == 0 and "043e:9a39" in dual_info.lower()
         except (OSError, subprocess.TimeoutExpired) as exc:
             dual_info = str(exc)
-    dual_mode = detect_dualup_mode(cfg)
     inputs = dualup_inputs_map(cfg)
     peer = None if local_only else peek_peer_status(cfg)
     peer_channel = None
@@ -4073,6 +4517,18 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
 
     hhkb_for_hint = bool(probe.get("present")) and not probe.get("unknown")
     active_layout = active_layout_name(cfg)
+    display_report = reported_display_mode(
+        cfg,
+        local_only=local_only,
+        active_layout=active_layout,
+        peer=peer,
+        dual_path=dual_path,
+        dual_usb=dual_usb,
+    )
+    dual_mode = str(display_report.get("mode") or "unknown")
+    learned_layout = str(display_report.get("layout") or "").strip()
+    if learned_layout and not active_layout:
+        active_layout = learned_layout
     known_layout = active_layout if active_layout in layouts_config(cfg) else None
     assignment = monitor_assignment(cfg, known_layout)
     hint, hint_source = resolve_target_hint(
@@ -4152,6 +4608,9 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "lgdualup_path": str(dual_path) if dual_path else None,
         "dualup_info": dual_info,
         "dualup_mode": dual_mode,
+        "dualup_mode_source": display_report.get("source") or "unknown",
+        "dualup_mode_cached": bool(display_report.get("cached")),
+        "dualup_mode_host": display_report.get("host") or "",
         "dualup_usb": dual_usb,
         "dualup_inputs": inputs,
         "active_layout": active_layout,
@@ -4160,6 +4619,9 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "peer": peer,
         "adapters": adapters,
         "ui": format_public_ui(cfg),
+        "awake": awake_status(cfg),
+        "shortcuts": public_shortcuts(cfg),
+        "secondary_display": secondary_monitor_id(cfg),
     }
     state["_tray_lights"] = bool(cfg.get("_tray_lights"))
     # A stored name that is no longer in config stays on `active_layout`
@@ -4236,9 +4698,22 @@ def cmd_status(cfg: dict, *, as_json: bool = False, hint_only: bool = False, loc
     )
     print(
         f"  dualup      : {dual_state}  backend={dual.get('backend', 'lgdualup')}  "
-        f"mode={state.get('dualup_mode', 'unknown')}  "
+        f"mode={state.get('dualup_mode', 'unknown')}"
+        f"{' cached' if state.get('dualup_mode_cached') else ''}"
+        f"{(' via ' + state['dualup_mode_host']) if state.get('dualup_mode_host') else ''}  "
+        f"source={state.get('dualup_mode_source', 'unknown')}  "
         f"{'  '.join(input_bits)}  "
         f"{dual.get('path') or '-'}"
+    )
+    awake = state.get("awake") if isinstance(state.get("awake"), dict) else {}
+    schedule = awake.get("schedule") if isinstance(awake.get("schedule"), dict) else {}
+    window = ""
+    if schedule.get("start") and schedule.get("end"):
+        window = f"  schedule={schedule.get('start')}-{schedule.get('end')}"
+    print(
+        f"  awake       : {'on' if awake.get('effective') else 'off'}  "
+        f"reason={awake.get('reason') or 'off'}  "
+        f"backend={awake.get('backend') or '-'}{window}"
     )
     home = adapters.get("smarthome") or {}
     home_state = "available" if home.get("available") else "missing"
@@ -5096,6 +5571,7 @@ def apply_named_layout(cfg: dict, name: str) -> int:
     rc = execute_layout_steps(cfg, layout_apply_steps(cfg, key))
     if rc == 0:
         save_active_layout(key)
+        save_display_record(layout_mode_of(cfg, key), "applied", host=_this_host_id(cfg), layout=key)
     return rc
 
 
@@ -5338,6 +5814,10 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
     agent = SessionAgent(cfg)
     agent.start()
     try:
+        try:
+            awake_reconcile(cfg, dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001 — watcher must still start
+            log(f"awake reconcile failed: {exc}")
         return _cmd_watch_loop(
             cfg,
             dry_run,
@@ -5353,6 +5833,11 @@ def cmd_watch(cfg: dict, dry_run: bool) -> int:
             here=here,
         )
     finally:
+        if not dry_run:
+            try:
+                awake_release(cfg)
+            except Exception as exc:  # noqa: BLE001
+                log(f"awake release failed: {exc}")
         agent.stop()
 
 
@@ -5485,6 +5970,10 @@ def _cmd_watch_loop(
             wallpaper_watch_poll(cfg, wallpaper_state, time.time())
         except Exception as exc:  # noqa: BLE001 — watcher stays up
             log(f"wallpaper watch failed: {exc}")
+        try:
+            awake_reconcile(cfg, dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001 — watcher stays up
+            log(f"awake reconcile failed: {exc}")
         pending_gap = watch_interval_was_suspended(interval, gap_limit)
 
 
@@ -5704,6 +6193,645 @@ def configured_host_choices(cfg: dict | None) -> list[str] | None:
     return ids + aliases
 
 
+def _awake_cfg(cfg: dict) -> dict:
+    raw = cfg.get("_awake")
+    if isinstance(raw, dict):
+        return raw
+    return {"start": "", "end": "", "inhibit": "", "release": "", "backend": ""}
+
+
+def _parse_hhmm(text: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(text or "").strip())
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return hour, minute
+
+
+def _in_awake_window(start: str, end: str, now: datetime) -> bool | None:
+    """True inside [start, end). None when no usable schedule is configured."""
+    begin = _parse_hhmm(start)
+    finish = _parse_hhmm(end)
+    if begin is None or finish is None:
+        return None
+    start_m = begin[0] * 60 + begin[1]
+    end_m = finish[0] * 60 + finish[1]
+    if start_m == end_m:
+        return None
+    current = now.hour * 60 + now.minute
+    if start_m < end_m:
+        return start_m <= current < end_m
+    return current >= start_m or current < end_m
+
+
+def awake_manual() -> str:
+    value = str(load_desk_state().get("awake_manual") or "").strip().lower()
+    return value if value in ("on", "off") else ""
+
+
+def set_awake_manual(value: str) -> None:
+    state = load_desk_state()
+    state["awake_manual"] = value if value in ("on", "off") else ""
+    save_desk_state(state)
+
+
+def awake_desired(cfg: dict, now: datetime | None = None) -> dict:
+    """What this host should be doing. Does not spawn or kill anything."""
+    moment = now or datetime.now()
+    spec = _awake_cfg(cfg)
+    window = _in_awake_window(str(spec.get("start") or ""), str(spec.get("end") or ""), moment)
+    manual = awake_manual()
+    if manual == "off":
+        effective, reason = False, "off"
+    elif manual == "on":
+        if window is False:
+            effective, reason = False, "outside-schedule"
+        else:
+            effective, reason = True, "on"
+    elif window is True:
+        effective, reason = True, "schedule"
+    elif window is False:
+        effective, reason = False, "outside-schedule"
+    else:
+        effective, reason = False, "off"
+    schedule = None
+    if spec.get("start") and spec.get("end") and window is not None:
+        schedule = {"start": str(spec["start"]), "end": str(spec["end"])}
+    return {
+        "manual": manual or None,
+        "effective": effective,
+        "reason": reason,
+        "schedule": schedule,
+        "in_schedule": window,
+    }
+
+
+def awake_backend_name(cfg: dict) -> str:
+    spec = _awake_cfg(cfg)
+    if str(spec.get("inhibit") or "").strip() or str(spec.get("backend") or "").strip() == "custom":
+        return "custom"
+    if SYSTEM == "Darwin":
+        return "caffeinate"
+    if shutil.which("omarchy") or shutil.which("omarchy-shell") or shutil.which("omarchy-toggle-idle"):
+        return "omarchy"
+    if shutil.which("systemd-inhibit"):
+        return "systemd-inhibit"
+    return "none"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _pid_cmdline(pid: int) -> str:
+    proc_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        return proc_path.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout or ""
+
+
+def _inhibitor_markers(cfg: dict) -> tuple[str, ...]:
+    spec = _awake_cfg(cfg)
+    custom = str(spec.get("inhibit") or "").strip()
+    first = shlex.split(custom)[0] if custom else ""
+    name = Path(first).name if first else ""
+    return tuple(item for item in ("caffeinate", "systemd-inhibit", name, "desk awake") if item)
+
+
+def _pid_is_inhibitor(pid: int, cfg: dict) -> bool:
+    if not _pid_alive(pid):
+        return False
+    text = _pid_cmdline(pid)
+    return any(mark and mark in text for mark in _inhibitor_markers(cfg))
+
+
+def _spawn_inhibitor(cfg: dict) -> int | None:
+    """Hold a user-level assertion. No sudo, no pmset, no sysadminctl."""
+    spec = _awake_cfg(cfg)
+    custom = str(spec.get("inhibit") or "").strip()
+    if custom:
+        try:
+            argv = shlex.split(custom)
+        except ValueError:
+            return None
+    elif SYSTEM == "Darwin":
+        # `-u` alone exits after a few seconds. A utility keeps every
+        # assertion, including the user-active one, until this process dies.
+        argv = ["caffeinate", "-dimsu", "sleep", "86400"]
+    elif shutil.which("systemd-inhibit"):
+        argv = [
+            "systemd-inhibit",
+            "--what=idle:sleep",
+            "--who=desk",
+            "--why=desk awake",
+            "--mode=block",
+            "sleep",
+            "infinity",
+        ]
+    else:
+        return None
+    if not argv or shutil.which(argv[0]) is None:
+        return None
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    return int(proc.pid)
+
+
+def _hypridle_running() -> bool:
+    if shutil.which("pgrep") is None:
+        return False
+    try:
+        proc = run(["pgrep", "-x", "hypridle"], timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def _omarchy_status() -> dict | None:
+    """JSON from Omarchy's idle toggle, when that command exists."""
+    candidates = []
+    if shutil.which("omarchy"):
+        candidates.append(["omarchy", "toggle", "idle", "status"])
+    if shutil.which("omarchy-shell"):
+        candidates.append(["omarchy-shell", "idle", "status"])
+        candidates.append(["omarchy-shell", "-q", "idle", "status"])
+    for argv in candidates:
+        try:
+            proc = run(argv, timeout=3.0)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        text = (proc.stdout or "").strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and "stayAwake" in data:
+            return data
+    return None
+
+
+def _omarchy_stay_awake() -> bool | None:
+    data = _omarchy_status()
+    if isinstance(data, dict) and "stayAwake" in data:
+        return bool(data.get("stayAwake"))
+    if shutil.which("omarchy-toggle-idle"):
+        # That helper stops hypridle to stay awake, and starts it to lock again.
+        return not _hypridle_running()
+    return None
+
+
+def _omarchy_set(want: bool) -> bool:
+    current = _omarchy_stay_awake()
+    if current is None or current is want:
+        return current is not None
+    if isinstance(_omarchy_status(), dict) and shutil.which("omarchy"):
+        try:
+            proc = run(["omarchy", "toggle", "idle"], timeout=4.0)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return proc.returncode == 0
+    if shutil.which("omarchy-toggle-idle"):
+        try:
+            proc = run(["omarchy-toggle-idle"], timeout=4.0)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return proc.returncode == 0
+    return False
+
+
+def _hypridle_stop() -> bool:
+    if shutil.which("systemctl") is None:
+        return False
+    try:
+        proc = run(["systemctl", "--user", "stop", "hypridle"], timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def _hypridle_start() -> bool:
+    if shutil.which("systemctl") is None:
+        return False
+    try:
+        proc = run(["systemctl", "--user", "start", "hypridle"], timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def _linux_hold_idle(cfg: dict) -> None:
+    """Prefer Omarchy's stay-awake toggle. Otherwise stop the user hypridle.
+
+    Runs once per awake session. The watch loop must not poll Omarchy.
+    """
+    state = load_desk_state()
+    if state.get("awake_idle_ready"):
+        return
+    if _omarchy_stay_awake() is not None:
+        if _omarchy_stay_awake() is False and _omarchy_set(True):
+            state = load_desk_state()
+            state["awake_omarchy"] = True
+        state = load_desk_state()
+        state["awake_idle_ready"] = True
+        save_desk_state(state)
+        return
+    if _hypridle_running() and _hypridle_stop():
+        state = load_desk_state()
+        state["awake_hypridle"] = True
+    state = load_desk_state()
+    state["awake_idle_ready"] = True
+    save_desk_state(state)
+
+
+def _linux_release_idle(state: dict) -> None:
+    if state.get("awake_omarchy"):
+        _omarchy_set(False)
+        state["awake_omarchy"] = False
+    if state.get("awake_hypridle"):
+        _hypridle_start()
+        state["awake_hypridle"] = False
+    state["awake_idle_ready"] = False
+
+
+def awake_inhibitor_running(cfg: dict) -> bool:
+    state = load_desk_state()
+    try:
+        pid = int(state.get("awake_pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if _pid_is_inhibitor(pid, cfg):
+        return True
+    if state.get("awake_omarchy") and _omarchy_stay_awake() is True:
+        return True
+    return False
+
+
+def awake_acquire(cfg: dict) -> None:
+    state = load_desk_state()
+    try:
+        pid = int(state.get("awake_pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if not _pid_is_inhibitor(pid, cfg):
+        spawned = _spawn_inhibitor(cfg)
+        if spawned:
+            state = load_desk_state()
+            state["awake_pid"] = spawned
+            save_desk_state(state)
+    if SYSTEM != "Darwin":
+        _linux_hold_idle(cfg)
+
+
+def awake_release(cfg: dict) -> None:
+    state = load_desk_state()
+    changed = False
+    try:
+        pid = int(state.get("awake_pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid and _pid_is_inhibitor(pid, cfg):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        state["awake_pid"] = 0
+        changed = True
+    elif state.get("awake_pid"):
+        state["awake_pid"] = 0
+        changed = True
+    before_omarchy = bool(state.get("awake_omarchy"))
+    before_hypr = bool(state.get("awake_hypridle"))
+    before_ready = bool(state.get("awake_idle_ready"))
+    if SYSTEM != "Darwin":
+        _linux_release_idle(state)
+        if before_omarchy or before_hypr or before_ready:
+            changed = True
+    release = str(_awake_cfg(cfg).get("release") or "").strip()
+    if release and (before_omarchy or before_hypr or pid):
+        try:
+            run(["bash", "-lc", release], timeout=4.0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if changed:
+        save_desk_state(state)
+
+
+_awake_logged: bool | None = None
+
+
+def awake_reconcile(cfg: dict, *, dry_run: bool = False, now: datetime | None = None) -> dict:
+    """Match the held assertion to the manual switch and the schedule."""
+    global _awake_logged
+    report = awake_desired(cfg, now=now)
+    if _awake_logged is None or _awake_logged != bool(report["effective"]):
+        if report["effective"] or _awake_logged is not None:
+            log(
+                f"awake {'on' if report['effective'] else 'off'} ({report['reason']})"
+                + (" dry-run" if dry_run else "")
+            )
+        _awake_logged = bool(report["effective"])
+    if dry_run:
+        return report
+    if report["effective"]:
+        awake_acquire(cfg)
+    else:
+        awake_release(cfg)
+    return awake_status(cfg, now=now)
+
+
+def awake_status(cfg: dict, now: datetime | None = None) -> dict:
+    report = awake_desired(cfg, now=now)
+    report["running"] = awake_inhibitor_running(cfg) if report["effective"] else False
+    report["backend"] = awake_backend_name(cfg)
+    return report
+
+
+def _awake_relay(cfg: dict, verb: str) -> int:
+    rc = 0
+    here = _this_host_id(cfg)
+    remote = (
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        f"desk awake {shlex.quote(verb)}"
+    )
+    for item in public_host_list(cfg):
+        host_id = str(item.get("id") or "")
+        if not host_id or host_id == here:
+            continue
+        target = host_text(cfg, host_id, "ssh")
+        if not target:
+            print(f"awake: {host_id} has no ssh target")
+            continue
+        print(f"awake: {host_id}")
+        try:
+            proc = run(ssh_argv(target, f"bash -lc {shlex.quote(remote)}"), timeout=12.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"awake: {host_id} failed: {exc}")
+            rc = rc or 1
+            continue
+        if proc.stdout:
+            print(proc.stdout.rstrip())
+        if proc.returncode:
+            rc = rc or int(proc.returncode)
+    return rc
+
+
+def cmd_awake(cfg: dict, verb: str | None, *, all_hosts: bool = False, as_json: bool = False) -> int:
+    chosen = str(verb or "status").strip().lower()
+    if chosen not in ("on", "off", "toggle", "status"):
+        print("usage: desk awake on|off|status|toggle [--all]")
+        return 2
+    if chosen == "toggle":
+        chosen = "off" if awake_desired(cfg)["effective"] else "on"
+    if chosen in ("on", "off"):
+        set_awake_manual(chosen)
+        awake_reconcile(cfg)
+    report = awake_status(cfg)
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        schedule = report.get("schedule") if isinstance(report.get("schedule"), dict) else None
+        window = ""
+        if schedule:
+            window = f"  schedule={schedule.get('start')}-{schedule.get('end')}"
+        print(
+            f"awake {'on' if report.get('effective') else 'off'}  "
+            f"reason={report.get('reason')}  "
+            f"backend={report.get('backend')}  "
+            f"running={str(bool(report.get('running'))).lower()}"
+            f"{window}"
+        )
+    if all_hosts and chosen in ("on", "off"):
+        return _awake_relay(cfg, chosen)
+    return 0
+
+
+def secondary_monitor(cfg: dict) -> dict | None:
+    """First enabled monitor that is not the primary. Generic; not a vendor."""
+    instances = [item for item in display_instances(cfg) if item.get("enabled", True)]
+    rest = [item for item in instances if not item.get("primary")]
+    return rest[0] if rest else None
+
+
+def secondary_monitor_id(cfg: dict) -> str:
+    inst = secondary_monitor(cfg)
+    return str(inst.get("id") or "") if inst else ""
+
+
+def cmd_secondary(cfg: dict, host: str) -> int:
+    """Put `host` on the secondary display (full input on that monitor)."""
+    inst = secondary_monitor(cfg)
+    if inst is None:
+        print(
+            "no secondary display configured "
+            "(adapters.displays needs a monitor that is not primary)"
+        )
+        return 1
+    host_id, _spec = host_spec(cfg, host)
+    print(f"secondary {inst.get('id')} → {host_id}")
+    rc = execute_layout_steps(cfg, steps_for_monitor(cfg, inst, {"mode": "full", "host": host_id}))
+    if rc == 0:
+        state = load_desk_state()
+        state["secondary_host"] = host_id
+        state["secondary_monitor"] = str(inst.get("id") or "")
+        save_desk_state(state)
+        _after_display_change(cfg)
+    return rc
+
+
+def public_shortcuts(cfg: dict) -> list[dict]:
+    """Chords for every host, every named layout, display, awake, secondary.
+
+    macOS: ⌘⌥⇧ is command-option-shift. Hyprland uses SUPER+ALT+SHIFT for
+    the same shape. Numbers follow host order, then layout order, up to 9.
+    """
+    rows: list[dict] = []
+    hosts = [str(item.get("id") or "") for item in public_host_list(cfg) if item.get("id")]
+    for index, host_id in enumerate(hosts[:9], start=1):
+        rows.append(
+            {
+                "id": f"to:{host_id}",
+                "label": f"Switch to {host_id}",
+                "argv": ["to", host_id],
+                "mac": f"⌘⌥⇧{index}",
+                "hypr": f"SUPER + ALT + SHIFT + {index}",
+            }
+        )
+    for index, name in enumerate(list(layouts_config(cfg))[:9], start=1):
+        rows.append(
+            {
+                "id": f"layout:{name}",
+                "label": str(name),
+                "argv": ["layout", str(name)],
+                "mac": f"⌘⌥{index}",
+                "hypr": f"SUPER + ALT + {index}",
+            }
+        )
+    rows.extend(
+        [
+            {
+                "id": "full",
+                "label": "Full",
+                "argv": ["full"],
+                "mac": "⌘⌥⇧F",
+                "hypr": "SUPER + ALT + SHIFT + F",
+            },
+            {
+                "id": "pbp",
+                "label": "PBP",
+                "argv": ["pbp"],
+                "mac": "⌘⌥⇧P",
+                "hypr": "SUPER + ALT + SHIFT + P",
+            },
+            {
+                "id": "layout",
+                "label": "Auto layout",
+                "argv": ["layout"],
+                "mac": "⌘⌥U",
+                "hypr": "SUPER + ALT + U",
+            },
+            {
+                "id": "awake",
+                "label": "Awake",
+                "argv": ["awake", "toggle"],
+                "mac": "⌘⌥⇧A",
+                "hypr": "SUPER + ALT + SHIFT + A",
+            },
+        ]
+    )
+    for index, host_id in enumerate(hosts[:9], start=1):
+        rows.append(
+            {
+                "id": f"secondary:{host_id}",
+                "label": f"{host_id} on secondary",
+                "argv": ["secondary", host_id],
+                "mac": f"⌘⌥⌃{index}",
+                "hypr": f"SUPER + ALT + CTRL + {index}",
+            }
+        )
+    return rows
+
+
+def hypr_unbinds(cfg: dict) -> list[tuple[str, str]]:
+    """Omarchy defaults that share a desk chord. Other desk chords are free."""
+    notes: list[tuple[str, str]] = []
+    count = min(9, len(public_host_list(cfg)))
+    for index in range(1, count + 1):
+        why = "Omarchy moves a window silently to that workspace"
+        notes.append((f"SUPER + ALT + SHIFT + {index}", why))
+        notes.append((f"SUPER + SHIFT + ALT + code:{index + 9}", why))
+    notes.append(("SUPER + ALT + SHIFT + F", "Omarchy opens the file manager in the current directory"))
+    notes.append(("SUPER + SHIFT + ALT + A", "Omarchy opens Grok"))
+    return notes
+
+
+def _lua_exec(argv: list[str]) -> str:
+    inner = 'export PATH="$HOME/.local/bin:$PATH"; desk ' + " ".join(
+        shlex.quote(str(part)) for part in argv
+    )
+    wrapped = "bash -lc " + shlex.quote(inner)
+    return wrapped.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def shortcuts_lua(cfg: dict) -> str:
+    """Lua binds in the style Omarchy's bindings.lua already uses."""
+    lines = [
+        "-- desk:shortcuts:begin",
+        "-- Generated by `desk shortcuts install`. Re-run after adding hosts or layouts.",
+        "-- Unbind only the Omarchy defaults these chords replace.",
+    ]
+    for chord, why in hypr_unbinds(cfg):
+        lines.append(f"-- {why}")
+        lines.append(f'hl.unbind("{chord}")')
+    for row in public_shortcuts(cfg):
+        label = str(row["label"]).replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(
+            f'o.bind("{row["hypr"]}", "Desk: {label}", hl.dsp.exec_cmd("{_lua_exec(row["argv"])}"))'
+        )
+    lines.append("-- desk:shortcuts:end")
+    return "\n".join(lines) + "\n"
+
+
+def shortcuts_table(cfg: dict) -> str:
+    lines = ["action\tmacOS\tHyprland\tcommand"]
+    for row in public_shortcuts(cfg):
+        command = "desk " + " ".join(str(part) for part in row["argv"])
+        lines.append(f"{row['label']}\t{row['mac']}\t{row['hypr']}\t{command}")
+    return "\n".join(lines)
+
+
+def install_shortcuts(cfg: dict) -> int:
+    """Append or replace the marked block in ~/.config/hypr/bindings.lua."""
+    begin = "-- desk:shortcuts:begin"
+    end = "-- desk:shortcuts:end"
+    block = shortcuts_lua(cfg)
+    path = Path.home() / ".config" / "hypr" / "bindings.lua"
+    if path.is_file():
+        text = path.read_text()
+        if begin in text and end in text:
+            pre, _, rest = text.partition(begin)
+            _, _, post = rest.partition(end)
+            text = pre.rstrip() + "\n\n" + block + post.lstrip("\n")
+        else:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            text = text + "\n" + block
+        path.write_text(text)
+        print(f"updated {path}")
+        return 0
+    dest = Path.home() / ".config" / "hypr" / "desk-bindings.lua"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(block)
+    except OSError as exc:
+        print(f"could not write shortcuts: {exc}", file=sys.stderr)
+        return 1
+    print(f"wrote {dest}")
+    print(f"{path} is not there yet. Paste that file into bindings.lua.")
+    print("o and hl are in scope in that file; a separate dofile will not see them if they are locals.")
+    return 0
+
+
+def cmd_shortcuts(cfg: dict, verb: str | None = None, *, as_lua: bool = False) -> int:
+    chosen = str(verb or "show").strip().lower()
+    if chosen == "install":
+        return install_shortcuts(cfg)
+    if as_lua or chosen == "lua":
+        print(shortcuts_lua(cfg), end="")
+        return 0
+    print(shortcuts_table(cfg))
+    return 0
+
+
 def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="desk",
@@ -5747,6 +6875,26 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
         help="apply a named layout, or re-apply full/PBP from the live display",
     )
     lay.add_argument("name", nargs="?", help="name from config layouts")
+    secondary = sub.add_parser(
+        "secondary",
+        help="put a host on the secondary display (the monitor that is not primary)",
+    )
+    secondary.add_argument(
+        "host",
+        type=_lower_host_arg,
+        choices=configured_host_choices(cfg),
+        help="configured host id",
+    )
+    awake = sub.add_parser(
+        "awake",
+        help="hold off sleep, blanking, screensaver, and auto-lock on this host",
+    )
+    awake.add_argument("verb", nargs="?", default="status", help="on | off | status | toggle")
+    awake.add_argument("--all", action="store_true", help="relay the same verb to every other host")
+    awake.add_argument("--json", action="store_true", help="print the awake report as JSON")
+    shortcuts = sub.add_parser("shortcuts", help="print or install host, layout, display, and awake chords")
+    shortcuts.add_argument("verb", nargs="?", default="show", help="show | install | lua")
+    shortcuts.add_argument("--lua", action="store_true", help="print the Omarchy bindings.lua block")
     smarthome = sub.add_parser("smarthome", help="list devices / light status / on / off (bound adapter)")
     smarthome.add_argument(
         "verb",
@@ -5803,6 +6951,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_full(cfg)
     if args.cmd == "layout":
         return cmd_layout(cfg, args.name)
+    if args.cmd == "secondary":
+        return cmd_secondary(cfg, args.host)
+    if args.cmd == "awake":
+        return cmd_awake(cfg, args.verb, all_hosts=bool(args.all), as_json=bool(args.json))
+    if args.cmd == "shortcuts":
+        return cmd_shortcuts(cfg, args.verb, as_lua=bool(args.lua))
     if args.cmd == "smarthome":
         return cmd_smarthome(cfg, args.verb, as_json=args.json)
     if args.cmd == "kettle":

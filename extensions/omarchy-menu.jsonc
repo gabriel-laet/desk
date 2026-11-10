@@ -38,5 +38,10 @@
     "label": "Auto layout  ⌘⌥U",
     "when": "command -v lgdualup >/dev/null || test -x \"$HOME/.local/bin/lgdualup\" || test -x \"$HOME/.local/lib/desk/lgdualup\" || test -x \"$HOME/.local/lib/desk-switch/lgdualup\"",
     "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk layout'"
+  },
+  "trigger.desk-switch.awake": {
+    "icon": "󰅶",
+    "label": "Toggle awake",
+    "action": "bash -lc 'export PATH=\"$HOME/.local/bin:$PATH\"; desk awake toggle'"
   }
 }

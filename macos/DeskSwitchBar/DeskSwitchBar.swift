@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Foundation
 import SwiftUI
 
@@ -71,6 +72,8 @@ enum SlotGlyphMap {
         case "display.full": return "rectangle"
         case "light.on": return "lightbulb.fill"
         case "light.off": return "lightbulb"
+        case "awake.on": return "bolt.fill"
+        case "awake.off": return "moon.zzz"
         case "cpu": return "cpu"
         default: return glyph.isEmpty ? "circle" : glyph
         }
@@ -169,6 +172,7 @@ final class DeskSwitchModel: ObservableObject {
     @Published var slots: [TraySlot] = []
     @Published var hosts: [DeskHost] = []
     @Published var layouts: [DeskLayout] = []
+    @Published var shortcuts: [DeskShortcut] = []
     @Published var activeLayout = ""
     @Published var ui = DeskUIConfig.defaults
     @Published var configPath = ""
@@ -182,13 +186,19 @@ final class DeskSwitchModel: ObservableObject {
         visibleSlots.map { "\($0.id):\($0.kind):\($0.glyph):\($0.label)" }.joined(separator: "|")
     }
 
+    /// A display slot labeled `mac-tower` or `mac-tower  PBP~` already names the layout.
+    private func slotShowsLayout(_ label: String, _ layout: String) -> Bool {
+        if label == layout { return true }
+        return label.hasPrefix(layout + " ")
+    }
+
     /// Host token, plus the layout name when the display slot is not already showing it.
     var menuPrefix: String {
         var parts: [String] = []
         if !hint.isEmpty {
             parts.append(hint)
         }
-        if !activeLayout.isEmpty, !visibleSlots.contains(where: { $0.label == activeLayout }) {
+        if !activeLayout.isEmpty, !visibleSlots.contains(where: { slotShowsLayout($0.label, activeLayout) }) {
             parts.append(activeLayout)
         }
         return parts.joined(separator: "  ")
@@ -211,9 +221,22 @@ final class DeskSwitchModel: ObservableObject {
         return "\(host)  \(activeLayout)"
     }
 
+    func shortcut(for argv: [String]) -> String {
+        shortcuts.first { $0.argv == argv }?.mac ?? ""
+    }
+
+    func titled(_ title: String, shortcut mark: String) -> String {
+        mark.isEmpty ? title : "\(title)    \(mark)"
+    }
+
+    var secondaryShortcuts: [DeskShortcut] {
+        shortcuts.filter { $0.id.hasPrefix("secondary:") }
+    }
+
     private var timer: Timer?
 
     init() {
+        HotkeyCenter.shared.model = self
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] in
             _ = $0
@@ -243,7 +266,9 @@ final class DeskSwitchModel: ObservableObject {
                     self.slots = parsed.slots
                     self.hosts = parsed.hosts
                     self.layouts = parsed.layouts
+                    self.shortcuts = parsed.shortcuts
                     self.activeLayout = parsed.activeLayout
+                    HotkeyCenter.shared.sync(parsed.shortcuts)
                     self.ui = parsed.ui.merging(live: parsed.slots)
                     self.configPath = parsed.configPath
                     self.lastLine = ""
@@ -262,7 +287,9 @@ final class DeskSwitchModel: ObservableObject {
                     self.slots = []
                     self.hosts = []
                     self.layouts = []
+                    self.shortcuts = []
                     self.activeLayout = ""
+                    HotkeyCenter.shared.sync([])
                     self.ui = DeskUIConfig.defaults
                     self.configPath = ""
                 }
@@ -378,11 +405,25 @@ struct DeskPanel: View {
     @ViewBuilder
     private var deskHome: some View {
         HostWidget(model: model)
+        if !model.secondaryShortcuts.isEmpty {
+            WidgetCard(title: "Secondary") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.secondaryShortcuts) { row in
+                        DeskActionButton(title: model.titled(row.label, shortcut: row.mac)) {
+                            model.run(row.argv)
+                        }
+                    }
+                }
+            }
+        }
         if !model.layouts.isEmpty {
             WidgetCard(title: "Layouts") {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(model.layouts) { layout in
-                        DeskActionButton(title: layout.name, filled: layout.active) {
+                        DeskActionButton(
+                            title: model.titled(layout.name, shortcut: model.shortcut(for: ["layout", layout.name])),
+                            filled: layout.active
+                        ) {
                             model.run(["layout", layout.name])
                         }
                     }
@@ -422,6 +463,7 @@ enum WidgetKind: String {
         "kettle": .face,
         "dualup": .mode,
         "lights": .toggle,
+        "awake": .toggle,
         "host": .host,
         "hardware": .table,
     ]
@@ -447,6 +489,7 @@ enum ActionShortcut {
         case ["full"]: return "⌘⌥⇧F"
         case ["pbp"]: return "⌘⌥⇧P"
         case ["layout"]: return "⌘⌥U"
+        case ["awake", "toggle"]: return "⌘⌥⇧A"
         default: return ""
         }
     }
@@ -490,7 +533,10 @@ struct HostWidget: View {
                 if !model.hosts.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(model.hosts) { host in
-                            DeskActionButton(title: host.switchTitle, filled: host.current) {
+                            DeskActionButton(
+                                title: model.titled(host.switchTitle, shortcut: model.shortcut(for: ["to", host.id])),
+                                filled: host.current
+                            ) {
                                 model.run(["to", host.id])
                             }
                         }
@@ -702,7 +748,7 @@ struct SlotActionRow: View {
         if !slot.actions.isEmpty {
             HStack(spacing: 8) {
                 ForEach(Array(slot.actions.enumerated()), id: \.offset) { _, action in
-                    let mark = ActionShortcut.label(for: action.argv)
+                    let mark = action.shortcut.isEmpty ? ActionShortcut.label(for: action.argv) : action.shortcut
                     let title = shortcuts && !mark.isEmpty ? "\(action.label)    \(mark)" : action.label
                     DeskActionButton(
                         title: title,
@@ -998,6 +1044,7 @@ enum DeskSwitchCLI {
 struct SlotAction: Equatable {
     var label: String
     var argv: [String]
+    var shortcut: String = ""
 }
 
 struct HardwareColumn: Identifiable, Equatable {
@@ -1045,7 +1092,13 @@ struct TraySlot: Identifiable, Equatable {
             for item in items {
                 let argv = (item["argv"] as? [Any])?.map { String(describing: $0) } ?? []
                 guard !argv.isEmpty else { continue }
-                actions.append(SlotAction(label: item["label"] as? String ?? argv[0], argv: argv))
+                actions.append(
+                    SlotAction(
+                        label: item["label"] as? String ?? argv[0],
+                        argv: argv,
+                        shortcut: item["shortcut"] as? String ?? ""
+                    )
+                )
             }
         }
         var progress = 0.0
@@ -1128,6 +1181,13 @@ struct DeskLayout: Identifiable, Equatable {
     var id: String { name }
 }
 
+struct DeskShortcut: Identifiable, Equatable {
+    var id: String
+    var label: String
+    var mac: String
+    var argv: [String]
+}
+
 struct StatusSnapshot {
     var hint = ""
     var barLabel = "desk"
@@ -1141,6 +1201,7 @@ struct StatusSnapshot {
     var slots: [TraySlot] = []
     var hosts: [DeskHost] = []
     var layouts: [DeskLayout] = []
+    var shortcuts: [DeskShortcut] = []
     var activeLayout = ""
     var ui = DeskUIConfig.defaults
     var configPath = ""
@@ -1206,6 +1267,7 @@ struct StatusSnapshot {
         }.first
         let activeLayout = stripLayout.isEmpty ? (activeFromList ?? "") : stripLayout
         let layouts = parseLayouts(obj["layouts"], activeName: activeLayout)
+        let shortcuts = parseShortcuts(obj["shortcuts"])
         let stripTitle: String
         if density == "chips" {
             stripTitle = barLabel
@@ -1272,7 +1334,11 @@ struct StatusSnapshot {
         }
         let mode = (obj["dualup_mode"] as? String ?? "unknown").lowercased()
         let modeKnown = mode == "pbp" || mode == "full"
-        let modeLabel = mode == "pbp" ? "PBP" : (mode == "full" ? "FULL" : "unknown")
+        let cachedMode = obj["dualup_mode_cached"] as? Bool ?? false
+        var modeLabel = mode == "pbp" ? "PBP" : (mode == "full" ? "FULL" : "unknown")
+        if cachedMode && modeLabel != "unknown" {
+            modeLabel += " · cached"
+        }
         dual = dual || modeKnown
         var inputBits: [String] = []
         if let inputs = obj["dualup_inputs"] as? [String: Any] {
@@ -1326,6 +1392,7 @@ struct StatusSnapshot {
             slots: slots,
             hosts: hosts,
             layouts: layouts,
+            shortcuts: shortcuts,
             activeLayout: activeLayout,
             ui: ui,
             configPath: configPath
@@ -1368,6 +1435,27 @@ struct StatusSnapshot {
             }
         }
         return layouts
+    }
+
+    static func parseShortcuts(_ raw: Any?) -> [DeskShortcut] {
+        guard let items = raw as? [Any] else { return [] }
+        var rows: [DeskShortcut] = []
+        for item in items {
+            guard let obj = item as? [String: Any] else { continue }
+            let argv = (obj["argv"] as? [Any])?.map { String(describing: $0) } ?? []
+            guard !argv.isEmpty else { continue }
+            let mac = obj["mac"] as? String ?? ""
+            let id = obj["id"] as? String ?? argv.joined(separator: " ")
+            rows.append(
+                DeskShortcut(
+                    id: id,
+                    label: obj["label"] as? String ?? argv.joined(separator: " "),
+                    mac: mac,
+                    argv: argv
+                )
+            )
+        }
+        return rows
     }
 }
 
@@ -1622,4 +1710,125 @@ enum DeskUIConfigStore {
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted])
         try data.write(to: dest, options: .atomic)
     }
+}
+
+/// Global chords from `shortcuts` in `desk status --json`. Carbon hotkeys
+/// do not need Accessibility; the menu bar app has to be running.
+private func deskHotKeyHandler(
+    _ call: EventHandlerCallRef?,
+    _ event: EventRef?,
+    _ user: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let event else { return OSStatus(eventNotHandledErr) }
+    var hotKeyID = EventHotKeyID()
+    let status = GetEventParameter(
+        event,
+        EventParamName(kEventParamDirectObject),
+        EventParamType(typeEventHotKeyID),
+        nil,
+        MemoryLayout<EventHotKeyID>.size,
+        nil,
+        &hotKeyID
+    )
+    if status == noErr {
+        let ident = hotKeyID.id
+        DispatchQueue.main.async {
+            HotkeyCenter.shared.fire(ident)
+        }
+    }
+    return noErr
+}
+
+final class HotkeyCenter {
+    static let shared = HotkeyCenter()
+    weak var model: DeskSwitchModel?
+
+    private var refs: [EventHotKeyRef] = []
+    private var actions: [UInt32: [String]] = [:]
+    private var installed = false
+    private let signature: OSType = 0x64736B31
+
+    func sync(_ rows: [DeskShortcut]) {
+        installHandler()
+        clear()
+        var ident: UInt32 = 1
+        for row in rows where ident < 64 {
+            guard let parsed = Self.parse(row.mac) else { continue }
+            var ref: EventHotKeyRef?
+            let hotKeyID = EventHotKeyID(signature: signature, id: ident)
+            let status = RegisterEventHotKey(
+                parsed.code,
+                parsed.modifiers,
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &ref
+            )
+            if status == noErr, let ref {
+                refs.append(ref)
+                actions[ident] = row.argv
+                ident += 1
+            }
+        }
+    }
+
+    func fire(_ id: UInt32) {
+        guard let argv = actions[id] else { return }
+        model?.run(argv)
+    }
+
+    private func clear() {
+        for ref in refs {
+            UnregisterEventHotKey(ref)
+        }
+        refs.removeAll()
+        actions.removeAll()
+    }
+
+    private func installHandler() {
+        guard !installed else { return }
+        var spec = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            deskHotKeyHandler,
+            1,
+            &spec,
+            nil,
+            nil
+        )
+        installed = true
+    }
+
+    /// macOS marks from core: ⌘ command, ⌥ option, ⌃ control, ⇧ shift, then the key.
+    static func parse(_ mac: String) -> (code: UInt32, modifiers: UInt32)? {
+        var modifiers: UInt32 = 0
+        var key: Character?
+        for character in mac {
+            switch character {
+            case "⌘": modifiers |= 1 << 8 // cmdKey
+            case "⌥": modifiers |= 1 << 11 // optionKey
+            case "⇧": modifiers |= 1 << 9 // shiftKey
+            case "⌃": modifiers |= 1 << 12 // controlKey
+            case " ": continue
+            default: key = character
+            }
+        }
+        guard let key, let folded = String(key).lowercased().first, let code = keyCodes[folded] else {
+            return nil
+        }
+        return (code, modifiers)
+    }
+
+    private static let keyCodes: [Character: UInt32] = [
+        "a": 0x00, "s": 0x01, "d": 0x02, "f": 0x03, "h": 0x04, "g": 0x05,
+        "z": 0x06, "x": 0x07, "c": 0x08, "v": 0x09, "b": 0x0B, "q": 0x0C,
+        "w": 0x0D, "e": 0x0E, "r": 0x0F, "y": 0x10, "t": 0x11,
+        "1": 0x12, "2": 0x13, "3": 0x14, "4": 0x15, "6": 0x16, "5": 0x17,
+        "9": 0x19, "7": 0x1A, "8": 0x1C, "0": 0x1D,
+        "o": 0x1F, "u": 0x20, "i": 0x22, "p": 0x23, "l": 0x25,
+        "j": 0x26, "k": 0x28, "n": 0x2D, "m": 0x2E,
+    ]
 }
