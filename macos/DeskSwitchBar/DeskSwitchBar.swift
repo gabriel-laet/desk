@@ -233,6 +233,10 @@ final class DeskSwitchModel: ObservableObject {
         shortcuts.filter { $0.id.hasPrefix("secondary:") }
     }
 
+    /// Set when a hotkey or button command fails, so the next status refresh
+    /// keeps lastLine and the bar tooltip instead of wiping the failure.
+    private var holdActionError = false
+
     private var timer: Timer?
 
     init() {
@@ -257,7 +261,6 @@ final class DeskSwitchModel: ObservableObject {
                     self.hint = parsed.hint
                     self.barLabel = parsed.barLabel
                     self.stripTitle = parsed.stripTitle
-                    self.summary = parsed.summary
                     self.hhkbLine = parsed.hhkbLine
                     self.mouseLine = parsed.mouseLine
                     self.dualLine = parsed.dualLine
@@ -271,14 +274,21 @@ final class DeskSwitchModel: ObservableObject {
                     HotkeyCenter.shared.sync(parsed.shortcuts)
                     self.ui = parsed.ui.merging(live: parsed.slots)
                     self.configPath = parsed.configPath
-                    self.lastLine = ""
+                    if self.holdActionError {
+                        self.holdActionError = false
+                    } else {
+                        self.summary = parsed.summary
+                        self.lastLine = ""
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.hint = ""
                     self.barLabel = "desk"
                     self.stripTitle = "desk"
-                    self.summary = error.localizedDescription
+                    if !self.holdActionError {
+                        self.summary = error.localizedDescription
+                    }
                     self.hhkbLine = "HHKB  …"
                     self.mouseLine = "MX  …"
                     self.dualLine = "DU  …"
@@ -287,9 +297,7 @@ final class DeskSwitchModel: ObservableObject {
                     self.slots = []
                     self.hosts = []
                     self.layouts = []
-                    self.shortcuts = []
                     self.activeLayout = ""
-                    HotkeyCenter.shared.sync([])
                     self.ui = DeskUIConfig.defaults
                     self.configPath = ""
                 }
@@ -345,12 +353,17 @@ final class DeskSwitchModel: ObservableObject {
             do {
                 let out = try DeskSwitchCLI.run(args, timeout: timeout)
                 DispatchQueue.main.async {
+                    self.holdActionError = false
                     self.lastLine = out.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.refresh()
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.lastLine = error.localizedDescription
+                    let text = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.holdActionError = true
+                    self.lastLine = text
+                    let hint = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+                    self.summary = hint
                     self.refresh()
                 }
             }
@@ -1034,8 +1047,12 @@ enum DeskSwitchCLI {
 
         let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if proc.terminationStatus != 0, stdout.isEmpty, !stderr.isEmpty {
-            throw CLIError.failed(stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        if proc.terminationStatus != 0 {
+            let parts = [stdout, stderr]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let message = parts.joined(separator: "\n")
+            throw CLIError.failed(message.isEmpty ? "desk exited \(proc.terminationStatus)" : message)
         }
         return stdout.isEmpty ? stderr : stdout
     }
@@ -1745,11 +1762,15 @@ final class HotkeyCenter {
 
     private var refs: [EventHotKeyRef] = []
     private var actions: [UInt32: [String]] = [:]
+    private var applied: [DeskShortcut] = []
     private var installed = false
     private let signature: OSType = 0x64736B31
 
     func sync(_ rows: [DeskShortcut]) {
         installHandler()
+        if rows == applied {
+            return
+        }
         clear()
         var ident: UInt32 = 1
         for row in rows where ident < 64 {
@@ -1770,6 +1791,7 @@ final class HotkeyCenter {
                 ident += 1
             }
         }
+        applied = rows
     }
 
     func fire(_ id: UInt32) {
@@ -1783,6 +1805,7 @@ final class HotkeyCenter {
         }
         refs.removeAll()
         actions.removeAll()
+        applied = []
     }
 
     private func installHandler() {

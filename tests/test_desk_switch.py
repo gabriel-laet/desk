@@ -130,8 +130,9 @@ class CliTests(unittest.TestCase):
                 text=True,
                 env=env,
             )
-        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.returncode, 1)
         self.assertIn("lgdualup not on PATH", proc.stdout)
+        self.assertIn("no host could run it", proc.stdout)
 
     def test_full_without_lgdualup_is_noop(self) -> None:
         env = os.environ.copy()
@@ -148,8 +149,9 @@ class CliTests(unittest.TestCase):
                 text=True,
                 env=env,
             )
-        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.returncode, 1)
         self.assertIn("lgdualup not on PATH", proc.stdout)
+        self.assertIn("no host could run it", proc.stdout)
 
     def test_status_json_and_hint(self) -> None:
         env = os.environ.copy()
@@ -342,6 +344,10 @@ class MenubarSourceTests(unittest.TestCase):
         self.assertIn("⌘⌥⇧F", src)
         self.assertIn("⌘⌥⇧P", src)
         self.assertIn("⌘⌥U", src)
+        self.assertIn("rows == applied", src)
+        self.assertIn("holdActionError", src)
+        self.assertNotIn("HotkeyCenter.shared.sync([])", src)
+        self.assertIn("desk exited", src)
         self.assertIn('for name in ["desk"]', src)
         self.assertIn("desk not found", src)
         self.assertNotIn('["desk", "desk-switch", "hhkb-mx-follow"]', src)
@@ -664,7 +670,7 @@ class DualupAdapterTests(unittest.TestCase):
             ds, "apply_dualup_layout", layout
         ), mock.patch("sys.stdout", io.StringIO()):
             rc = ds.cmd_pbp(cfg, "50-50")
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
         layout.assert_not_called()
 
     def test_example_config_is_hdmi1_and_dp(self) -> None:
@@ -6149,6 +6155,142 @@ class ShortcutAndSecondaryTests(unittest.TestCase):
         with mock.patch("sys.stdout", io.StringIO()):
             rc = ds.cmd_secondary(cfg, "mac")
         self.assertEqual(rc, 1)
+
+
+class DisplayWriteRelayTests(unittest.TestCase):
+    ABSENT = "No LG Monitor Controls device (043e:9a39) found.\nPlug the DualUp USB-C (or USB upstream) into this Mac.\n"
+
+    def _cfg(self) -> dict:
+        return {
+            "this_host": "mac",
+            "pbp_mode": "50-50",
+            "_dualup_layout": False,
+            "_dualup_layout_settle_s": 0,
+            "_display_relay_hosts": ["tower"],
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "mac.example", "dualup_input": "hdmi1"},
+                "linux": {"channel": 2, "ssh": "linux.example", "dualup_input": "dp"},
+                "tower": {"channel": 3, "ssh": "tower.example", "dualup_input": "hdmi2"},
+            },
+        }
+
+    def _run(self, cfg: dict, verb: str, *, ssh_rc: int = 0, ssh_out: str = "applied\n"):
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            if cmd and cmd[0] == "ssh":
+                return subprocess.CompletedProcess(cmd, ssh_rc, ssh_out, "" if ssh_rc == 0 else self.ABSENT)
+            return subprocess.CompletedProcess(cmd, 1, "", self.ABSENT)
+
+        return calls, fake_run
+
+    def test_pbp_relays_when_this_host_has_no_control_link(self) -> None:
+        cfg = self._cfg()
+        calls, fake_run = self._run(cfg, "pbp")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "cache_dir", return_value=Path(tmp) / "cache"
+            ), mock.patch.object(ds, "lgdualup_path", return_value=Path("/opt/desk/lgdualup")), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds.time, "sleep"), mock.patch.object(
+                ds, "note_wallpaper"
+            ) as paper, mock.patch("sys.stdout", io.StringIO()) as out, mock.patch(
+                "sys.stderr", io.StringIO()
+            ):
+                rc = ds.cmd_pbp(cfg, None)
+            saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
+            cached = json.loads((Path(tmp) / "cache" / "dualup-mode.json").read_text())
+        self.assertEqual(rc, 0)
+        ssh = [cmd for cmd in calls if cmd and cmd[0] == "ssh"]
+        self.assertGreaterEqual(len(ssh), 2)
+        self.assertTrue(all("tower.example" in cmd for cmd in ssh), ssh)
+        joined = "\n".join(cmd[-1] for cmd in ssh)
+        self.assertIn("pbp", joined)
+        self.assertIn("50-50", joined)
+        self.assertIn("pbp-assign", joined)
+        self.assertEqual(saved["display_mode"], "pbp")
+        self.assertEqual(saved["display_mode_source"], "applied")
+        self.assertEqual(saved["display_mode_host"], "tower")
+        self.assertEqual(cached["mode"], "pbp")
+        paper.assert_called_once()
+        self.assertIn("DualUp pbp → 50-50 via tower", out.getvalue())
+
+    def test_full_relays_the_same_way(self) -> None:
+        cfg = self._cfg()
+        calls, fake_run = self._run(cfg, "full", ssh_out="pbp -> full\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "cache_dir", return_value=Path(tmp) / "cache"
+            ), mock.patch.object(ds, "lgdualup_path", return_value=Path("/opt/desk/lgdualup")), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "note_wallpaper"), mock.patch("sys.stdout", io.StringIO()), mock.patch(
+                "sys.stderr", io.StringIO()
+            ):
+                rc = ds.cmd_full(cfg)
+            saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
+        self.assertEqual(rc, 0)
+        ssh = [cmd[-1] for cmd in calls if cmd and cmd[0] == "ssh"]
+        self.assertTrue(any("pbp" in cmd and "full" in cmd for cmd in ssh), ssh)
+        self.assertEqual(saved["display_mode"], "full")
+        self.assertEqual(saved["display_mode_host"], "tower")
+
+    def test_failed_write_does_not_cache_or_look_successful(self) -> None:
+        cfg = self._cfg()
+        _calls, fake_run = self._run(cfg, "pbp", ssh_rc=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "cache_dir", return_value=Path(tmp) / "cache"
+            ), mock.patch.object(ds, "lgdualup_path", return_value=Path("/opt/desk/lgdualup")), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "note_wallpaper") as paper, mock.patch(
+                "sys.stdout", io.StringIO()
+            ) as out, mock.patch("sys.stderr", io.StringIO()):
+                rc = ds.cmd_pbp(cfg, "50-50")
+            state_path = Path(tmp) / "state" / "state.json"
+            saved = json.loads(state_path.read_text()) if state_path.exists() else {}
+        self.assertEqual(rc, 1)
+        self.assertNotIn("display_mode", saved)
+        self.assertFalse((Path(tmp) / "cache" / "dualup-mode.json").exists())
+        paper.assert_not_called()
+        text = out.getvalue()
+        self.assertIn("no host could run it", text)
+        self.assertNotIn("DualUp pbp → 50-50 via", text)
+
+    def test_secondary_relays_when_local_link_is_absent(self) -> None:
+        cfg = self._cfg()
+        cfg["adapters"] = {
+            "displays": {
+                "main": {
+                    "backend": "lgdualup",
+                    "primary": True,
+                    "relay_hosts": ["tower"],
+                    "inputs": {"mac": "hdmi1", "tower": "hdmi2"},
+                    "layout_settle_s": 0,
+                },
+                "side": {
+                    "backend": "lgdualup",
+                    "relay_hosts": ["tower"],
+                    "inputs": {"tower": "hdmi2", "mac": "hdmi1"},
+                    "layout": False,
+                    "layout_settle_s": 0,
+                },
+            }
+        }
+        calls, fake_run = self._run(cfg, "secondary", ssh_out="input-main -> hdmi2\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "lgdualup_path", return_value=Path("/opt/desk/lgdualup")), mock.patch.object(
+                ds.time, "sleep"
+            ), mock.patch.object(ds, "note_wallpaper") as paper, mock.patch(
+                "sys.stdout", io.StringIO()
+            ), mock.patch("sys.stderr", io.StringIO()):
+                rc = ds.cmd_secondary(cfg, "tower")
+        self.assertEqual(rc, 0, calls)
+        ssh = [cmd[-1] for cmd in calls if cmd and cmd[0] == "ssh"]
+        self.assertTrue(any("hdmi2" in cmd for cmd in ssh), ssh)
+        paper.assert_called_once()
 
 
 if __name__ == "__main__":

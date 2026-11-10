@@ -2456,35 +2456,80 @@ def dualup_pbp_inputs(cfg: dict) -> list[tuple[str, str]]:
     return out
 
 
+def relay_display_command(cfg: dict, args: list[str], *, label: str, missing: str) -> tuple[int, str]:
+    """Run a display-adapter write here, then on `relay_hosts` until one applies it.
+
+    The local adapter is tried first. "Device not found" is not success: the
+    peer that holds the monitor link gets the same command over SSH. The
+    returned host is who applied it. The return code is nonzero when nobody did.
+    """
+    path = lgdualup_path(cfg)
+    relays = display_relay_host_ids(cfg)
+    others = [item for item in relays if item != _this_host_id(cfg)]
+    if path is None and not others:
+        print(missing)
+        print(f"{label}: no host could run it")
+        return 1, ""
+    adapter_id = display_adapter_id(cfg)
+    if not adapter_id and path is not None:
+        adapter_id = path.name
+    local = [str(path), *args] if path is not None else None
+    applied: dict[str, str] = {"host": ""}
+
+    def note(host: str, kind: str) -> None:
+        if kind == "ok":
+            applied["host"] = host
+
+    rc = relay_adapter(
+        cfg,
+        local,
+        adapter_id=adapter_id,
+        args=list(args),
+        label=label,
+        relay_host_ids=relays,
+        remote_path=display_relay_path(cfg),
+        host_result=note,
+    )
+    who = applied["host"]
+    if who in ("", "this host"):
+        who = _this_host_id(cfg)
+    return rc, who if rc == 0 else ""
+
+
 def dualup_assign_pbp_inputs(cfg: dict) -> int:
     """Assign PBP Main/Sub. 0xF4 alone cannot set the sub window (stays HDMI2)."""
     by_host = dict(dualup_pbp_inputs(cfg))
     main = by_host.get("mac") or PBP_INPUT_DEFAULTS["mac"]
     sub = by_host.get("linux") or PBP_INPUT_DEFAULTS["linux"]
-    print(f"DualUp PBP assign → main={main} (mac)  sub={sub} (linux)")
-    return call_lgdualup(
+    label = f"DualUp PBP assign → main={main} (mac)  sub={sub} (linux)"
+    rc, _who = relay_display_command(
         cfg,
         ["pbp-assign", main, sub],
+        label=label,
         missing="lgdualup not on PATH — run `make install`",
     )
+    return rc
 
 
 def dualup_set_mode(cfg: dict, mode: str, *, missing: str) -> int:
-    """USB PBP/full, then (for PBP) input pair, settle, then tilted OS layout."""
+    """USB PBP/full, then (for PBP) input pair, settle, then tilted OS layout.
+
+    The USB write is relayed when this host does not hold the monitor link.
+    The mode cache is updated only after a host applies the write.
+    """
     chosen = mode.strip()
     verb = layout_verb(chosen)
-    print(f"DualUp {verb} → {chosen}")
-    if verb in ("full", "pbp"):
-        save_dualup_mode_cache(verb)
-    rc = call_lgdualup(cfg, ["pbp", chosen], missing=missing)
-    if lgdualup_path(cfg) is None:
-        return rc
+    label = f"DualUp {verb} → {chosen}"
+    rc, who = relay_display_command(cfg, ["pbp", chosen], label=label, missing=missing)
     if rc != 0:
         return rc
     if verb in ("full", "pbp"):
-        save_display_record(verb, "applied", host=_this_host_id(cfg))
+        save_dualup_mode_cache(verb)
+        save_display_record(verb, "applied", host=who or _this_host_id(cfg))
     if verb == "pbp":
         rc = rc or dualup_assign_pbp_inputs(cfg)
+        if rc != 0:
+            return rc
     adapters = display_adapter_cfg(cfg)
     raw_settle = cfg.get("_dualup_layout_settle_s")
     if raw_settle is None:
@@ -3279,10 +3324,11 @@ def cmd_pbp(cfg: dict, mode: str | None) -> int:
         chosen,
         missing="lgdualup not on PATH — DualUp PBP needs `make install`",
     )
-    if rc == 0:
-        clear_active_layout()
+    if rc != 0:
+        return rc
+    clear_active_layout()
     _after_display_change(cfg)
-    return rc
+    return 0
 
 
 def cmd_full(cfg: dict) -> int:
@@ -3291,10 +3337,11 @@ def cmd_full(cfg: dict) -> int:
         "full",
         missing="lgdualup not on PATH — DualUp full needs `make install`",
     )
-    if rc == 0:
-        clear_active_layout()
+    if rc != 0:
+        return rc
+    clear_active_layout()
     _after_display_change(cfg)
-    return rc
+    return 0
 
 
 def cmd_layout(cfg: dict, name: str | None = None) -> int:
