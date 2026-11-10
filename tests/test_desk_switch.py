@@ -6118,6 +6118,7 @@ class AwakeTests(unittest.TestCase):
     def setUp(self) -> None:
         ds._awake_last_spawn_at = 0.0
         ds._awake_last_idle_toggle_at = 0.0
+        ds._awake_idle_cap_logged = False
         ds._awake_logged = None
 
     def _cfg(self, **extra: object) -> dict:
@@ -6347,7 +6348,102 @@ class AwakeTests(unittest.TestCase):
         toggles = [cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]]
         self.assertEqual(toggles, [["omarchy", "toggle", "idle"]])
         popen.assert_not_called()
-        self.assertIn("not toggling idle again", out.getvalue())
+        self.assertEqual(out.getvalue().count("not toggling idle again"), 1)
+
+    def _omarchy_hypridle(self, running: bool):
+        """Omarchy present, status JSON stuck at stayAwake false, hypridle is reality."""
+        calls: list[list[str]] = []
+        idle = {"running": running}
+
+        def which(name: str) -> str | None:
+            if name in ("omarchy", "pgrep", "systemd-inhibit"):
+                return f"/usr/bin/{name}"
+            return None
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            if cmd[:3] == ["pgrep", "-x", "hypridle"]:
+                rc = 0 if idle["running"] else 1
+                return subprocess.CompletedProcess(cmd, rc, "1\n" if idle["running"] else "", "")
+            if cmd == ["omarchy", "toggle", "idle"]:
+                idle["running"] = not idle["running"]
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if cmd[:4] == ["omarchy", "toggle", "idle", "status"]:
+                return subprocess.CompletedProcess(cmd, 0, '{"stayAwake": false}\n', "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        return calls, idle, which, fake_run
+
+    def test_omarchy_toggles_once_then_stays_while_hypridle_is_stopped(self) -> None:
+        cfg = self._cfg()
+        noon = datetime(2026, 11, 10, 12, 0)
+        calls, idle, which, fake_run = self._omarchy_hypridle(True)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ), mock.patch.object(ds.shutil, "which", side_effect=which), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "_process_table", return_value=[]), mock.patch.object(
+                ds.subprocess, "Popen"
+            ) as popen, mock.patch("sys.stdout", io.StringIO()) as out:
+                for _ in range(30):
+                    ds.awake_reconcile(cfg, now=noon)
+        toggles = [cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]]
+        self.assertEqual(toggles, [["omarchy", "toggle", "idle"]])
+        self.assertFalse(idle["running"])
+        popen.assert_not_called()
+        self.assertNotIn("not toggling idle again", out.getvalue())
+
+    def test_omarchy_status_is_running_when_desk_stopped_hypridle(self) -> None:
+        cfg = self._cfg()
+        noon = datetime(2026, 11, 10, 12, 0)
+        calls, _idle, which, fake_run = self._omarchy_hypridle(True)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(state_dir)}), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ), mock.patch.object(ds.shutil, "which", side_effect=which), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "_process_table", return_value=[]), mock.patch(
+                "sys.stdout", io.StringIO()
+            ):
+                ds.awake_acquire(cfg)
+                status = ds.awake_status(cfg, now=noon)
+            saved = json.loads((state_dir / "state.json").read_text())
+        self.assertTrue(saved["awake_omarchy"])
+        self.assertTrue(status["running"])
+        self.assertEqual(status["backend"], "omarchy")
+        self.assertEqual([cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]], [["omarchy", "toggle", "idle"]])
+
+    def test_omarchy_off_restores_idle_only_if_desk_disabled_it(self) -> None:
+        cfg = self._cfg()
+        noon = datetime(2026, 11, 10, 12, 0)
+        night = datetime(2026, 11, 10, 21, 0)
+        calls, idle, which, fake_run = self._omarchy_hypridle(True)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ), mock.patch.object(ds.shutil, "which", side_effect=which), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "_process_table", return_value=[]), mock.patch(
+                "sys.stdout", io.StringIO()
+            ):
+                ds.awake_reconcile(cfg, now=noon)
+                self.assertFalse(idle["running"])
+                ds.awake_reconcile(cfg, now=night)
+                self.assertTrue(idle["running"])
+                before = len([cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]])
+                ds.awake_reconcile(cfg, now=night)
+                after = len([cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]])
+                # Already stopped, and desk did not record that it did it.
+                ds.save_desk_state({})
+                idle["running"] = False
+                ds.awake_release(cfg)
+                untouched = len([cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]])
+        self.assertEqual(before, 2)
+        self.assertEqual(after, 2)
+        self.assertEqual(untouched, 2)
+        self.assertFalse(idle["running"])
 
     def test_systemd_inhibit_spawns_once_when_the_pid_check_fails(self) -> None:
         cfg = self._cfg()
