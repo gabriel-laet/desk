@@ -6115,6 +6115,11 @@ class DisplayModeReportTests(unittest.TestCase):
 
 
 class AwakeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ds._awake_last_spawn_at = 0.0
+        ds._awake_last_idle_toggle_at = 0.0
+        ds._awake_logged = None
+
     def _cfg(self, **extra: object) -> dict:
         cfg = {
             "this_host": "mac",
@@ -6158,7 +6163,7 @@ class AwakeTests(unittest.TestCase):
                 ds, "SYSTEM", "Darwin"
             ), mock.patch.object(ds.shutil, "which", return_value="/usr/bin/caffeinate"), mock.patch.object(
                 ds.subprocess, "Popen"
-            ) as popen, mock.patch.object(ds, "_pid_is_inhibitor", return_value=False), mock.patch.object(
+            ) as popen, mock.patch.object(ds, "_process_table", return_value=[]), mock.patch.object(
                 ds, "_linux_hold_idle"
             ):
                 popen.return_value.pid = 4242
@@ -6205,6 +6210,173 @@ class AwakeTests(unittest.TestCase):
                 cfg = ds.load_config()
         self.assertEqual(cfg["_awake"]["start"], "09:00")
         self.assertEqual(cfg["_awake"]["end"], "19:00")
+
+    def test_many_ticks_spawn_one_caffeinate_and_reuse_it(self) -> None:
+        cfg = self._cfg()
+        noon = datetime(2026, 11, 10, 12, 0)
+        spawned: list[list[str]] = []
+
+        def popen(argv, **kwargs):
+            spawned.append(list(argv))
+            proc = mock.Mock()
+            proc.pid = 4242
+            return proc
+
+        def table():
+            if not spawned:
+                return []
+            return [(4242, os.getpid(), f"caffeinate -dimsu -w {os.getpid()}")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "SYSTEM", "Darwin"
+            ), mock.patch.object(ds.shutil, "which", return_value="/usr/bin/caffeinate"), mock.patch.object(
+                ds.subprocess, "Popen", side_effect=popen
+            ), mock.patch.object(ds, "_process_table", side_effect=table), mock.patch.object(
+                ds, "_kill_pid"
+            ) as kill, mock.patch("sys.stdout", io.StringIO()):
+                for _ in range(30):
+                    ds.awake_reconcile(cfg, now=noon)
+            saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(spawned[0][:2], ["caffeinate", "-dimsu"])
+        self.assertIn("-w", spawned[0])
+        self.assertEqual(spawned[0][-1], str(os.getpid()))
+        self.assertNotIn("sleep", spawned[0])
+        self.assertNotIn("86400", spawned[0])
+        self.assertEqual(saved["awake_pid"], 4242)
+        kill.assert_not_called()
+
+    def test_failed_pid_check_spawns_at_most_once_per_window(self) -> None:
+        cfg = self._cfg()
+        noon = datetime(2026, 11, 10, 12, 0)
+        spawned: list[list[str]] = []
+
+        def popen(argv, **kwargs):
+            spawned.append(list(argv))
+            proc = mock.Mock()
+            proc.pid = 4242 + len(spawned)
+            return proc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "SYSTEM", "Darwin"
+            ), mock.patch.object(ds.shutil, "which", return_value="/usr/bin/caffeinate"), mock.patch.object(
+                ds.subprocess, "Popen", side_effect=popen
+            ), mock.patch.object(
+                ds, "_process_table", return_value=[]
+            ), mock.patch.object(ds, "_kill_pid"), mock.patch("sys.stdout", io.StringIO()) as out:
+                for _ in range(40):
+                    ds.awake_reconcile(cfg, now=noon)
+        self.assertEqual(len(spawned), 1)
+        self.assertIn("refusing to spawn another inhibitor", out.getvalue())
+        self.assertIn(str(ds.AWAKE_RESPAWN_MIN_S), out.getvalue())
+
+    def test_live_inhibitor_is_reused_when_the_stored_pid_does_not_match(self) -> None:
+        cfg = self._cfg()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(state_dir)}):
+                ds.save_desk_state({"awake_pid": 111, "awake_spawned_at": time.time()})
+                with mock.patch.object(ds, "SYSTEM", "Darwin"), mock.patch.object(
+                    ds.subprocess, "Popen"
+                ) as popen, mock.patch.object(
+                    ds,
+                    "_process_table",
+                    return_value=[
+                        (111, 1, "sleep 86400"),
+                        (777, 1, "caffeinate -dimsu -w 99999"),
+                    ],
+                ), mock.patch.object(ds, "_kill_pid") as kill, mock.patch("sys.stdout", io.StringIO()):
+                    ds.awake_acquire(cfg)
+                saved = json.loads((state_dir / "state.json").read_text())
+        popen.assert_not_called()
+        self.assertEqual(saved["awake_pid"], 777)
+        kill.assert_any_call(111)
+
+    def test_watcher_start_kills_legacy_caffeinate_and_orphaned_sleep(self) -> None:
+        cfg = self._cfg()
+        me = os.getpid()
+        killed: list[int] = []
+        table = [
+            (10, 1, "caffeinate -dimsu sleep 86400"),
+            (11, 1, "sleep 86400"),
+            (12, me, f"caffeinate -dimsu -w {me}"),
+            (13, 1, "caffeinate -dimsu -w 99999"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "_process_table", return_value=table
+            ), mock.patch.object(ds, "_kill_pid", side_effect=killed.append), mock.patch(
+                "sys.stdout", io.StringIO()
+            ):
+                ds.awake_reap_on_start(cfg)
+                saved = json.loads((Path(tmp) / "state" / "state.json").read_text())
+        self.assertEqual(killed, [10, 11, 13])
+        self.assertEqual(saved["awake_pid"], 12)
+
+    def test_omarchy_does_not_toggle_or_spawn_inhibit_every_tick(self) -> None:
+        cfg = self._cfg()
+        calls: list[list[str]] = []
+
+        def which(name: str) -> str | None:
+            if name in ("omarchy", "systemd-inhibit"):
+                return f"/usr/bin/{name}"
+            return None
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            if cmd[:3] == ["omarchy", "toggle", "idle"] and cmd[-1] == "status":
+                return subprocess.CompletedProcess(cmd, 0, '{"stayAwake": false}\n', "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(state_dir)}), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ), mock.patch.object(ds.shutil, "which", side_effect=which), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds.subprocess, "Popen") as popen, mock.patch.object(
+                ds, "_process_table", return_value=[]
+            ), mock.patch("sys.stdout", io.StringIO()) as out:
+                for _ in range(8):
+                    state = ds.load_desk_state()
+                    state["awake_idle_ready"] = False
+                    ds.save_desk_state(state)
+                    ds.awake_acquire(cfg)
+        toggles = [cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]]
+        self.assertEqual(toggles, [["omarchy", "toggle", "idle"]])
+        popen.assert_not_called()
+        self.assertIn("not toggling idle again", out.getvalue())
+
+    def test_systemd_inhibit_spawns_once_when_the_pid_check_fails(self) -> None:
+        cfg = self._cfg()
+        spawned: list[list[str]] = []
+
+        def which(name: str) -> str | None:
+            if name == "systemd-inhibit":
+                return "/usr/bin/systemd-inhibit"
+            return None
+
+        def popen(argv, **kwargs):
+            spawned.append(list(argv))
+            proc = mock.Mock()
+            proc.pid = 80
+            return proc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ), mock.patch.object(ds.shutil, "which", side_effect=which), mock.patch.object(
+                ds.subprocess, "Popen", side_effect=popen
+            ), mock.patch.object(ds, "_process_table", return_value=[]), mock.patch(
+                "sys.stdout", io.StringIO()
+            ):
+                for _ in range(15):
+                    ds.awake_acquire(cfg)
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(spawned[0][0], "systemd-inhibit")
+        self.assertIn("--why=desk awake", spawned[0])
 
 
 class ShortcutAndSecondaryTests(unittest.TestCase):
