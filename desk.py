@@ -6483,6 +6483,7 @@ def awake_backend_name(cfg: dict) -> str:
 # cannot start a new inhibitor on every restart.
 _awake_last_spawn_at = 0.0
 _awake_last_idle_toggle_at = 0.0
+_awake_idle_cap_logged = False
 
 
 def _pid_alive(pid: int) -> bool:
@@ -6720,14 +6721,23 @@ def _spawn_inhibitor(cfg: dict) -> int | None:
     return int(proc.pid)
 
 
-def _hypridle_running() -> bool:
+def _hypridle_observed() -> bool | None:
+    """True when hypridle is running, False when it is not, None if we cannot tell.
+
+    Omarchy's idle toggle stops hypridle to stay awake and starts it again
+    to lock. `omarchy toggle idle status` does not follow that process.
+    """
     if shutil.which("pgrep") is None:
-        return False
+        return None
     try:
         proc = run(["pgrep", "-x", "hypridle"], timeout=2.0)
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
     return proc.returncode == 0
+
+
+def _hypridle_running() -> bool:
+    return _hypridle_observed() is True
 
 
 def _omarchy_status() -> dict | None:
@@ -6756,20 +6766,24 @@ def _omarchy_status() -> dict | None:
 
 
 def _omarchy_stay_awake() -> bool | None:
+    """True when idle is inhibited. hypridle absent means inhibited."""
+    observed = _hypridle_observed()
+    if observed is not None:
+        return not observed
     data = _omarchy_status()
     if isinstance(data, dict) and "stayAwake" in data:
         return bool(data.get("stayAwake"))
-    if shutil.which("omarchy-toggle-idle"):
-        # That helper stops hypridle to stay awake, and starts it to lock again.
-        return not _hypridle_running()
     return None
 
 
 def _omarchy_set(want: bool) -> bool:
+    """Toggle Omarchy idle only when reality is not already `want`."""
     current = _omarchy_stay_awake()
-    if current is None or current is want:
-        return current is not None
-    if isinstance(_omarchy_status(), dict) and shutil.which("omarchy"):
+    if current is None:
+        return False
+    if current is want:
+        return True
+    if shutil.which("omarchy"):
         try:
             proc = run(["omarchy", "toggle", "idle"], timeout=4.0)
         except (OSError, subprocess.TimeoutExpired):
@@ -6781,7 +6795,9 @@ def _omarchy_set(want: bool) -> bool:
         except (OSError, subprocess.TimeoutExpired):
             return False
         return proc.returncode == 0
-    return False
+    if want:
+        return _hypridle_stop()
+    return _hypridle_start()
 
 
 def _hypridle_stop() -> bool:
@@ -6805,49 +6821,73 @@ def _hypridle_start() -> bool:
 
 
 def _idle_toggle_recent() -> bool:
+    global _awake_idle_cap_logged
     if not _awake_last_idle_toggle_at:
         return False
-    return time.time() - _awake_last_idle_toggle_at < AWAKE_RESPAWN_MIN_S
+    recent = time.time() - _awake_last_idle_toggle_at < AWAKE_RESPAWN_MIN_S
+    if not recent:
+        _awake_idle_cap_logged = False
+    return recent
+
+
+def _log_idle_cap_once() -> None:
+    global _awake_idle_cap_logged
+    if _awake_idle_cap_logged:
+        return
+    _awake_idle_cap_logged = True
+    log(
+        "awake: not toggling idle again "
+        f"(cap is one toggle per {AWAKE_RESPAWN_MIN_S}s)"
+    )
+
+
+def _mark_idle_toggled() -> None:
+    global _awake_last_idle_toggle_at, _awake_idle_cap_logged
+    _awake_last_idle_toggle_at = time.time()
+    _awake_idle_cap_logged = False
 
 
 def _linux_hold_idle(cfg: dict) -> None:
-    """Prefer Omarchy's stay-awake toggle. Otherwise stop the user hypridle.
+    """Inhibit idle only when it is actually running.
 
-    Runs once per awake session. A lost ready flag must not toggle every tick.
+    Omarchy's control is a toggle. hypridle already absent means idle is
+    inhibited; toggling again would turn idle back on.
     """
-    global _awake_last_idle_toggle_at
     state = load_desk_state()
+    stay = _omarchy_stay_awake()
+    if stay is not None:
+        if stay:
+            return
+        if _idle_toggle_recent():
+            _log_idle_cap_once()
+            return
+        _mark_idle_toggled()
+        if _omarchy_set(True):
+            state = load_desk_state()
+            state["awake_omarchy"] = True
+            state["awake_idle_ready"] = True
+            save_desk_state(state)
+        return
     if state.get("awake_idle_ready"):
         return
     if _idle_toggle_recent():
-        log(
-            "awake: not toggling idle again "
-            f"(cap is one toggle per {AWAKE_RESPAWN_MIN_S}s)"
-        )
+        _log_idle_cap_once()
         return
-    if _omarchy_stay_awake() is not None:
-        _awake_last_idle_toggle_at = time.time()
-        if _omarchy_stay_awake() is False and _omarchy_set(True):
-            state = load_desk_state()
-            state["awake_omarchy"] = True
-        state = load_desk_state()
-        state["awake_idle_ready"] = True
-        save_desk_state(state)
-        return
-    _awake_last_idle_toggle_at = time.time()
-    if _hypridle_running() and _hypridle_stop():
-        state = load_desk_state()
-        state["awake_hypridle"] = True
+    _mark_idle_toggled()
+    stopped = _hypridle_running() and _hypridle_stop()
     state = load_desk_state()
+    if stopped:
+        state["awake_hypridle"] = True
     state["awake_idle_ready"] = True
     save_desk_state(state)
 
 
 def _linux_release_idle(state: dict) -> None:
+    """Restore idle only if desk is the one that disabled it."""
     if state.get("awake_omarchy"):
         _omarchy_set(False)
         state["awake_omarchy"] = False
-    if state.get("awake_hypridle"):
+    elif state.get("awake_hypridle"):
         _hypridle_start()
         state["awake_hypridle"] = False
     state["awake_idle_ready"] = False
@@ -6861,11 +6901,15 @@ def awake_inhibitor_running(cfg: dict) -> bool:
             pid = int(state.get("awake_pid") or 0)
         except (TypeError, ValueError):
             pid = 0
-        return _pid_alive(pid)
-    if _inhibitor_pids(cfg, table):
+        if _pid_alive(pid):
+            return True
+    elif _inhibitor_pids(cfg, table):
         return True
     state = load_desk_state()
+    # Omarchy: running only when desk stopped hypridle and it is still stopped.
     if state.get("awake_omarchy") and _omarchy_stay_awake() is True:
+        return True
+    if state.get("awake_hypridle") and _hypridle_observed() is False:
         return True
     return False
 
@@ -6939,9 +6983,10 @@ def awake_release(cfg: dict) -> None:
     if state.get("awake_pid"):
         state["awake_pid"] = 0
         changed = True
-    global _awake_last_spawn_at, _awake_last_idle_toggle_at
+    global _awake_last_spawn_at, _awake_last_idle_toggle_at, _awake_idle_cap_logged
     _awake_last_spawn_at = 0.0
     _awake_last_idle_toggle_at = 0.0
+    _awake_idle_cap_logged = False
     if state.get("awake_spawned_at"):
         state["awake_spawned_at"] = 0
         changed = True

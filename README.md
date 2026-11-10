@@ -1114,7 +1114,7 @@ The assertion is a process the watcher owns:
 | Platform | What it holds | Restore |
 |---|---|---|
 | macOS | one `caffeinate -dimsu -w <watcher pid>` (no `sleep` child). It exits with the watcher. A second one is not started while that process is alive, and a failed check cannot spawn another for 10 minutes | kill that process |
-| Linux / Omarchy | `omarchy toggle idle` once per session when `omarchy` or `omarchy-shell` can report `stayAwake` (screensaver and lock). Otherwise `systemctl --user stop hypridle`, started again on release. `systemd-inhibit` is only the fallback when Omarchy is not the backend, and it is one process, not one per tick | toggle idle back only if desk turned it on; start hypridle only if desk stopped it; kill the inhibit process |
+| Linux / Omarchy | `omarchy toggle idle` only when `hypridle` is actually running (absent means idle is already inhibited). Otherwise `systemctl --user stop hypridle`. `systemd-inhibit` is only the fallback when Omarchy is not the backend | toggle idle back, or start hypridle, only if desk is the one that stopped it |
 
 `awake.inhibit` replaces the held command. `awake.release` is an optional
 shell command run on the way back to normal. `status --json` includes
