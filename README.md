@@ -644,7 +644,10 @@ Order, on every host:
 1. Read the adapter locally when the control link is here.
 2. Otherwise ask `relay_hosts` over the same SSH path `desk to` and
    `desk layout` use, and take the first real reading. The peer's active
-   layout name comes back with it.
+   layout name comes back with it. `desk pbp`, `desk full`, and the other
+   display writes use that same path. A missing local device is not
+   success: the command exits nonzero, and the mode cache stays put,
+   unless a host actually applies the change.
 3. Otherwise use the active named layout. A layout with any PBP monitor
    is `pbp`, and the bar shows that name and `PBP` (`MAC  mac-tower  PBP`).
 4. Otherwise use the last applied or observed mode in
