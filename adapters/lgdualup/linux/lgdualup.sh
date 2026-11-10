@@ -9,6 +9,7 @@
 #   ./lgdualup.sh pbp-assign <main> <sub>
 #   ./lgdualup.sh pbp on|off|full|side|50-50|stacked|1|3|5
 #   ./lgdualup.sh get pbp
+#   ./lgdualup.sh probe
 #   ./lgdualup.sh --read 0xD7
 #
 # VCP 0xF4 @ 0x50 is Main only. Sub window needs 0x55/0x5A and/or the
@@ -328,14 +329,40 @@ pbp_read_hint() {
     fi
 }
 
+# Known side-by-side codes. Stacked has no safe write value in this tree:
+# 0 and 2 stretch the panel, 1 is full, and a read of 0 is only "PBP on".
+side_by_side_code() {
+    local value=$1
+    [ "$value" -eq 3 ] || [ "$value" -eq 5 ]
+}
+
 keep_pbp() {
     local node=$1 value
     if ! value=$(read_vcp "$node" $((0x51)) $((0xD7))); then
         announce_keep ""
         return 0
     fi
+    if side_by_side_code "$value"; then
+        echo "panel split is side-by-side (0xD7=${value}). No stacked write code is configured, so 0xD7 was not changed." >&2
+        echo "Set stacked on the monitor, then run: lgdualup probe" >&2
+        echo "Do not store 0 or 2 (they stretch this panel)." >&2
+        return 1
+    fi
     announce_keep "$value"
     return 0
+}
+
+# Read 0xD7 and write $2 only when it differs. $1 is the hidraw node.
+write_pbp_if_different() {
+    local node=$1 val=$2 label=$3 current
+    if current=$(read_vcp "$node" $((0x51)) $((0xD7))); then
+        if [ "$current" = "$val" ]; then
+            printf 'pbp 0xD7=%s already, not written\n' "$current"
+            return 0
+        fi
+    fi
+    send_vcp "$node" $((0x51)) $((0xD7)) "$val" || return 1
+    printf 'pbp -> %s (0x%02x)\n' "$label" "$val"
 }
 
 # Names resolve through pbp_splits. 0 and 2 are refused even as raw numbers.
@@ -372,7 +399,7 @@ parse_pbp() {
 }
 
 usage() {
-    echo "usage: $0 --info | --list | input|input-main|input-sub <name> | swap | pbp-assign <main> <sub> | pbp <mode> | get pbp | --read <vcp>" >&2
+    echo "usage: $0 --info | --list | input|input-main|input-sub <name> | swap | pbp-assign <main> <sub> | pbp <mode> | probe | get pbp | --read <vcp>" >&2
 }
 
 vcp_addr() {
@@ -429,9 +456,28 @@ main() {
         local fake_mode
         fake_mode=$(parse_pbp "${2:-}") || exit 2
         if [ "$fake_mode" = keep ]; then
+            case "$LGDUALUP_FAKE_PBP_READ" in
+                3|5)
+                    echo "panel split is side-by-side (0xD7=${LGDUALUP_FAKE_PBP_READ}). No stacked write code is configured, so 0xD7 was not changed." >&2
+                    echo "Set stacked on the monitor, then run: lgdualup probe" >&2
+                    exit 1
+                    ;;
+            esac
             announce_keep "$LGDUALUP_FAKE_PBP_READ"
             exit 0
         fi
+        if [ "$LGDUALUP_FAKE_PBP_READ" = "$fake_mode" ]; then
+            printf 'pbp 0xD7=%s already, not written\n' "$fake_mode"
+            exit 0
+        fi
+        printf 'pbp -> %s (0x%02x)\n' "${2:-}" "$fake_mode"
+        exit 0
+    fi
+    if [ "$cmd" = probe ] && [ -n "${LGDUALUP_FAKE_PBP_READ+x}" ]; then
+        printf 'pbp 0xD7 @ 0x51 = %s (0x%02x)\n' "$LGDUALUP_FAKE_PBP_READ" "$LGDUALUP_FAKE_PBP_READ"
+        pbp_read_hint "$LGDUALUP_FAKE_PBP_READ"
+        printf 'stacked write code: %s\n' "${SPLIT_STACKED:-unset (keep; 0 and 2 are never sent)}"
+        exit 0
     fi
     case "$cmd" in
         --list)
@@ -470,7 +516,7 @@ main() {
         pbp)
             parse_pbp "${2:-}" >/dev/null || exit 2
             ;;
-        input|input-main|input-sub|swap|pbp-assign) ;;
+        input|input-main|input-sub|swap|pbp-assign|probe) ;;
         *) usage; exit 2 ;;
     esac
 
@@ -541,11 +587,26 @@ main() {
                 exit 2
             }
             if [ "$val" = keep ]; then
-                keep_pbp "$node"
+                keep_pbp "$node" || exit $?
             else
-                send_vcp "$node" $((0x51)) $((0xD7)) "$val" || exit 1
-                printf 'pbp -> %s (0x%02x)\n' "$2" "$val"
+                write_pbp_if_different "$node" "$val" "$2" || exit 1
             fi
+            ;;
+        probe)
+            local value
+            if ! value=$(read_vcp "$node" $((0x51)) $((0xD7))); then
+                echo "no VCP reply for 0xD7 @ 0x51 (DDC get 0x01, reply 0x02)" >&2
+                exit 1
+            fi
+            printf 'pbp 0xD7 @ 0x51 = %d (0x%02x)\n' "$value" "$value"
+            pbp_read_hint "$value"
+            if [ -n "$SPLIT_STACKED" ] && [ "$SPLIT_STACKED" != keep ]; then
+                printf 'stacked write code: %s\n' "$SPLIT_STACKED"
+            else
+                echo "stacked write code: unset (keep; 0 and 2 are never sent)"
+            fi
+            echo "If the picture on screen is stacked top/bottom, put that number in pbp_splits.stacked."
+            echo "Do not store 0 or 2."
             ;;
         get|--read)
             local which addr value label

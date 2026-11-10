@@ -250,9 +250,63 @@ def apply_extras(text: str, screen_text: str, res: str) -> dict[str, str]:
         "scaling": DEFAULT_SCALING,
         "origin": DEFAULT_ORIGIN,
     }
-    extras.update(screen_header_extras(screen_text))
+    header = screen_header_extras(screen_text)
+    # Origin is the arrangement, not a property of the mode. Copying the
+    # current origin makes whichever display already sits at (0,0) stay main.
+    header.pop("origin", None)
+    extras.update(header)
     extras.update(mode_line_extras(text, res))
+    extras.pop("origin", None)
+    extras["origin"] = DEFAULT_ORIGIN
     return extras
+
+
+def res_width(res: str) -> int:
+    width, _, _height = (res or "").partition("x")
+    try:
+        return int(width)
+    except ValueError:
+        return 0
+
+
+def arrangement_profiles(
+    display_id: str,
+    res: str,
+    degree: int,
+    extras: dict[str, str],
+    screens: list[dict],
+    text: str,
+    secondary_id: str = "",
+) -> list[str]:
+    """DualUp at (0,0). Every other external screen sits to its right.
+
+    The configured display (``--id``, the primary monitor) is main because
+    its origin is (0,0). Which screen currently occupies (0,0) is ignored.
+    """
+    primary = dict(extras)
+    primary["origin"] = DEFAULT_ORIGIN
+    profiles = [verbose_profile(display_id, res, degree, primary)]
+    cursor = res_width(res)
+    for screen in screens:
+        if screen.get("builtin"):
+            continue
+        sid = str(screen.get("id") or "")
+        if not sid or sid == display_id:
+            continue
+        if secondary_id and sid != secondary_id:
+            continue
+        blob = screen.get("text") or ""
+        sec_res = screen_resolution(blob)
+        if not sec_res:
+            continue
+        sec_rot = screen_rotation(blob)
+        if sec_rot is None:
+            sec_rot = 0
+        sec_extras = apply_extras(text, blob, sec_res)
+        sec_extras["origin"] = f"({cursor},0)"
+        profiles.append(verbose_profile(sid, sec_res, sec_rot, sec_extras))
+        cursor += res_width(sec_res)
+    return profiles
 
 
 def verbose_profile(display_id: str, res: str, degree: int, extras: dict[str, str]) -> str:
@@ -298,9 +352,9 @@ def print_placer(proc: subprocess.CompletedProcess) -> None:
         print(err, file=sys.stderr if proc.returncode else sys.stdout)
 
 
-def apply_profile(placer: str, profile: str) -> int:
+def apply_profile(placer: str, profiles: list[str]) -> int:
     try:
-        applied = run([placer, profile], timeout=8.0)
+        applied = run([placer, *profiles], timeout=8.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"dualup-layout: displayplacer apply failed: {exc}", file=sys.stderr)
         return 2
@@ -315,6 +369,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--res", default="")
     parser.add_argument("--degree", type=int, default=None)
     parser.add_argument("--split", default="", help="pbp geometry: side (tall half) or stacked (2560x1440)")
+    parser.add_argument(
+        "--secondary",
+        default="",
+        help="external display to place to the right of --id (config, not current origin)",
+    )
     args = parser.parse_args(argv)
 
     kind = split_kind(args.split) if args.mode == "pbp" else "side"
@@ -372,12 +431,20 @@ def main(argv: list[str] | None = None) -> int:
 
     screen = screen_by_id(screens, display_id)
     extras = apply_extras(text, (screen or {}).get("text") or "", res)
-    verbose = verbose_profile(display_id, res, degree, extras)
+    profiles = arrangement_profiles(
+        display_id,
+        res,
+        degree,
+        extras,
+        screens,
+        text,
+        (args.secondary or "").strip(),
+    )
     short = short_profile(display_id, res, degree)
-    print(f"dualup-layout {args.mode} → {verbose}")
-    if apply_profile(placer, verbose) != 0:
+    print(f"dualup-layout {args.mode} → {' '.join(profiles)}")
+    if apply_profile(placer, profiles) != 0:
         print(f"dualup-layout {args.mode} fallback → {short}")
-        if apply_profile(placer, short) != 0:
+        if apply_profile(placer, [short]) != 0:
             return 2
 
     try:

@@ -3314,19 +3314,135 @@ def cmd_switch(cfg: dict, target: str | None) -> int:
     return cmd_to(cfg, target)
 
 
-def cmd_pbp(cfg: dict, mode: str | None) -> int:
-    chosen = (mode or str(cfg.get("pbp_mode") or "")).strip()
-    if not chosen:
-        print("usage: desk pbp <mode>   (mode is whatever lgdualup pbp accepts)")
-        return 2
-    rc = dualup_set_mode(
-        cfg,
-        chosen,
-        missing="lgdualup not on PATH — DualUp PBP needs `make install`",
+_PBP_STACKED_MODES = {"stacked", "stack", "keep", "top-bottom", "tb", "top/bottom"}
+_PBP_SIDE_MODES = {"side", "on", "50", "50/50", "50-50"}
+_PBP_WIDE_MODES = {"66", "66/33", "66-33"}
+
+
+def explicit_pbp_split(mode: str) -> str:
+    """Split name an explicit `desk pbp <mode>` is asking for.
+
+    stacked/keep stays stacked. side and 50-50 ask to leave stacked.
+    """
+    key = str(mode or "").strip().lower()
+    if key in _PBP_STACKED_MODES:
+        return "stacked"
+    if key in _PBP_SIDE_MODES:
+        return "side"
+    if key in _PBP_WIDE_MODES:
+        return "66/33"
+    return key
+
+
+def pbp_layout_names(cfg: dict) -> list[str]:
+    return [name for name in layouts_config(cfg) if layout_mode_of(cfg, name) == "pbp"]
+
+
+def last_pbp_layout_name() -> str:
+    return str(load_desk_state().get("last_pbp_layout") or "").strip()
+
+
+def resolve_pbp_layout_name(cfg: dict) -> str | None:
+    """Active PBP layout, else the last one applied, else the first configured."""
+    active = active_layout_name(cfg)
+    if active and layout_mode_of(cfg, active) == "pbp":
+        return active
+    remembered = last_pbp_layout_name()
+    if remembered and layout_mode_of(cfg, remembered) == "pbp":
+        return remembered
+    names = pbp_layout_names(cfg)
+    return names[0] if names else None
+
+
+def secondary_display_id(cfg: dict) -> str:
+    """display_id of a non-primary monitor, when config names one."""
+    for inst in display_instances(cfg):
+        if inst.get("primary"):
+            continue
+        text = str(inst.get("display_id") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def default_stacked_spec(cfg: dict) -> dict:
+    """PBP top/bottom from configured hosts when no named PBP layout exists."""
+    wired: list[str] = []
+    for item in public_host_list(cfg):
+        host_id = str(item.get("id") or "")
+        if host_id and configured_display_input(cfg, host_id):
+            wired.append(host_id)
+    if not wired:
+        wired = [str(item.get("id") or "") for item in public_host_list(cfg) if item.get("id")]
+    top = wired[0] if wired else "mac"
+    bottom = wired[1] if len(wired) > 1 else top
+    return {"mode": "pbp", "top": top, "bottom": bottom, "split": "stacked"}
+
+
+def rewrite_pbp_split(steps: list[dict], split: str) -> list[dict]:
+    """Replace the split token on PBP steps. `pbp full` is left alone."""
+    out: list[dict] = []
+    for step in steps:
+        item = dict(step)
+        if item.get("op") == "adapter":
+            args = [str(part) for part in (item.get("args") or [])]
+            if args and args[0] == "pbp" and (len(args) < 2 or args[1] != "full"):
+                if len(args) == 1:
+                    args.append(split)
+                else:
+                    args[1] = split
+                item["args"] = args
+        if item.get("op") == "os-layout" and item.get("mode") == "pbp":
+            item["split"] = split
+        out.append(item)
+    return out
+
+
+def apply_pbp_layout(cfg: dict, name: str | None, split_override: str | None) -> int:
+    """Apply PBP the way `desk layout` does: split, then sub, then main."""
+    if name and name in layouts_config(cfg):
+        steps = layout_apply_steps(cfg, name)
+        if split_override:
+            steps = rewrite_pbp_split(steps, split_override)
+        print(f"layout {name}")
+        rc = execute_layout_steps(cfg, steps)
+        if rc == 0:
+            record_named_layout(cfg, name)
+        return rc
+    spec = default_stacked_spec(cfg)
+    if split_override:
+        spec["split"] = split_override
+    primary = None
+    for inst in display_instances(cfg):
+        if inst.get("primary"):
+            primary = inst
+            break
+    if primary is None:
+        print("no primary display configured")
+        return 1
+    print(
+        f"pbp default → top={spec['top']} bottom={spec['bottom']} split={spec['split']}"
     )
+    rc = execute_layout_steps(cfg, steps_for_monitor(cfg, primary, spec))
+    if rc == 0:
+        save_display_record("pbp", "applied", host=_this_host_id(cfg))
+    return rc
+
+
+def cmd_pbp(cfg: dict, mode: str | None) -> int:
+    """Apply PBP from a layout. An explicit mode may name a different split.
+
+    No mode uses the active PBP layout, else the last applied one, else the
+    first PBP layout, else a stacked pair from config. It does not send
+    `pbp_mode` 50-50 or the hardcoded mac/linux input pair.
+    """
+    if mode:
+        # stacked/keep forces stacked. side/50-50 is the only way to leave it.
+        rc = apply_pbp_layout(cfg, resolve_pbp_layout_name(cfg), explicit_pbp_split(mode))
+    else:
+        rc = apply_pbp_layout(cfg, resolve_pbp_layout_name(cfg), None)
     if rc != 0:
         return rc
-    clear_active_layout()
     _after_display_change(cfg)
     return 0
 
@@ -4661,6 +4777,7 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
         "dualup_usb": dual_usb,
         "dualup_inputs": inputs,
         "active_layout": active_layout,
+        "last_pbp_layout": last_pbp_layout_name(),
         "layouts": public_layout_list(cfg, active=known_layout),
         "monitors": assignment,
         "peer": peer,
@@ -5499,6 +5616,9 @@ def apply_os_layout_host(cfg: dict, instance: dict, host: str, mode: str, split:
         display_id = str(instance.get("display_id") or cfg.get("_dualup_display_id") or "").strip()
         if display_id:
             cmd.extend(["--id", display_id])
+        secondary = secondary_display_id(cfg)
+        if secondary:
+            cmd.extend(["--secondary", secondary])
         print(f"os layout {host_id} → {' '.join(cmd[1:])}")
         return _run_retry(cmd, retries=retries, delay=delay, label=f"os layout {host_id}")
     remote = remote_layout_command(instance, mode, split)
@@ -5607,6 +5727,26 @@ def execute_layout_steps(cfg: dict, steps: list[dict]) -> int:
     return 0
 
 
+def record_named_layout(cfg: dict, name: str) -> None:
+    """Remember a layout that actually applied, including when USB was relayed.
+
+    A PBP layout is also `last_pbp_layout`, so a later `desk pbp` with no
+    mode reapplies this split and pair instead of `pbp_mode` 50-50.
+    """
+    state = load_desk_state()
+    state["active_layout"] = name
+    state["active_layout_ts"] = time.time()
+    mode = layout_mode_of(cfg, name)
+    if mode == "pbp":
+        state["last_pbp_layout"] = name
+    if mode in ("full", "pbp"):
+        state["display_mode"] = mode
+        state["display_mode_source"] = "applied"
+        state["display_mode_host"] = _this_host_id(cfg)
+        state["display_mode_ts"] = time.time()
+    save_desk_state(state)
+
+
 def apply_named_layout(cfg: dict, name: str) -> int:
     key = str(name or "").strip()
     layouts = layouts_config(cfg)
@@ -5617,8 +5757,7 @@ def apply_named_layout(cfg: dict, name: str) -> int:
     print(f"layout {key}")
     rc = execute_layout_steps(cfg, layout_apply_steps(cfg, key))
     if rc == 0:
-        save_active_layout(key)
-        save_display_record(layout_mode_of(cfg, key), "applied", host=_this_host_id(cfg), layout=key)
+        record_named_layout(cfg, key)
     return rc
 
 
@@ -6915,7 +7054,11 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
     )
     to.add_argument("--mouse-only", action="store_true", help="do not change the display input")
     pbp = sub.add_parser("pbp", help="DualUp PBP: USB toggle, input pair, tilted OS layout")
-    pbp.add_argument("mode", nargs="?", help="mode string passed to `lgdualup pbp` (default: pbp_mode)")
+    pbp.add_argument(
+        "mode",
+        nargs="?",
+        help="optional split (stacked stays stacked; 50-50 or side leaves it)",
+    )
     sub.add_parser("full", help="DualUp full: USB toggle + 2880x2560 @ 270°")
     lay = sub.add_parser(
         "layout",

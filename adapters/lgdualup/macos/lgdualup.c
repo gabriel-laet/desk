@@ -405,6 +405,15 @@ static int keep_pbp(IOHIDDeviceRef dev) {
         fprintf(stderr, "PBP is off; enable PBP 1:1 in the monitor OSD once\n");
         return 1;
     }
+    if (cur == 3 || cur == 5) {
+        fprintf(stderr,
+                "panel split is side-by-side (0xD7=%u). No stacked write code is "
+                "configured, so 0xD7 was not changed.\n"
+                "Set stacked on the monitor, then run: lgdualup probe\n"
+                "Do not store 0 or 2 (they stretch this panel).\n",
+                cur);
+        return 0;
+    }
     printf("pbp keep (0xD7=%u, not written)\n", cur);
     return 1;
 }
@@ -534,7 +543,54 @@ static int print_vcp(IOHIDDeviceRef dev, uint8_t addr, uint8_t vcp, const char *
 
 static const char *USAGE =
     "usage: %s --info | --list | input|input-main|input-sub <name> | "
-    "swap | pbp-assign <main> <sub> | pbp <mode> | get pbp | --read <vcp>\n";
+    "swap | pbp-assign <main> <sub> | pbp <mode> | probe | get pbp | --read <vcp>\n";
+
+/* Read 0xD7. Write only when the current value differs from target.
+ * target is never 0 or 2 (those stretch the panel). */
+static int apply_pbp_value(IOHIDDeviceRef dev, const char *label, uint16_t target) {
+    uint16_t cur = 0;
+    if (get_vcp(dev, ADDR_PBP, VCP_PBP, &cur) && cur == target) {
+        printf("pbp 0xD7=%u already, not written\n", cur);
+        return 1;
+    }
+    if (!send_vcp(dev, ADDR_PBP, VCP_PBP, target))
+        return 0;
+    printf("pbp -> %s (0x%02x)\n", label, target);
+    return 1;
+}
+
+static int print_probe(IOHIDDeviceRef dev) {
+    uint16_t value = 0;
+    if (!get_vcp(dev, ADDR_PBP, VCP_PBP, &value)) {
+        fprintf(stderr, "no VCP reply for 0xD7 @ 0x51 (DDC get 0x01, reply 0x02)\n");
+        return 0;
+    }
+    printf("pbp 0xD7 @ 0x51 = %u (0x%02x)\n", value, value);
+    if (value == 0 || value == 2) {
+        fprintf(stderr,
+                "0xD7=%u means PBP is on, not which way the picture is split. "
+                "Do not store %u (sending it stretches this panel).\n",
+                value, value);
+    } else if (value == 1) {
+        fprintf(stderr, "0xD7=1 is full (PBP off).\n");
+    } else if (value == 5) {
+        fprintf(stderr, "0xD7=5 is side-by-side 50-50.\n");
+    } else if (value == 3) {
+        fprintf(stderr, "0xD7=3 is side-by-side 66/33.\n");
+    } else {
+        fprintf(stderr,
+                "If the picture is stacked top/bottom, store %u as pbp_splits.stacked. "
+                "Codes 0 and 2 are not sent.\n",
+                value);
+    }
+    if (g_splits.stacked < 0)
+        printf("stacked write code: unset (keep; 0 and 2 are never sent)\n");
+    else
+        printf("stacked write code: %d\n", g_splits.stacked);
+    printf("If the picture on screen is stacked top/bottom, put that number in pbp_splits.stacked.\n");
+    printf("Do not store 0 or 2.\n");
+    return 1;
+}
 
 int main(int argc, char **argv) {
     load_config_splits();
@@ -602,6 +658,12 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!strcmp(argv[1], "probe")) {
+        int pok = print_probe(t.dev);
+        lg_release(&t);
+        return pok ? 0 : 1;
+    }
+
     int ok = 0;
     if ((!strcmp(argv[1], "input") || !strcmp(argv[1], "input-main")) &&
         argc >= 3) {
@@ -659,15 +721,15 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[1], "pbp") && argc >= 3) {
         if (pbp_keeps(argv[2])) {
             ok = keep_pbp(t.dev);
+            lg_release(&t);
+            return ok ? 0 : 1;
         } else {
             uint16_t val;
             if (!parse_pbp(argv[2], &val)) {
                 lg_release(&t);
                 return 2;
             }
-            ok = send_vcp(t.dev, ADDR_PBP, VCP_PBP, val);
-            if (ok)
-                printf("pbp -> %s (0x%02x)\n", argv[2], val);
+            ok = apply_pbp_value(t.dev, argv[2], val);
         }
     } else if ((!strcmp(argv[1], "get") || !strcmp(argv[1], "--read")) && argc >= 3) {
         uint8_t vcp = 0, addr = 0;
