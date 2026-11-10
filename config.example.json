@@ -110,6 +110,7 @@
     "tray": {
       "density": "strip",
       "lights": false,
+      "bar_slots": false,
       "slots": [
         { "id": "weather", "enabled": true, "kind": "chip", "show_altitude": true },
         { "id": "kettle", "enabled": true, "kind": "face" },

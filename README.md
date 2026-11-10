@@ -492,6 +492,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.wallpaper` | Optional per-output images. Off unless `enabled` is true. See [Wallpaper](#wallpaper) |
 | `adapters.hardware` | Optional LAN metrics. Off unless `enabled` is true. See [Hardware](#hardware) |
 | `ui.tray.density` | `strip` (default, quiet) or `chips` (dense `bar_label` in the bar) |
+| `ui.tray.bar_slots` | `false` (default). The bar is one mark: host letter, full or split, awake bolt. `true` puts slot labels (weather, kettle, hardware) back on the bar. They stay in the click panel either way |
 | `ui.tray.lights` | If true, `bar_strip` may include a lights on/off mark |
 | `ui.tray.slots` | Order + show/hide + flavor. Default **weather → kettle → dualup**. [docs/ui-config.md](docs/ui-config.md) |
 | `adapters.hosts.this_host` | This machine's id. Any id in the host map. Default is `mac` on macOS and `linux` on Linux |
@@ -999,7 +1000,7 @@ Any of those fields may be null or missing. Which tools appear is up to the endp
 
 Shells paint the slot only when it is enabled:
 
-- **Menu bar and Omarchy strip.** One compact token for the focused host: its CPU temperature when that metric is present (for example `38°`), plus the highest `limit_used_pct` across that host's tools (for example `38° 80%`). No per-host dump. `bar_strip` stays the focus token and the display mark.
+- **Menu bar and Omarchy strip.** By default one compact mark from `bar_mark` (host letter, full or split, awake bolt). Weather, kettle, and the hardware token stay in the click panel. `ui.tray.bar_slots: true` puts those slot labels back on the bar. `bar_strip` is still the longer focus string.
 - **Click panel, both shells.** A table of CPU %, memory %, CPU temp, and GPU % / temp for each desk host and each `extra_hosts` id. A missing metric is an em dash. `offline` follows `online: false`. `stale` follows `last_seen`. Under the table, each host with AI data lists its tools (name, plan, the highest limit and its reset time, today's tokens and cost when those numbers are present) and a llama line (model, tok/s, slots busy/total) when `llama.running` is true.
 
 Detail: [`adapters/hardware/`](adapters/hardware/).
@@ -1114,7 +1115,7 @@ The assertion is a process the watcher owns:
 | Platform | What it holds | Restore |
 |---|---|---|
 | macOS | one `caffeinate -dimsu -w <watcher pid>` (no `sleep` child). It exits with the watcher. A second one is not started while that process is alive, and a failed check cannot spawn another for 10 minutes | kill that process |
-| Linux / Omarchy | `omarchy toggle idle` only when `hypridle` is actually running (absent means idle is already inhibited). Otherwise `systemctl --user stop hypridle`. `systemd-inhibit` is only the fallback when Omarchy is not the backend | toggle idle back, or start hypridle, only if desk is the one that stopped it |
+| Linux / Omarchy | `omarchy toggle idle` only when `hypridle` is actually running (absent means idle is already inhibited). The first time a watcher sees it already stopped, with no ownership flag, it adopts that stop so the end of the schedule can start `hypridle` again (`uwsm app`, `setsid`, or `systemctl --user`). `systemd-inhibit` is only the fallback when Omarchy is not the backend | toggle idle back, then a session start if `hypridle` is still absent, only if desk owns the stop |
 
 `awake.inhibit` replaces the held command. `awake.release` is an optional
 shell command run on the way back to normal. `status --json` includes

@@ -2712,6 +2712,19 @@ class UIConfigTests(unittest.TestCase):
         public = ds.format_public_ui(cfg)
         self.assertEqual(public["hud"]["density"], "compact")
         self.assertEqual(public["tray"]["slots"][0]["id"], "kettle")
+        self.assertFalse(public["tray"]["bar_slots"])
+        marked = ds.format_bar_mark(
+            {
+                "target_hint": "LNX",
+                "dualup_mode": "pbp",
+                "active_layout": "mac-tower",
+                "awake": {"effective": True},
+            }
+        )
+        self.assertEqual(marked["text"], "L▣⚡")
+        self.assertEqual(marked["symbol"], "split")
+        self.assertFalse(ds.parse_ui_section({})["bar_slots"])
+        self.assertTrue(ds.parse_ui_section({"tray": {"bar_slots": True}})["bar_slots"])
 
     def test_write_ui_config_merges_without_clobbering_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6119,6 +6132,7 @@ class AwakeTests(unittest.TestCase):
         ds._awake_last_spawn_at = 0.0
         ds._awake_last_idle_toggle_at = 0.0
         ds._awake_idle_cap_logged = False
+        ds._awake_ownership_decided = False
         ds._awake_logged = None
 
     def _cfg(self, **extra: object) -> dict:
@@ -6443,6 +6457,69 @@ class AwakeTests(unittest.TestCase):
         self.assertEqual(before, 2)
         self.assertEqual(after, 2)
         self.assertEqual(untouched, 2)
+        self.assertFalse(idle["running"])
+
+    def test_watcher_adopts_a_hypridle_that_is_already_stopped(self) -> None:
+        cfg = self._cfg()
+        noon = datetime(2026, 11, 10, 12, 0)
+        calls, idle, which, fake_run = self._omarchy_hypridle(False)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(state_dir)}), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ), mock.patch.object(ds.shutil, "which", side_effect=which), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "_process_table", return_value=[]), mock.patch(
+                "sys.stdout", io.StringIO()
+            ) as out:
+                ds.awake_reconcile(cfg, now=noon)
+                ds.awake_reconcile(cfg, now=noon)
+                saved = json.loads((state_dir / "state.json").read_text())
+                toggles = [cmd for cmd in calls if cmd == ["omarchy", "toggle", "idle"]]
+                self.assertEqual(toggles, [])
+                self.assertTrue(saved["awake_omarchy"])
+                self.assertFalse(idle["running"])
+                self.assertEqual(out.getvalue().count("adopting idle ownership"), 1)
+                status = ds.awake_status(cfg, now=noon)
+                self.assertTrue(status["running"])
+
+    def test_restore_falls_back_when_the_toggle_does_not_start_hypridle(self) -> None:
+        cfg = self._cfg()
+        calls: list[list[str]] = []
+        idle = {"running": False}
+
+        def which(name: str) -> str | None:
+            if name in ("omarchy", "pgrep", "uwsm", "hypridle", "setsid", "systemctl"):
+                return f"/usr/bin/{name}"
+            return None
+
+        def fake_run(cmd, timeout=3.0):
+            calls.append(list(cmd))
+            if cmd[:3] == ["pgrep", "-x", "hypridle"] or cmd[-3:] == ["pgrep", "-x", "hypridle"]:
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            if "toggle" in cmd and "idle" in cmd and "status" not in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "not a gui session\n")
+            if "uwsm" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", "uwsm: no compositor\n")
+            return subprocess.CompletedProcess(cmd, 1, "", "still down\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(state_dir)}), mock.patch.object(
+                ds, "SYSTEM", "Linux"
+            ), mock.patch.object(ds.shutil, "which", side_effect=which), mock.patch.object(
+                ds, "run", side_effect=fake_run
+            ), mock.patch.object(ds, "_process_table", return_value=[]), mock.patch(
+                "sys.stdout", io.StringIO()
+            ) as out:
+                ds.save_desk_state({"awake_omarchy": True})
+                ds.awake_release(cfg)
+        joined = [" ".join(cmd) for cmd in calls]
+        self.assertTrue(any("uwsm" in line and "hypridle" in line for line in joined), joined)
+        self.assertTrue(any("setsid" in line and "hypridle" in line for line in joined), joined)
+        text = out.getvalue()
+        self.assertIn("idle restore failed", text)
+        self.assertIn("hypridle is still not running", text)
         self.assertFalse(idle["running"])
 
     def test_systemd_inhibit_spawns_once_when_the_pid_check_fails(self) -> None:

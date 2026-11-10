@@ -497,6 +497,7 @@ def parse_ui_section(ui: object) -> dict:
                 lights = True
     density = str(tray.get("density") or "strip").strip().lower()
     hud_raw = str(hud.get("density") or "regular").strip().lower()
+    bar_slots = _as_bool(tray.get("bar_slots"), False)
     show_altitude = _as_bool(hud.get("show_altitude"), True)
     if slots:
         for pref in slots:
@@ -512,6 +513,7 @@ def parse_ui_section(ui: object) -> dict:
         "hud_show_altitude": show_altitude,
         "hud_show_faces": _as_bool(hud.get("show_faces"), True),
         "hud_density": "compact" if hud_raw == "compact" else "regular",
+        "bar_slots": bar_slots,
     }
 
 
@@ -522,6 +524,7 @@ def apply_ui_section(cfg: dict, ui: object) -> dict:
     cfg["_hud_show_altitude"] = parsed["hud_show_altitude"]
     cfg["_hud_show_faces"] = parsed["hud_show_faces"]
     cfg["_hud_density"] = parsed["hud_density"]
+    cfg["_tray_bar_slots"] = bool(parsed.get("bar_slots"))
     if parsed["slots_from_user"] and parsed["slots"]:
         cfg["_ui_slots"] = parsed["slots"]
         cfg["_ui_slots_exclusive"] = parsed["slots_exclusive"]
@@ -586,6 +589,7 @@ def format_public_ui(cfg: dict) -> dict:
         "tray": {
             "density": tray_density(cfg),
             "lights": lights,
+            "bar_slots": bool(cfg.get("_tray_bar_slots")),
             "slots": slots,
         },
         "hud": {
@@ -623,6 +627,7 @@ def write_ui_config(ui: object, path: Path | None = None) -> Path:
         "_hud_show_altitude": parsed["hud_show_altitude"],
         "_hud_show_faces": parsed["hud_show_faces"],
         "_hud_density": parsed["hud_density"],
+        "_tray_bar_slots": bool(parsed.get("bar_slots")),
     }
     if parsed["slots_from_user"] and parsed["slots"]:
         shadow["_ui_slots"] = parsed["slots"]
@@ -4102,6 +4107,36 @@ def format_bar_strip(state: dict) -> dict:
     return strip
 
 
+def format_bar_mark(state: dict) -> dict:
+    """One compact bar glyph. Shells paint this when extra slots are off.
+
+    `letter` is the focus host. `symbol` is the display mode. `text` is
+    the same mark for a text bar: host letter, split or full, awake bolt.
+    """
+    hint = str(state.get("target_hint") or "").strip()
+    if hint == "?":
+        hint = ""
+    letter = hint[:1] if hint else "•"
+    mode = str(state.get("dualup_mode") or "").lower()
+    if mode not in ("full", "pbp"):
+        mode = ""
+    symbol = "split" if mode == "pbp" else ("full" if mode == "full" else "idle")
+    glyph = "▣" if symbol == "split" else ("▭" if symbol == "full" else "·")
+    layout = str(state.get("active_layout") or "").strip()
+    awake = state.get("awake") if isinstance(state.get("awake"), dict) else None
+    awake_on = bool(awake and awake.get("effective"))
+    text = letter + glyph + ("⚡" if awake_on else "")
+    return {
+        "host": hint,
+        "letter": letter,
+        "display": mode,
+        "layout": layout,
+        "symbol": symbol,
+        "awake": "on" if awake_on else "",
+        "text": text,
+    }
+
+
 ADAPTER_SNAPSHOT_RESERVED = {
     "enabled",
     "available",
@@ -4799,6 +4834,7 @@ def collect_status(cfg: dict, *, local_only: bool = False) -> dict:
     state["bar_label"] = format_bar_label(paint)
     state["bar_tooltip"] = format_bar_tooltip(state)
     state["bar_strip"] = format_bar_strip(paint)
+    state["bar_mark"] = format_bar_mark(paint)
     state["slots"] = collect_slots(state, cfg)
     state.pop("_tray_lights", None)
     return state
@@ -6484,6 +6520,9 @@ def awake_backend_name(cfg: dict) -> str:
 _awake_last_spawn_at = 0.0
 _awake_last_idle_toggle_at = 0.0
 _awake_idle_cap_logged = False
+# First hold of this process may adopt a hypridle that an older desk
+# already stopped, before the ownership flag existed.
+_awake_ownership_decided = False
 
 
 def _pid_alive(pid: int) -> bool:
@@ -6847,17 +6886,71 @@ def _mark_idle_toggled() -> None:
     _awake_idle_cap_logged = False
 
 
+def _session_argv(argv: list[str]) -> list[str]:
+    """Run a graphical helper from a systemd --user watcher.
+
+    That process often has no WAYLAND_DISPLAY, so `omarchy toggle idle`
+    and a bare hypridle do not join the compositor.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    wayland = os.environ.get("WAYLAND_DISPLAY") or "wayland-1"
+    return ["env", f"XDG_RUNTIME_DIR={runtime}", f"WAYLAND_DISPLAY={wayland}", *argv]
+
+
+def _start_hypridle_in_session() -> bool:
+    """Best-effort start after a toggle failed to bring hypridle back."""
+    attempts: list[list[str]] = []
+    if shutil.which("uwsm") and shutil.which("hypridle"):
+        attempts.append(["uwsm", "app", "--", "hypridle"])
+    if shutil.which("setsid") and shutil.which("hypridle"):
+        attempts.append(["setsid", "-f", "hypridle"])
+    if shutil.which("systemctl"):
+        attempts.append(["systemctl", "--user", "start", "hypridle"])
+    if not attempts and shutil.which("hypridle"):
+        attempts.append(["hypridle"])
+    if not attempts:
+        log("awake: idle restore failed; no hypridle starter on PATH")
+        return False
+    for argv in attempts:
+        command = _session_argv(argv)
+        log("awake: starting hypridle via " + " ".join(argv))
+        try:
+            proc = run(command, timeout=5.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(f"awake: hypridle start failed ({' '.join(argv)}): {exc}")
+            continue
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip() or str(proc.returncode)
+            log(f"awake: hypridle start failed ({' '.join(argv)}): {detail}")
+            continue
+        if _hypridle_observed() is True:
+            return True
+        log(f"awake: {' '.join(argv)} exited 0 but hypridle is not running")
+    log("awake: idle restore failed; hypridle is still not running")
+    return False
+
+
 def _linux_hold_idle(cfg: dict) -> None:
     """Inhibit idle only when it is actually running.
 
     Omarchy's control is a toggle. hypridle already absent means idle is
-    inhibited; toggling again would turn idle back on.
+    inhibited; toggling again would turn idle back on. The first time this
+    process sees that, with no ownership flag, it adopts the stop so the
+    end of the schedule can start hypridle again.
     """
+    global _awake_ownership_decided
     state = load_desk_state()
     stay = _omarchy_stay_awake()
     if stay is not None:
         if stay:
+            if not state.get("awake_omarchy") and not _awake_ownership_decided:
+                state["awake_omarchy"] = True
+                state["awake_idle_ready"] = True
+                save_desk_state(state)
+                log("awake: adopting idle ownership (hypridle already stopped)")
+            _awake_ownership_decided = True
             return
+        _awake_ownership_decided = True
         if _idle_toggle_recent():
             _log_idle_cap_once()
             return
@@ -6886,9 +6979,12 @@ def _linux_release_idle(state: dict) -> None:
     """Restore idle only if desk is the one that disabled it."""
     if state.get("awake_omarchy"):
         _omarchy_set(False)
+        if _hypridle_observed() is not True:
+            _start_hypridle_in_session()
         state["awake_omarchy"] = False
     elif state.get("awake_hypridle"):
-        _hypridle_start()
+        if not _hypridle_start():
+            log("awake: systemctl start hypridle failed")
         state["awake_hypridle"] = False
     state["awake_idle_ready"] = False
 
