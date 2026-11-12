@@ -53,6 +53,7 @@ endif
 	install -m 755 adapters/weather/weather.py $(LIBDIR)/weather
 	install -m 755 adapters/wallpaper/wallpaper.py $(LIBDIR)/wallpaper
 	install -m 755 adapters/hardware/hardware.py $(LIBDIR)/hardware
+	install -m 755 adapters/clipboard/clipboard.py $(LIBDIR)/clipboard
 	install -m 644 adapters/mxswitch/manifest.json $(LIBDIR)/mxswitch.manifest.json
 	install -m 644 adapters/lgdualup/manifest.json $(LIBDIR)/lgdualup.manifest.json
 	install -m 644 adapters/hhkb/manifest.json $(LIBDIR)/hhkb.manifest.json
@@ -61,6 +62,7 @@ endif
 	install -m 644 adapters/weather/manifest.json $(LIBDIR)/weather.manifest.json
 	install -m 644 adapters/wallpaper/manifest.json $(LIBDIR)/wallpaper.manifest.json
 	install -m 644 adapters/hardware/manifest.json $(LIBDIR)/hardware.manifest.json
+	install -m 644 adapters/clipboard/manifest.json $(LIBDIR)/clipboard.manifest.json
 	install -m 755 scripts/desk-adapter-shim $(BINDIR)/mxswitch
 	install -m 755 scripts/desk-adapter-shim $(BINDIR)/lgdualup
 	install -m 755 scripts/desk-adapter-shim $(BINDIR)/kettle
@@ -77,7 +79,7 @@ endif
 		echo "wrote $(CONFDIR)/config.json — set adapters.dualup.inputs from desk status / DualUp --list"; \
 	fi
 	@echo "installed $(BINDIR)/desk"
-	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb  $(LIBDIR)/alexa  $(LIBDIR)/kettle  $(LIBDIR)/weather  $(LIBDIR)/wallpaper  $(LIBDIR)/hardware"
+	@echo "  adapters: $(LIBDIR)/mxswitch  $(LIBDIR)/lgdualup  $(LIBDIR)/dualup-layout  $(LIBDIR)/hhkb  $(LIBDIR)/alexa  $(LIBDIR)/kettle  $(LIBDIR)/weather  $(LIBDIR)/wallpaper  $(LIBDIR)/hardware  $(LIBDIR)/clipboard"
 	@echo "  manifests: $(LIBDIR)/*.manifest.json"
 	@echo "  shims:    $(BINDIR)/mxswitch  $(BINDIR)/lgdualup  $(BINDIR)/kettle"
 	@echo "Linux mouse hidraw: sudo cp adapters/mxswitch/linux/42-logitech-hidpp.rules /etc/udev/rules.d/"
@@ -88,9 +90,9 @@ endif
 
 uninstall:
 	rm -f $(BINDIR)/desk $(BINDIR)/desk-switch $(BINDIR)/hhkb-mx-follow $(BINDIR)/mxswitch $(BINDIR)/lgdualup $(BINDIR)/kettle
-	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout $(LIBDIR)/hhkb $(LIBDIR)/alexa $(LIBDIR)/kettle $(LIBDIR)/weather $(LIBDIR)/wallpaper $(LIBDIR)/hardware
+	rm -f $(LIBDIR)/mxswitch $(LIBDIR)/lgdualup $(LIBDIR)/dualup-layout $(LIBDIR)/hhkb $(LIBDIR)/alexa $(LIBDIR)/kettle $(LIBDIR)/weather $(LIBDIR)/wallpaper $(LIBDIR)/hardware $(LIBDIR)/clipboard
 	rm -f $(LIBDIR)/mxswitch.manifest.json $(LIBDIR)/lgdualup.manifest.json $(LIBDIR)/hhkb.manifest.json $(LIBDIR)/alexa.manifest.json
-	rm -f $(LIBDIR)/kettle.manifest.json $(LIBDIR)/weather.manifest.json $(LIBDIR)/wallpaper.manifest.json $(LIBDIR)/hardware.manifest.json
+	rm -f $(LIBDIR)/kettle.manifest.json $(LIBDIR)/weather.manifest.json $(LIBDIR)/wallpaper.manifest.json $(LIBDIR)/hardware.manifest.json $(LIBDIR)/clipboard.manifest.json
 
 menubar:
 ifeq ($(UNAME),Darwin)

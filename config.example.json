@@ -65,6 +65,11 @@
       "primary_output": "",
       "outputs": {}
     },
+    "clipboard": {
+      "enabled": true,
+      "max_bytes": 1048576,
+      "images": false
+    },
     "hardware": {
       "enabled": false,
       "backend": "hardware",

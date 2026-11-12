@@ -11,7 +11,7 @@ to a configured host, optionally follow an
 
 ```
 core     = config · status · watch · to/full/pbp/layout · adapter registry · slots
-adapters = mouse / keyboard / display / smarthome / kettle / weather / wallpaper / hardware
+adapters = mouse / keyboard / display / smarthome / kettle / weather / wallpaper / hardware / clipboard
 shells   = macOS DeskSwitchBar + Omarchy tray — they paint status and call `desk`
 ```
 
@@ -39,6 +39,7 @@ The host where the keyboard arrives runs `desk to` itself.
 | **weather** | weather | Open-Meteo ambient ° + altitude |
 | **wallpaper** | wallpaper | Per-output image from aspect or exact resolution. Off unless enabled |
 | **hardware** | hardware | LAN JSON per-host CPU, memory, GPU, and optional AI limits. Off unless enabled |
+| **clipboard** | clipboard | Text clipboard across configured peers. On when `adapters.clipboard` is set |
 
 Pin with `adapters.<role>.backend` / `path`, or drop a binary +
 `*.manifest.json` in `~/.local/lib/desk/` (`$DESK_LIB`). Third parties
@@ -403,6 +404,41 @@ Not `2880x1280` t3 (stretched) and not `1280x2880` t0 (wrong orientation).
 Set `adapters.dualup.peer` to SSH layout-only to the other machine.
 
 `mxswitch` / `lgdualup` / `kettle` on PATH exec the private helpers.
+
+## Clipboard
+
+Copy on one host, paste on another. `desk watch` (the same process as
+`hhkb-mx-follow`) polls the local clipboard about twice a second and
+pushes new text to every other configured host that has an `ssh` target.
+Peers apply it locally. Nothing is typed by hand.
+
+Off until `adapters.clipboard` is present. `enabled` then defaults to true.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `adapters.clipboard.enabled` | true once the section exists | Set false to keep the section but not sync |
+| `adapters.clipboard.max_bytes` | 1048576 | Refuse larger items. They are not sent |
+| `adapters.clipboard.images` | false | When true, an image/png with no text can be synced. Text wins when both exist |
+| `adapters.clipboard.peers` | every other host with `ssh` | Optional host-id list. Only these peers are pushed to, and only they are accepted |
+
+Items marked concealed or transient on macOS, or `x-kde-passwordManagerHint=secret` on Wayland, are not synced. Clipboard text is never logged. A peer that is down is skipped; the latest item is tried again after 30 seconds, not on every poll.
+
+```
+desk clip status
+desk clip push
+desk clip pull
+```
+
+macOS uses `pbpaste` and `pbcopy` (already on the system). Omarchy needs
+`wl-paste` and `wl-copy` from `wl-clipboard`:
+
+```
+sudo pacman -S wl-clipboard
+```
+
+Restart the watcher after install (`systemctl --user restart hhkb-mx-follow`
+on Linux, or the LaunchAgent on macOS) so the running `desk watch` loads
+the new helper.
 
 ## Config
 

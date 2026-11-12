@@ -1950,7 +1950,7 @@ class AdapterDiscoveryTests(unittest.TestCase):
                 self.assertEqual(ds.resolve_backend_id("unifying"), helper)
 
     def test_reference_manifests_exist(self) -> None:
-        for name in ("mxswitch", "lgdualup", "hhkb", "alexa", "kettle", "weather", "wallpaper", "hardware"):
+        for name in ("mxswitch", "lgdualup", "hhkb", "alexa", "kettle", "weather", "wallpaper", "hardware", "clipboard"):
             raw = json.loads((ROOT / "adapters" / name / "manifest.json").read_text())
             self.assertEqual(raw["api_version"], 1)
             self.assertEqual(raw["id"], name)
@@ -1977,6 +1977,7 @@ class AdapterDiscoveryTests(unittest.TestCase):
         self.assertIn("adapters/weather/weather.py", text)
         self.assertIn("adapters/wallpaper/wallpaper.py", text)
         self.assertIn("adapters/hardware/hardware.py", text)
+        self.assertIn("adapters/clipboard/clipboard.py", text)
         self.assertIn("$(LIBDIR)/mxswitch.manifest.json", text)
         self.assertIn("$(LIBDIR)/alexa.manifest.json", text)
         self.assertIn("$(LIBDIR)/kettle.manifest.json", text)
@@ -7092,6 +7093,132 @@ class MacTowerPbpTests(unittest.TestCase):
         self.assertIn("mac-tower", status["bar_strip"]["title"])
         self.assertIn("PBP", status["bar_strip"]["title"])
         self.assertEqual(again["active_layout"], "mac-tower")
+
+
+class ClipboardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ds._clip_mem.update(polled=0.0, pending=None, pending_peers=[], pending_next=0.0)
+        spec = importlib.util.spec_from_file_location(
+            "clipboard_adapter", ROOT / "adapters" / "clipboard" / "clipboard.py"
+        )
+        self.clip = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.clip)
+
+    def _cfg(self) -> dict:
+        return {
+            "this_host": "mac",
+            "_clipboard_configured": True,
+            "_clipboard_enabled": True,
+            "_clipboard_max_bytes": 32,
+            "_clipboard_images": False,
+            "hosts": {
+                "mac": {"channel": 1, "ssh": "mac.example"},
+                "linux": {"channel": 2, "ssh": "linux.example"},
+                "tower": {"channel": 3, "ssh": "tower.example"},
+            },
+        }
+
+    def _payload(self, text: str, *, origin: str = "linux", ts: float = 10.0) -> dict:
+        sha = ds.clip_content_hash("text", "text/plain", text)
+        return {
+            "v": 1,
+            "origin": origin,
+            "ts": ts,
+            "sha256": sha,
+            "kind": "text",
+            "mime": "text/plain",
+            "bytes": len(text.encode()),
+            "text": text,
+            "b64": "",
+        }
+
+    def test_dedupe_stale_peer_and_size(self) -> None:
+        cfg = self._cfg()
+        payload = self._payload("hello")
+        self.assertEqual(ds.clip_accept(cfg, payload, {}), "apply")
+        state = {"last_sha": payload["sha256"], "last_ts": 10.0}
+        self.assertEqual(ds.clip_accept(cfg, payload, state), "dup")
+        older = self._payload("other", ts=9.0)
+        state["last_sha"] = "different"
+        self.assertEqual(ds.clip_accept(cfg, older, state), "stale")
+        self.assertEqual(ds.clip_accept(cfg, self._payload("x", origin="mac"), {}), "peer")
+        self.assertEqual(ds.clip_accept(cfg, self._payload("nope", origin="stranger"), {}), "peer")
+        huge = self._payload("x" * 40)
+        self.assertEqual(ds.clip_accept(cfg, huge, {}), "size")
+        sensitive = self._payload("secret")
+        sensitive["sensitive"] = True
+        self.assertEqual(ds.clip_accept(cfg, sensitive, {}), "sensitive")
+
+    def test_watch_pushes_once_and_ignores_its_own_echo(self) -> None:
+        cfg = self._cfg()
+        sent: list[str] = []
+
+        def fake_send(_cfg, host, payload):
+            sent.append(host + ":" + payload["text"])
+            return host != "tower"
+
+        reads = [
+            {"ok": True, "sensitive": False, "kind": "text", "mime": "text/plain", "text": "alpha", "bytes": 5},
+            {"ok": True, "sensitive": False, "kind": "text", "mime": "text/plain", "text": "alpha", "bytes": 5},
+        ]
+
+        def fake_read(_cfg, verb, payload=None):
+            if verb == "read":
+                return reads.pop(0) if reads else reads_last
+            return {"ok": True}
+
+        reads_last = {"ok": True, "sensitive": False, "kind": "text", "mime": "text/plain", "text": "alpha", "bytes": 5}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(Path(tmp) / "state")}), mock.patch.object(
+                ds, "clip_invoke", side_effect=fake_read
+            ), mock.patch.object(ds, "clip_send", side_effect=fake_send), mock.patch("sys.stdout", io.StringIO()):
+                ds.clipboard_watch_poll(cfg, now=1.0)
+                ds.clipboard_watch_poll(cfg, now=2.0)
+                state = json.loads((Path(tmp) / "state" / "clipboard.json").read_text())
+                ds.clipboard_watch_poll(cfg, now=40.0)
+        self.assertEqual(sent, ["linux:alpha", "tower:alpha", "tower:alpha"])
+        self.assertEqual(state["self_sha"], ds.clip_content_hash("text", "text/plain", "alpha"))
+        self.assertEqual(ds._clip_mem["pending_peers"], ["tower"])
+
+    def test_sensitive_and_backend_parsing(self) -> None:
+        def fake_run(argv, input_text=None, timeout=3.0):
+            if argv[:2] == ["osascript", "-e"]:
+                return subprocess.CompletedProcess(argv, 0, "org.nspasteboard.ConcealedType, 4", "")
+            if argv == ["pbpaste"]:
+                return subprocess.CompletedProcess(argv, 0, "should-not-sync", "")
+            if argv[:2] == ["wl-paste", "--list-types"]:
+                return subprocess.CompletedProcess(argv, 0, "text/plain\nx-kde-passwordManagerHint\n", "")
+            if SECRET in argv:
+                return subprocess.CompletedProcess(argv, 0, "secret", "")
+            if "text/plain" in argv:
+                return subprocess.CompletedProcess(argv, 0, "plain", "")
+            return subprocess.CompletedProcess(argv, 1, "", "")
+
+        SECRET = "x-kde-passwordManagerHint"
+        with mock.patch.object(self.clip, "run_cmd", side_effect=fake_run), mock.patch.object(
+            self.clip.sys, "platform", "darwin"
+        ):
+            hidden = self.clip.read_local(100, False)
+        self.assertTrue(hidden["sensitive"])
+        self.assertEqual(hidden["text"], "")
+        with mock.patch.object(self.clip, "run_cmd", side_effect=fake_run), mock.patch.object(
+            self.clip, "_backend", return_value="wayland"
+        ):
+            secret = self.clip.read_local(100, False)
+        self.assertTrue(secret["sensitive"])
+        with mock.patch.object(self.clip, "run_cmd", side_effect=fake_run), mock.patch.object(
+            self.clip.sys, "platform", "darwin"
+        ):
+            # Second osascript is not used; pbpaste would be too big.
+            def big(argv, input_text=None, timeout=3.0):
+                if argv == ["pbpaste"]:
+                    return subprocess.CompletedProcess(argv, 0, "x" * 50, "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with mock.patch.object(self.clip, "run_cmd", side_effect=big):
+                oversized = self.clip.read_local(8, False)
+        self.assertEqual(oversized["error"], "too-large")
+        self.assertNotIn("text", oversized)
 
 
 if __name__ == "__main__":

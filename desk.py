@@ -55,6 +55,7 @@ on PATH. `mxswitch` / `lgdualup` on PATH stay shims.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -797,6 +798,25 @@ def apply_adapter_config(cfg: dict, user: dict) -> dict:
         if weather.get(key) is not None and str(weather.get(key)):
             weather_extras[flag] = str(weather[key])
     cfg["_weather_extras"] = weather_extras
+
+    clip = _as_dict(adapters.get("clipboard"))
+    if not clip and isinstance(user.get("clipboard"), dict):
+        clip = _as_dict(user.get("clipboard"))
+    configured = "clipboard" in adapters or isinstance(user.get("clipboard"), dict)
+    cfg["_clipboard_configured"] = configured
+    cfg["_clipboard_enabled"] = bool(clip.get("enabled", True)) if configured else False
+    try:
+        cfg["_clipboard_max_bytes"] = max(1, int(clip.get("max_bytes") or 1024 * 1024))
+    except (TypeError, ValueError):
+        cfg["_clipboard_max_bytes"] = 1024 * 1024
+    cfg["_clipboard_images"] = bool(clip.get("images", False))
+    if clip.get("backend"):
+        cfg["_clipboard_backend"] = str(clip["backend"])
+    if clip.get("path"):
+        cfg["_clipboard_path"] = str(clip["path"])
+    peers = clip.get("peers")
+    cfg["_clipboard_peers_set"] = isinstance(peers, list)
+    cfg["_clipboard_peers"] = _coerce_relay_hosts(peers) if isinstance(peers, list) else []
 
     # Off unless the user opts in. No URL is baked in.
     hardware = _as_dict(adapters.get("hardware"))
@@ -6008,6 +6028,404 @@ def watch_interval_was_suspended(interval: float, threshold: float) -> bool:
     return False
 
 
+CLIP_RETRY_S = 30.0
+_clip_mem: dict = {"polled": 0.0, "pending": None, "pending_peers": [], "pending_next": 0.0}
+
+
+def clip_content_hash(kind: str, mime: str, text: str = "", b64: str = "") -> str:
+    digest = hashlib.sha256()
+    digest.update(kind.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(mime.encode("utf-8"))
+    digest.update(b"\0")
+    if kind == "image":
+        digest.update(b64.encode("ascii", "replace"))
+    else:
+        digest.update(text.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def clip_state_path() -> Path:
+    return state_dir() / "clipboard.json"
+
+
+def load_clip_state() -> dict:
+    try:
+        raw = json.loads(clip_state_path().read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_clip_state(state: dict) -> None:
+    path = clip_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2) + "\n")
+    except OSError:
+        return
+
+
+def clip_peer_ids(cfg: dict) -> list[str]:
+    """Other hosts with an ssh target. An explicit peers list narrows that."""
+    here = _this_host_id(cfg)
+    if cfg.get("_clipboard_peers_set"):
+        source = [str(item) for item in (cfg.get("_clipboard_peers") or []) if str(item)]
+    else:
+        source = [str(item.get("id") or "") for item in public_host_list(cfg)]
+    out: list[str] = []
+    for host_id in source:
+        if not host_id or host_id == here:
+            continue
+        if host_text(cfg, host_id, "ssh"):
+            out.append(host_id)
+    return out
+
+
+def clipboard_adapter_path(cfg: dict) -> Path | None:
+    backend = str(cfg.get("_clipboard_backend") or "clipboard")
+    return which_adapter(backend, cfg.get("_clipboard_path"))
+
+
+def _clip_limits(cfg: dict) -> tuple[int, bool]:
+    try:
+        limit = max(1, int(cfg.get("_clipboard_max_bytes") or 1024 * 1024))
+    except (TypeError, ValueError):
+        limit = 1024 * 1024
+    return limit, bool(cfg.get("_clipboard_images"))
+
+
+def clip_invoke(cfg: dict, verb: str, payload: dict | None = None) -> dict | None:
+    path = clipboard_adapter_path(cfg)
+    if path is None:
+        return None
+    limit, images = _clip_limits(cfg)
+    argv = [str(path), verb, "--max-bytes", str(limit)]
+    if images and verb == "read":
+        argv.append("--images")
+    try:
+        proc = subprocess.run(
+            argv,
+            input=json.dumps(payload) if payload is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=4.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        data = json.loads(proc.stdout or "")
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clip_payload_from_read(cfg: dict, local: dict) -> dict | None:
+    """Build a peer payload. None when there is nothing to send."""
+    if not local.get("ok") or local.get("sensitive"):
+        return None
+    kind = str(local.get("kind") or "text")
+    mime = str(local.get("mime") or "text/plain")
+    text = local.get("text") if isinstance(local.get("text"), str) else ""
+    b64 = local.get("b64") if isinstance(local.get("b64"), str) else ""
+    if kind == "text" and not text:
+        return None
+    if kind == "image" and not b64:
+        return None
+    if kind not in ("text", "image"):
+        return None
+    if kind == "image" and not cfg.get("_clipboard_images"):
+        return None
+    size = len(text.encode("utf-8")) if kind == "text" else int(local.get("bytes") or 0)
+    limit, _images = _clip_limits(cfg)
+    if size > limit or int(local.get("bytes") or 0) > limit:
+        return None
+    sha = clip_content_hash(kind, mime, text, b64)
+    return {
+        "v": 1,
+        "origin": _this_host_id(cfg),
+        "ts": time.time(),
+        "sha256": sha,
+        "kind": kind,
+        "mime": mime,
+        "bytes": len(text.encode("utf-8")) if kind == "text" else int(local.get("bytes") or 0),
+        "text": text if kind == "text" else "",
+        "b64": b64 if kind == "image" else "",
+    }
+
+
+def clip_accept(cfg: dict, payload: dict, state: dict | None = None) -> str:
+    """Why a payload is applied or dropped. `apply` means set it locally."""
+    if not isinstance(payload, dict):
+        return "bad"
+    origin = str(payload.get("origin") or "")
+    if not origin or origin == _this_host_id(cfg) or origin not in clip_peer_ids(cfg):
+        return "peer"
+    kind = str(payload.get("kind") or "")
+    mime = str(payload.get("mime") or "")
+    text = payload.get("text") if isinstance(payload.get("text"), str) else ""
+    b64 = payload.get("b64") if isinstance(payload.get("b64"), str) else ""
+    if payload.get("sensitive"):
+        return "sensitive"
+    if kind not in ("text", "image") or (kind == "image" and not cfg.get("_clipboard_images")):
+        return "kind"
+    try:
+        ts = float(payload.get("ts"))
+        size = int(payload.get("bytes"))
+    except (TypeError, ValueError):
+        return "bad"
+    limit, _images = _clip_limits(cfg)
+    actual = len(text.encode("utf-8")) if kind == "text" else size
+    if size > limit or actual > limit or size < 0:
+        return "size"
+    if kind == "text" and not text:
+        return "empty"
+    sha = clip_content_hash(kind, mime, text, b64)
+    if str(payload.get("sha256") or "") != sha:
+        return "hash"
+    current = state if isinstance(state, dict) else load_clip_state()
+    if sha == str(current.get("last_sha") or "") or sha == str(current.get("self_sha") or ""):
+        return "dup"
+    try:
+        previous = float(current.get("last_ts") or 0)
+    except (TypeError, ValueError):
+        previous = 0.0
+    if previous and ts + 1e-6 < previous:
+        return "stale"
+    return "apply"
+
+
+def clip_send(cfg: dict, host_id: str, payload: dict) -> bool:
+    target = host_text(cfg, host_id, "ssh")
+    if not target:
+        return False
+    remote = 'export PATH="$HOME/.local/bin:$PATH"; desk clip apply'
+    try:
+        proc = subprocess.run(
+            ssh_argv(target, remote),
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def _clip_note(payload: dict, peers: dict[str, str]) -> None:
+    save_clip_state(
+        {
+            "last_sha": payload.get("sha256") or "",
+            "self_sha": payload.get("sha256") or "",
+            "last_ts": payload.get("ts") or 0,
+            "last_origin": payload.get("origin") or "",
+            "bytes": payload.get("bytes") or 0,
+            "peers": peers,
+        }
+    )
+
+
+def clip_push_payload(cfg: dict, payload: dict, *, only: list[str] | None = None) -> dict[str, str]:
+    """Push to peers. Failures are recorded, not retried in a tight loop."""
+    results: dict[str, str] = {}
+    targets = only if only is not None else clip_peer_ids(cfg)
+    for host_id in targets:
+        ok = clip_send(cfg, host_id, payload)
+        results[host_id] = "ok" if ok else "unreachable"
+        log(
+            f"clipboard {host_id} {results[host_id]} "
+            f"bytes={payload.get('bytes', 0)} sha={str(payload.get('sha256') or '')[:12]}"
+        )
+    return results
+
+
+def clipboard_watch_poll(cfg: dict, now: float | None = None) -> None:
+    if not cfg.get("_clipboard_enabled"):
+        return
+    moment = time.time() if now is None else float(now)
+    if moment - float(_clip_mem.get("polled") or 0) < 0.5:
+        _clip_retry_pending(cfg, moment)
+        return
+    _clip_mem["polled"] = moment
+    local = clip_invoke(cfg, "read")
+    if not isinstance(local, dict):
+        return
+    if local.get("sensitive"):
+        log(f"clipboard skip sensitive bytes={int(local.get('bytes') or 0)}")
+        return
+    if local.get("error") == "too-large":
+        log(f"clipboard skip size bytes={int(local.get('bytes') or 0)}")
+        return
+    payload = clip_payload_from_read(cfg, local)
+    if payload is None:
+        _clip_retry_pending(cfg, moment)
+        return
+    state = load_clip_state()
+    sha = str(payload["sha256"])
+    if sha == str(state.get("self_sha") or "") or sha == str(state.get("last_sha") or ""):
+        _clip_retry_pending(cfg, moment)
+        return
+    results = clip_push_payload(cfg, payload)
+    failed = [host for host, mark in results.items() if mark != "ok"]
+    _clip_note(payload, results)
+    if failed:
+        _clip_mem["pending"] = payload
+        _clip_mem["pending_peers"] = failed
+        _clip_mem["pending_next"] = moment + CLIP_RETRY_S
+    else:
+        _clip_mem["pending"] = None
+        _clip_mem["pending_peers"] = []
+
+
+def _clip_retry_pending(cfg: dict, now: float) -> None:
+    payload = _clip_mem.get("pending")
+    peers = list(_clip_mem.get("pending_peers") or [])
+    if not isinstance(payload, dict) or not peers:
+        return
+    if now < float(_clip_mem.get("pending_next") or 0):
+        return
+    results = clip_push_payload(cfg, payload, only=peers)
+    failed = [host for host, mark in results.items() if mark != "ok"]
+    state = load_clip_state()
+    known = state.get("peers") if isinstance(state.get("peers"), dict) else {}
+    known.update(results)
+    state["peers"] = known
+    save_clip_state(state)
+    if failed:
+        _clip_mem["pending_peers"] = failed
+        _clip_mem["pending_next"] = now + CLIP_RETRY_S
+    else:
+        _clip_mem["pending"] = None
+        _clip_mem["pending_peers"] = []
+
+
+def cmd_clip(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
+    action = str(verb or "status").strip().lower()
+    if not cfg.get("_clipboard_configured") and action == "status":
+        print("clipboard off (add adapters.clipboard to enable)")
+        return 0
+    if action == "status":
+        state = load_clip_state()
+        report = {
+            "enabled": bool(cfg.get("_clipboard_enabled")),
+            "max_bytes": _clip_limits(cfg)[0],
+            "images": bool(cfg.get("_clipboard_images")),
+            "peers": clip_peer_ids(cfg),
+            "last_origin": state.get("last_origin") or "",
+            "last_ts": state.get("last_ts") or 0,
+            "bytes": state.get("bytes") or 0,
+            "sha256": str(state.get("last_sha") or "")[:12],
+            "peer_status": state.get("peers") if isinstance(state.get("peers"), dict) else {},
+        }
+        if as_json:
+            print(json.dumps(report, indent=2))
+        else:
+            mark = "on" if report["enabled"] else "off"
+            print(
+                f"clipboard {mark}  peers={','.join(report['peers']) or '-'}  "
+                f"bytes={report['bytes']}  sha={report['sha256'] or '-'}  "
+                f"from={report['last_origin'] or '-'}"
+            )
+        return 0
+    if action == "export":
+        local = clip_invoke(cfg, "read")
+        if not isinstance(local, dict):
+            return 1
+        if local.get("sensitive") or local.get("error"):
+            print(json.dumps({"ok": False, "sensitive": bool(local.get("sensitive")), "error": local.get("error") or ""}))
+            return 0 if local.get("sensitive") else 1
+        payload = clip_payload_from_read(cfg, local)
+        if payload is None:
+            print(json.dumps({"ok": False, "error": "empty"}))
+            return 1
+        print(json.dumps(payload))
+        return 0
+    if action == "push":
+        local = clip_invoke(cfg, "read")
+        if not isinstance(local, dict):
+            print("clipboard adapter unavailable")
+            return 1
+        if local.get("sensitive"):
+            log(f"clipboard skip sensitive bytes={int(local.get('bytes') or 0)}")
+            return 0
+        payload = clip_payload_from_read(cfg, local)
+        if payload is None:
+            print("clipboard empty")
+            return 1
+        results = clip_push_payload(cfg, payload)
+        _clip_note(payload, results)
+        if as_json:
+            print(json.dumps({"ok": all(mark == "ok" for mark in results.values()), "peers": results}))
+        return 0 if all(mark == "ok" for mark in results.values()) or not results else 1
+    if action == "pull":
+        newest = None
+        for host_id in clip_peer_ids(cfg):
+            target = host_text(cfg, host_id, "ssh")
+            if not target:
+                continue
+            remote = 'export PATH="$HOME/.local/bin:$PATH"; desk clip export'
+            try:
+                proc = subprocess.run(
+                    ssh_argv(target, remote),
+                    capture_output=True,
+                    text=True,
+                    timeout=8.0,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                log(f"clipboard {host_id} unreachable bytes=0 sha=")
+                continue
+            try:
+                payload = json.loads(proc.stdout or "")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or not payload.get("ok", True):
+                continue
+            if newest is None or float(payload.get("ts") or 0) >= float(newest.get("ts") or 0):
+                newest = payload
+        if not isinstance(newest, dict):
+            print("clipboard pull: no peer")
+            return 1
+        return cmd_clip_apply(cfg, newest)
+    if action == "apply":
+        raw = sys.stdin.read()
+        try:
+            payload = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            return 1
+        if not isinstance(payload, dict):
+            return 1
+        return cmd_clip_apply(cfg, payload)
+    print("usage: desk clip status|push|pull")
+    return 2
+
+
+def cmd_clip_apply(cfg: dict, payload: dict) -> int:
+    reason = clip_accept(cfg, payload)
+    if reason != "apply":
+        log(
+            f"clipboard drop {reason} bytes={int(payload.get('bytes') or 0)} "
+            f"sha={str(payload.get('sha256') or '')[:12]}"
+        )
+        return 0 if reason in ("dup", "stale", "sensitive") else 1
+    state = load_clip_state()
+    state["self_sha"] = payload.get("sha256")
+    state["last_sha"] = payload.get("sha256")
+    state["last_ts"] = payload.get("ts")
+    state["last_origin"] = payload.get("origin")
+    state["bytes"] = payload.get("bytes")
+    save_clip_state(state)
+    written = clip_invoke(cfg, "write", payload)
+    if not isinstance(written, dict) or not written.get("ok"):
+        log(f"clipboard local write failed bytes={int(payload.get('bytes') or 0)}")
+        return 1
+    log(f"clipboard applied bytes={int(payload.get('bytes') or 0)} sha={str(payload.get('sha256') or '')[:12]}")
+    return 0
+
+
 def cmd_watch(cfg: dict, dry_run: bool) -> int:
     """Follow the keyboard. Arrival pulls the whole desk to this host.
 
@@ -6211,6 +6629,11 @@ def _cmd_watch_loop(
             awake_reconcile(cfg, dry_run=dry_run)
         except Exception as exc:  # noqa: BLE001 — watcher stays up
             log(f"awake reconcile failed: {exc}")
+        if not dry_run:
+            try:
+                clipboard_watch_poll(cfg)
+            except Exception as exc:  # noqa: BLE001 — watcher stays up
+                log(f"clipboard watch failed: {exc}")
         pending_gap = watch_interval_was_suspended(interval, gap_limit)
 
 
@@ -7484,6 +7907,9 @@ def build_parser(cfg: dict | None = None) -> argparse.ArgumentParser:
         help="status | info",
     )
     weather.add_argument("--json", action="store_true", help="print adapter JSON")
+    clip = sub.add_parser("clip", help="sync the clipboard with configured peers")
+    clip.add_argument("verb", nargs="?", default="status", help="status | push | pull")
+    clip.add_argument("--json", action="store_true", help="print JSON")
     hardware = sub.add_parser("hardware", help="LAN hardware metrics (off unless configured)")
     hardware.add_argument("verb", nargs="?", default="status", help="status | info")
     hardware.add_argument("--json", action="store_true", help="print adapter JSON")
@@ -7527,6 +7953,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_kettle(cfg, args.verb, args.temp, as_json=args.json)
     if args.cmd == "weather":
         return cmd_weather(cfg, args.verb, as_json=args.json)
+    if args.cmd == "clip":
+        return cmd_clip(cfg, args.verb, as_json=bool(args.json))
     if args.cmd == "hardware":
         return cmd_hardware(cfg, args.verb, as_json=args.json)
     if args.cmd == "wallpaper":
