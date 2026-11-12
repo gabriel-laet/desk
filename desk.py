@@ -6155,8 +6155,44 @@ def clip_payload_from_read(cfg: dict, local: dict) -> dict | None:
     }
 
 
-def clip_accept(cfg: dict, payload: dict, state: dict | None = None) -> str:
-    """Why a payload is applied or dropped. `apply` means set it locally."""
+def clip_session_prefix() -> str:
+    """Shell that finds the Wayland session before a remote clipboard command.
+
+    A fresh SSH login has no `WAYLAND_DISPLAY` and `XDG_SESSION_TYPE=tty`,
+    so the adapter would pick no backend. This runs on the peer.
+    """
+    return (
+        'if [ -z "${XDG_RUNTIME_DIR:-}" ]; then '
+        'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; fi; '
+        'if [ -z "${WAYLAND_DISPLAY:-}" ]; then '
+        'for _desk_sock in "$XDG_RUNTIME_DIR"/wayland-*; do '
+        'if [ -S "$_desk_sock" ]; then '
+        'export WAYLAND_DISPLAY="$(basename "$_desk_sock")"; break; fi; done; '
+        'unset _desk_sock; fi; '
+        'if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ -d "$XDG_RUNTIME_DIR/hypr" ]; then '
+        'for _desk_sig in "$XDG_RUNTIME_DIR"/hypr/*; do '
+        'if [ -d "$_desk_sig" ]; then '
+        'export HYPRLAND_INSTANCE_SIGNATURE="$(basename "$_desk_sig")"; break; fi; done; '
+        'unset _desk_sig; fi'
+    )
+
+
+def clip_remote_command(desk_args: str) -> str:
+    return (
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        + clip_session_prefix()
+        + "; "
+        + desk_args
+    )
+
+
+def clip_accept(cfg: dict, payload: dict, state: dict | None = None, *, held: bool | None = None) -> str:
+    """Why a payload is applied or dropped. `apply` means set it locally.
+
+    A matching hash is a duplicate only when this host actually holds the
+    item, or the last local write of that hash succeeded. A saved hash
+    from a failed write is not enough.
+    """
     if not isinstance(payload, dict):
         return "bad"
     origin = str(payload.get("origin") or "")
@@ -6186,7 +6222,11 @@ def clip_accept(cfg: dict, payload: dict, state: dict | None = None) -> str:
         return "hash"
     current = state if isinstance(state, dict) else load_clip_state()
     if sha == str(current.get("last_sha") or "") or sha == str(current.get("self_sha") or ""):
-        return "dup"
+        if held is False:
+            return "apply"
+        if held is True or current.get("write_ok"):
+            return "dup"
+        return "apply"
     try:
         previous = float(current.get("last_ts") or 0)
     except (TypeError, ValueError):
@@ -6200,7 +6240,7 @@ def clip_send(cfg: dict, host_id: str, payload: dict) -> bool:
     target = host_text(cfg, host_id, "ssh")
     if not target:
         return False
-    remote = 'export PATH="$HOME/.local/bin:$PATH"; desk clip apply'
+    remote = clip_remote_command("desk clip apply")
     try:
         proc = subprocess.run(
             ssh_argv(target, remote),
@@ -6366,7 +6406,7 @@ def cmd_clip(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
             target = host_text(cfg, host_id, "ssh")
             if not target:
                 continue
-            remote = 'export PATH="$HOME/.local/bin:$PATH"; desk clip export'
+            remote = clip_remote_command("desk clip export")
             try:
                 proc = subprocess.run(
                     ssh_argv(target, remote),
@@ -6403,25 +6443,40 @@ def cmd_clip(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
     return 2
 
 
+def clip_holds(cfg: dict, payload: dict) -> bool | None:
+    """True when a live read matches this payload. None if the read failed."""
+    local = clip_invoke(cfg, "read")
+    if not isinstance(local, dict) or not local.get("ok"):
+        return None
+    if local.get("sensitive"):
+        return False
+    current = clip_payload_from_read(cfg, local)
+    if current is None:
+        return False
+    return str(current.get("sha256") or "") == str(payload.get("sha256") or "")
+
+
 def cmd_clip_apply(cfg: dict, payload: dict) -> int:
-    reason = clip_accept(cfg, payload)
+    held = clip_holds(cfg, payload)
+    reason = clip_accept(cfg, payload, held=held)
     if reason != "apply":
         log(
             f"clipboard drop {reason} bytes={int(payload.get('bytes') or 0)} "
             f"sha={str(payload.get('sha256') or '')[:12]}"
         )
         return 0 if reason in ("dup", "stale", "sensitive") else 1
+    written = clip_invoke(cfg, "write", payload)
+    if not isinstance(written, dict) or not written.get("ok"):
+        log(f"clipboard local write failed bytes={int(payload.get('bytes') or 0)}")
+        return 1
     state = load_clip_state()
     state["self_sha"] = payload.get("sha256")
     state["last_sha"] = payload.get("sha256")
     state["last_ts"] = payload.get("ts")
     state["last_origin"] = payload.get("origin")
     state["bytes"] = payload.get("bytes")
+    state["write_ok"] = True
     save_clip_state(state)
-    written = clip_invoke(cfg, "write", payload)
-    if not isinstance(written, dict) or not written.get("ok"):
-        log(f"clipboard local write failed bytes={int(payload.get('bytes') or 0)}")
-        return 1
     log(f"clipboard applied bytes={int(payload.get('bytes') or 0)} sha={str(payload.get('sha256') or '')[:12]}")
     return 0
 
@@ -7312,15 +7367,44 @@ def _mark_idle_toggled() -> None:
     _awake_idle_cap_logged = False
 
 
+def _session_env_values() -> dict[str, str]:
+    """Wayland session values, discovering a socket when the variable is unset."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    values = {"XDG_RUNTIME_DIR": runtime}
+    display = os.environ.get("WAYLAND_DISPLAY") or ""
+    if not display:
+        try:
+            sockets = sorted(
+                path.name
+                for path in Path(runtime).glob("wayland-*")
+                if path.is_socket() and not path.name.endswith(".lock")
+            )
+        except OSError:
+            sockets = []
+        display = sockets[0] if sockets else "wayland-1"
+    values["WAYLAND_DISPLAY"] = display
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or ""
+    if not signature:
+        root = Path(runtime) / "hypr"
+        try:
+            names = sorted(path.name for path in root.iterdir() if path.is_dir())
+        except OSError:
+            names = []
+        signature = names[0] if names else ""
+    if signature:
+        values["HYPRLAND_INSTANCE_SIGNATURE"] = signature
+    return values
+
+
 def _session_argv(argv: list[str]) -> list[str]:
     """Run a graphical helper from a systemd --user watcher.
 
     That process often has no WAYLAND_DISPLAY, so `omarchy toggle idle`
     and a bare hypridle do not join the compositor.
     """
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    wayland = os.environ.get("WAYLAND_DISPLAY") or "wayland-1"
-    return ["env", f"XDG_RUNTIME_DIR={runtime}", f"WAYLAND_DISPLAY={wayland}", *argv]
+    values = _session_env_values()
+    prefix = ["env", *[f"{key}={value}" for key, value in values.items()]]
+    return [*prefix, *argv]
 
 
 def _start_hypridle_in_session() -> bool:
