@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "id": "clipboard",
+  "name": "Local clipboard",
+  "capabilities": ["clipboard.read", "clipboard.write"]
+}
