@@ -240,6 +240,58 @@ def read_local(max_bytes: int, images: bool) -> dict:
     return {"ok": False, "error": "no-backend", "sensitive": False, "bytes": 0}
 
 
+def _wayland_readback_ok(mime: str, expect_text: str, raw: bytes) -> bool:
+    try:
+        proc = subprocess.run(
+            ["wl-paste", "--no-newline", "--type", mime],
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+            env=_command_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    if mime == TEXT_MIME:
+        return proc.stdout.decode("utf-8", "replace") == expect_text
+    return proc.stdout == raw
+
+
+def _wayland_copy(data: bytes, mime: str, size: int, expect_text: str) -> dict:
+    """Hand the bytes to wl-copy without waiting for it to finish serving.
+
+    wl-copy stays up to own the selection and would hold an SSH session
+    open. Detach it, then treat the write as ok only when wl-paste reads
+    the same bytes back.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["wl-copy", "--type", mime],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=_command_env(),
+        )
+    except OSError:
+        return {"ok": False, "error": "unavailable", "bytes": size}
+    try:
+        if proc.stdin is not None:
+            proc.stdin.write(data)
+            proc.stdin.close()
+    except (OSError, BrokenPipeError):
+        pass
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+    if _wayland_readback_ok(mime, expect_text, data):
+        kind = "image" if mime == PNG_MIME else "text"
+        return {"ok": True, "bytes": size, "kind": kind}
+    return {"ok": False, "error": "write-failed", "bytes": size}
+
+
 def write_local(payload: dict, max_bytes: int) -> dict:
     kind = str(payload.get("kind") or "text")
     if payload.get("sensitive"):
@@ -255,20 +307,7 @@ def write_local(payload: dict, max_bytes: int) -> dict:
             return _too_big(len(raw), max_bytes)
         if backend != "wayland":
             return {"ok": False, "error": "images-unsupported", "bytes": len(raw)}
-        try:
-            proc = subprocess.run(
-                ["wl-copy", "--type", PNG_MIME],
-                input=raw,
-                capture_output=True,
-                timeout=2.0,
-                check=False,
-                env=_command_env(),
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return {"ok": False, "error": "unavailable", "bytes": len(raw)}
-        if proc.returncode != 0:
-            return {"ok": False, "error": "write-failed", "bytes": len(raw)}
-        return {"ok": True, "bytes": len(raw), "kind": "image"}
+        return _wayland_copy(raw, PNG_MIME, len(raw), "")
     text = payload.get("text")
     if not isinstance(text, str):
         return {"ok": False, "error": "no-text", "bytes": 0}
@@ -276,18 +315,16 @@ def write_local(payload: dict, max_bytes: int) -> dict:
     if size > max_bytes:
         return _too_big(size, max_bytes)
     if backend == "macos":
-        argv = ["pbcopy"]
-    elif backend == "wayland":
-        argv = ["wl-copy", "--type", TEXT_MIME]
-    else:
-        return {"ok": False, "error": "no-backend", "bytes": size}
-    try:
-        proc = run_cmd(argv, input_text=text, timeout=2.0)
-    except (OSError, subprocess.TimeoutExpired):
-        return {"ok": False, "error": "unavailable", "bytes": size}
-    if proc.returncode != 0:
-        return {"ok": False, "error": "write-failed", "bytes": size}
-    return {"ok": True, "bytes": size, "kind": "text"}
+        try:
+            proc = run_cmd(["pbcopy"], input_text=text, timeout=2.0)
+        except (OSError, subprocess.TimeoutExpired):
+            return {"ok": False, "error": "unavailable", "bytes": size}
+        if proc.returncode != 0:
+            return {"ok": False, "error": "write-failed", "bytes": size}
+        return {"ok": True, "bytes": size, "kind": "text"}
+    if backend == "wayland":
+        return _wayland_copy(text.encode("utf-8"), TEXT_MIME, size, text)
+    return {"ok": False, "error": "no-backend", "bytes": size}
 
 
 def main(argv: list[str] | None = None) -> int:

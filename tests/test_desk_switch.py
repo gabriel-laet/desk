@@ -10,6 +10,7 @@ import json
 import os
 from datetime import datetime
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -7225,23 +7226,44 @@ class ClipboardTests(unittest.TestCase):
 
     def test_remote_apply_discovers_the_wayland_session(self) -> None:
         cfg = self._cfg()
+        cfg["hosts"]["tower"]["os"] = "darwin"
         payload = self._payload("hello")
-        seen: list[str] = []
+        seen: dict[str, str] = {}
 
         def fake_run(argv, input=None, capture_output=None, text=None, timeout=None, check=None):
             if argv and argv[0] == "ssh":
-                seen.append(argv[-1])
+                seen[argv[-2]] = argv[-1]
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         with mock.patch.object(ds.subprocess, "run", side_effect=fake_run), mock.patch("sys.stdout", io.StringIO()):
             self.assertTrue(ds.clip_send(cfg, "linux", payload))
-        self.assertEqual(len(seen), 1)
-        command = seen[0]
-        self.assertIn('XDG_RUNTIME_DIR="/run/user/$(id -u)"', command)
-        self.assertIn('"$XDG_RUNTIME_DIR"/wayland-*', command)
-        self.assertIn("HYPRLAND_INSTANCE_SIGNATURE", command)
-        self.assertIn("desk clip apply", command)
-        self.assertNotIn("hello", command)
+            self.assertTrue(ds.clip_send(cfg, "mac", payload))
+            self.assertTrue(ds.clip_send(cfg, "tower", payload))
+        linux_cmd = seen["linux.example"]
+        mac_cmd = seen["mac.example"]
+        tower_cmd = seen["tower.example"]
+        self.assertIn("sh -c ", linux_cmd)
+        quoted = shlex.split(linux_cmd)
+        script = quoted[quoted.index("-c") + 1]
+        self.assertIn('"$XDG_RUNTIME_DIR"/wayland-*', script)
+        self.assertNotIn("wayland-*", linux_cmd.replace(shlex.quote(script), ""))
+        self.assertIn('XDG_RUNTIME_DIR="/run/user/$(id -u)"', linux_cmd)
+        self.assertIn('"$XDG_RUNTIME_DIR"/wayland-*', linux_cmd)
+        self.assertIn("HYPRLAND_INSTANCE_SIGNATURE", linux_cmd)
+        self.assertIn("desk clip apply", linux_cmd)
+        self.assertNotIn("hello", linux_cmd)
+        self.assertNotIn("wayland-", mac_cmd)
+        self.assertNotIn("wayland-", tower_cmd)
+        self.assertIn("desk clip apply", mac_cmd)
+        if shutil.which("zsh"):
+            proc = subprocess.run(
+                ["zsh", "-f", "-o", "nomatch", "-c", ds.clip_remote_command("true", wayland=True)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("no matches found", proc.stderr)
 
     def test_failed_write_is_not_recorded_and_retries(self) -> None:
         cfg = self._cfg()
@@ -7292,6 +7314,52 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(found["HYPRLAND_INSTANCE_SIGNATURE"], "sig-1")
         self.assertNotIn("XDG_RUNTIME_DIR", found)
         self.assertEqual(backend, "wayland")
+
+    def test_wl_copy_timeout_still_counts_when_paste_matches(self) -> None:
+        copied: dict = {}
+
+        class Serving:
+            def __init__(self) -> None:
+                self.stdin = io.BytesIO()
+                self.returncode = None
+
+            def wait(self, timeout: float = 0) -> int:
+                raise subprocess.TimeoutExpired(["wl-copy"], timeout)
+
+            def poll(self) -> None:
+                return None
+
+        def fake_popen(argv, **kwargs):
+            copied["argv"] = argv
+            copied["stdout"] = kwargs.get("stdout")
+            copied["stderr"] = kwargs.get("stderr")
+            copied["new_session"] = kwargs.get("start_new_session")
+            return Serving()
+
+        def fake_run(argv, capture_output=None, timeout=None, check=None, env=None):
+            self.assertEqual(argv[:2], ["wl-paste", "--no-newline"])
+            return subprocess.CompletedProcess(argv, 0, b"hello", b"")
+
+        with mock.patch.object(self.clip, "_backend", return_value="wayland"), mock.patch.object(
+            self.clip.subprocess, "Popen", side_effect=fake_popen
+        ), mock.patch.object(self.clip.subprocess, "run", side_effect=fake_run):
+            result = self.clip.write_local({"kind": "text", "text": "hello"}, 100)
+        self.assertTrue(result["ok"])
+        self.assertEqual(copied["argv"], ["wl-copy", "--type", "text/plain"])
+        self.assertIs(copied["stdout"], subprocess.DEVNULL)
+        self.assertIs(copied["stderr"], subprocess.DEVNULL)
+        self.assertTrue(copied["new_session"])
+        self.assertNotIn("--foreground", copied["argv"])
+
+        def mismatch(argv, capture_output=None, timeout=None, check=None, env=None):
+            return subprocess.CompletedProcess(argv, 0, b"other", b"")
+
+        with mock.patch.object(self.clip, "_backend", return_value="wayland"), mock.patch.object(
+            self.clip.subprocess, "Popen", side_effect=fake_popen
+        ), mock.patch.object(self.clip.subprocess, "run", side_effect=mismatch):
+            missed = self.clip.write_local({"kind": "text", "text": "hello"}, 100)
+        self.assertFalse(missed["ok"])
+        self.assertEqual(missed["error"], "write-failed")
 
 
 if __name__ == "__main__":
