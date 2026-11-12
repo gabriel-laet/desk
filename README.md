@@ -410,7 +410,10 @@ Set `adapters.dualup.peer` to SSH layout-only to the other machine.
 Copy on one host, paste on another. `desk watch` (the same process as
 `hhkb-mx-follow`) polls the local clipboard about twice a second and
 pushes new text to every other configured host that has an `ssh` target.
-Peers apply it locally. Nothing is typed by hand.
+Peers apply it locally, after the remote shell fills in
+`XDG_RUNTIME_DIR` and the first `wayland-*` socket when those are unset.
+Nothing is typed by hand. A failed local write is not recorded, so the
+sender keeps the item and tries again.
 
 Off until `adapters.clipboard` is present. `enabled` then defaults to true.
 

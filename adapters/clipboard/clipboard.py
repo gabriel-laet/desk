@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 ADAPTER_ID = "clipboard"
 ADAPTER_API_VERSION = 1
@@ -39,6 +40,62 @@ def manifest() -> dict:
     }
 
 
+def discover_session_env() -> dict[str, str]:
+    """Fill in the Wayland session when this process was started from SSH or a unit.
+
+    `XDG_RUNTIME_DIR` defaults to `/run/user/<uid>`. `WAYLAND_DISPLAY` is the
+    first `wayland-*` socket there. A Hyprland signature directory is picked
+    up the same way when it is unset.
+    """
+    found: dict[str, str] = {}
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        found["XDG_RUNTIME_DIR"] = runtime
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        display = _first_wayland_display(runtime)
+        if display:
+            found["WAYLAND_DISPLAY"] = display
+    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        signature = _first_hypr_signature(runtime)
+        if signature:
+            found["HYPRLAND_INSTANCE_SIGNATURE"] = signature
+    return found
+
+
+def _first_wayland_display(runtime: str) -> str:
+    try:
+        sockets = sorted(
+            path.name
+            for path in Path(runtime).glob("wayland-*")
+            if path.is_socket() and not path.name.endswith(".lock")
+        )
+    except OSError:
+        return ""
+    return sockets[0] if sockets else ""
+
+
+def _first_hypr_signature(runtime: str) -> str:
+    root = Path(runtime) / "hypr"
+    try:
+        names = sorted(path.name for path in root.iterdir() if path.is_dir())
+    except OSError:
+        return ""
+    return names[0] if names else ""
+
+
+def ensure_session_env() -> dict[str, str]:
+    found = discover_session_env()
+    for key, value in found.items():
+        os.environ.setdefault(key, value)
+    return found
+
+
+def _command_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(ensure_session_env())
+    return env
+
+
 def run_cmd(argv: list[str], input_text: str | None = None, timeout: float = 3.0) -> subprocess.CompletedProcess:
     return subprocess.run(
         argv,
@@ -47,12 +104,14 @@ def run_cmd(argv: list[str], input_text: str | None = None, timeout: float = 3.0
         text=True,
         timeout=timeout,
         check=False,
+        env=_command_env(),
     )
 
 
 def _backend() -> str:
     if sys.platform == "darwin":
         return "macos"
+    ensure_session_env()
     if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DESK_CLIPBOARD_BACKEND") == "wayland":
         return "wayland"
     return "none"
@@ -161,6 +220,7 @@ def read_local(max_bytes: int, images: bool) -> dict:
                     capture_output=True,
                     timeout=2.0,
                     check=False,
+                    env=_command_env(),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 raw = None
@@ -202,6 +262,7 @@ def write_local(payload: dict, max_bytes: int) -> dict:
                 capture_output=True,
                 timeout=2.0,
                 check=False,
+                env=_command_env(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return {"ok": False, "error": "unavailable", "bytes": len(raw)}

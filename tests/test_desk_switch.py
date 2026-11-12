@@ -7136,11 +7136,14 @@ class ClipboardTests(unittest.TestCase):
         cfg = self._cfg()
         payload = self._payload("hello")
         self.assertEqual(ds.clip_accept(cfg, payload, {}), "apply")
-        state = {"last_sha": payload["sha256"], "last_ts": 10.0}
-        self.assertEqual(ds.clip_accept(cfg, payload, state), "dup")
+        remembered = {"last_sha": payload["sha256"], "last_ts": 10.0, "write_ok": True}
+        self.assertEqual(ds.clip_accept(cfg, payload, remembered), "dup")
+        self.assertEqual(ds.clip_accept(cfg, payload, remembered, held=False), "apply")
+        failed = {"last_sha": payload["sha256"], "last_ts": 10.0}
+        self.assertEqual(ds.clip_accept(cfg, payload, failed), "apply")
         older = self._payload("other", ts=9.0)
-        state["last_sha"] = "different"
-        self.assertEqual(ds.clip_accept(cfg, older, state), "stale")
+        remembered["last_sha"] = "different"
+        self.assertEqual(ds.clip_accept(cfg, older, remembered), "stale")
         self.assertEqual(ds.clip_accept(cfg, self._payload("x", origin="mac"), {}), "peer")
         self.assertEqual(ds.clip_accept(cfg, self._payload("nope", origin="stranger"), {}), "peer")
         huge = self._payload("x" * 40)
@@ -7219,6 +7222,76 @@ class ClipboardTests(unittest.TestCase):
                 oversized = self.clip.read_local(8, False)
         self.assertEqual(oversized["error"], "too-large")
         self.assertNotIn("text", oversized)
+
+    def test_remote_apply_discovers_the_wayland_session(self) -> None:
+        cfg = self._cfg()
+        payload = self._payload("hello")
+        seen: list[str] = []
+
+        def fake_run(argv, input=None, capture_output=None, text=None, timeout=None, check=None):
+            if argv and argv[0] == "ssh":
+                seen.append(argv[-1])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(ds.subprocess, "run", side_effect=fake_run), mock.patch("sys.stdout", io.StringIO()):
+            self.assertTrue(ds.clip_send(cfg, "linux", payload))
+        self.assertEqual(len(seen), 1)
+        command = seen[0]
+        self.assertIn('XDG_RUNTIME_DIR="/run/user/$(id -u)"', command)
+        self.assertIn('"$XDG_RUNTIME_DIR"/wayland-*', command)
+        self.assertIn("HYPRLAND_INSTANCE_SIGNATURE", command)
+        self.assertIn("desk clip apply", command)
+        self.assertNotIn("hello", command)
+
+    def test_failed_write_is_not_recorded_and_retries(self) -> None:
+        cfg = self._cfg()
+        payload = self._payload("hello")
+        writes: list[dict] = []
+
+        def fake_invoke(_cfg, verb, body=None):
+            if verb == "read":
+                return {"ok": False, "error": "no-backend", "bytes": 0}
+            writes.append(body or {})
+            return {"ok": False, "error": "no-backend", "bytes": payload["bytes"]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            with mock.patch.dict(os.environ, {"DESK_STATE_DIR": str(state_dir)}), mock.patch.object(
+                ds, "clip_invoke", side_effect=fake_invoke
+            ), mock.patch("sys.stdout", io.StringIO()):
+                rc = ds.cmd_clip_apply(cfg, payload)
+                again = ds.clip_accept(cfg, payload)
+                rc2 = ds.cmd_clip_apply(cfg, payload)
+            saved = state_dir / "clipboard.json"
+        self.assertEqual(rc, 1)
+        self.assertEqual(rc2, 1)
+        self.assertEqual(again, "apply")
+        self.assertFalse(saved.exists())
+        self.assertEqual(len(writes), 2)
+
+    def test_wayland_backend_finds_a_socket_without_the_env_var(self) -> None:
+        import socket
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.bind(str(runtime / "wayland-9"))
+            (runtime / "hypr" / "sig-1").mkdir(parents=True)
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_RUNTIME_DIR": str(runtime)},
+                clear=False,
+            ), mock.patch.object(self.clip.sys, "platform", "linux"):
+                os.environ.pop("WAYLAND_DISPLAY", None)
+                os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+                os.environ.pop("DESK_CLIPBOARD_BACKEND", None)
+                found = self.clip.discover_session_env()
+                backend = self.clip._backend()
+            sock.close()
+        self.assertEqual(found["WAYLAND_DISPLAY"], "wayland-9")
+        self.assertEqual(found["HYPRLAND_INSTANCE_SIGNATURE"], "sig-1")
+        self.assertNotIn("XDG_RUNTIME_DIR", found)
+        self.assertEqual(backend, "wayland")
 
 
 if __name__ == "__main__":
