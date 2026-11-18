@@ -49,9 +49,12 @@ stored or drawn as zero. The hardware token (only on the bar when
 `ui.tray.bar_slots` is true) adds the focused host's highest
 `tools[].limit_used_pct`, skipping tools whose `scope` is `account`.
 The click panel lists each remaining tool's name, plan, highest
-`limits[]` entry (label, percent, reset time), and today's tokens and
-cost when those numbers exist. `llama` is one line (model, tok/s,
-slots) and only when `running` is true.
+tool-wide `limits[]` entry (label, percent, reset time), and today's
+tokens and cost when those numbers exist. A row with `scoped: true`
+is a model limit: it is left out of that headline and printed on the
+next line as `label percent`. When `scoped` is absent, or every row
+is scoped, the headline is still the highest percent. `llama` is one
+line (model, tok/s, slots) and only when `running` is true.
 
 A top-level `ai_accounts` object is one row per shared account, not a
 per-machine sum. Each entry uses the same fields as a tool, plus
