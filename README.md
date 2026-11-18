@@ -410,8 +410,9 @@ Set `adapters.dualup.peer` to SSH layout-only to the other machine.
 Copy on one host, paste on another. `desk watch` (the same process as
 `hhkb-mx-follow`) polls the local clipboard about twice a second and
 pushes new text to every other configured host that has an `ssh` target.
-Peers apply it locally, after the remote shell fills in
-`XDG_RUNTIME_DIR` and the first `wayland-*` socket when those are unset.
+Linux peers apply it locally. The SSH command for those peers is
+`sh -c` and fills in `XDG_RUNTIME_DIR` plus the first `wayland-*`
+socket when those are unset. macOS peers do not get that snippet.
 Nothing is typed by hand. A failed local write is not recorded, so the
 sender keeps the item and tries again.
 
@@ -545,6 +546,7 @@ Edit [`config.example.json`](config.example.json) →
 | `adapters.hosts.<id>.hint` | Short focus token. `mac` stays `MAC` and `linux` stays `LNX`; other ids use `hint` or the id |
 | `adapters.hosts.order` | Optional order for status. Default is key order. A file that only names `mac` and `linux` still loads those two |
 | `adapters.dualup.inputs.*` | Display input for that host (`adapters.display.inputs` is the same map). PBP uses Mac=`hdmi1`, Linux=`dp` when empty. `desk to` with neither this nor `hosts.<id>.dualup_input` / `hosts.<id>.input` says so and leaves the input unchanged |
+| `adapters.hosts.<id>.os` | Optional `darwin` or `linux`. Clipboard SSH uses it to decide whether the peer needs a Wayland session. The id `mac` is Darwin; any other id is Linux |
 | `adapters.hosts.<id>.ssh` | Optional SSH target for that host (`user@192.0.2.10`). Relay and `pre_switch` use it |
 | `adapters.hosts.<id>.pre_switch` | Optional shell command run on that host before `desk to` changes its display input |
 | `adapters.display.relay_hosts` | Ordered host ids. When the local display adapter reports the device absent, try these peers and stop at the first success. `adapters.dualup.relay_hosts` is the same list. Each monitor can set its own |

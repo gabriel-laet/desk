@@ -16,7 +16,10 @@ macOS uses `pbpaste` / `pbcopy`. A pasteboard that advertises
 Wayland uses `wl-paste` / `wl-copy` from `wl-clipboard`. If
 `WAYLAND_DISPLAY` is unset, the helper uses the first `wayland-*` socket
 in `XDG_RUNTIME_DIR` (or `/run/user/<uid>`). A mime
-`x-kde-passwordManagerHint` of `secret` is skipped.
+`x-kde-passwordManagerHint` of `secret` is skipped. `wl-copy` is started
+in its own session with stdout and stderr discarded, because it stays
+running to serve the selection. The write counts only when `wl-paste`
+reads the same bytes back.
 
 `desk watch` is what polls and pushes. `desk clip push` and `desk clip pull`
 are the manual path. Peers receive `desk clip apply` on stdin. The bytes

@@ -6177,13 +6177,34 @@ def clip_session_prefix() -> str:
     )
 
 
-def clip_remote_command(desk_args: str) -> str:
-    return (
-        'export PATH="$HOME/.local/bin:$PATH"; '
-        + clip_session_prefix()
-        + "; "
-        + desk_args
-    )
+def host_platform(cfg: dict, host_id: str) -> str:
+    """`darwin` or `linux` for a configured peer.
+
+    `hosts.<id>.os` wins (`mac` / `darwin` / `linux` / `omarchy`). Otherwise
+    the id `mac` is Darwin and every other id is Linux.
+    """
+    spec = _as_dict((cfg.get("hosts") or {}).get(_host_id(host_id)))
+    raw = str(spec.get("os") or "").strip().lower()
+    if raw in ("mac", "macos", "darwin"):
+        return "darwin"
+    if raw in ("linux", "omarchy", "wayland"):
+        return "linux"
+    if _host_id(host_id) == "mac":
+        return "darwin"
+    return "linux"
+
+
+def clip_remote_command(desk_args: str, *, wayland: bool) -> str:
+    """Remote shell for a clipboard verb.
+
+    The Wayland discovery runs only on Linux peers, and only inside `sh -c`,
+    so a zsh login (nomatch) never sees the `wayland-*` glob.
+    """
+    path = 'export PATH="$HOME/.local/bin:$PATH"; '
+    if not wayland:
+        return path + desk_args
+    inner = clip_session_prefix() + "; " + desk_args
+    return path + "sh -c " + shlex.quote(inner)
 
 
 def clip_accept(cfg: dict, payload: dict, state: dict | None = None, *, held: bool | None = None) -> str:
@@ -6240,7 +6261,7 @@ def clip_send(cfg: dict, host_id: str, payload: dict) -> bool:
     target = host_text(cfg, host_id, "ssh")
     if not target:
         return False
-    remote = clip_remote_command("desk clip apply")
+    remote = clip_remote_command("desk clip apply", wayland=host_platform(cfg, host_id) != "darwin")
     try:
         proc = subprocess.run(
             ssh_argv(target, remote),
@@ -6406,7 +6427,10 @@ def cmd_clip(cfg: dict, verb: str | None, *, as_json: bool = False) -> int:
             target = host_text(cfg, host_id, "ssh")
             if not target:
                 continue
-            remote = clip_remote_command("desk clip export")
+            remote = clip_remote_command(
+                "desk clip export",
+                wayland=host_platform(cfg, host_id) != "darwin",
+            )
             try:
                 proc = subprocess.run(
                     ssh_argv(target, remote),
