@@ -355,28 +355,70 @@ def highest_limit_used(ai: object) -> float | None:
     return best
 
 
-def _highest_limit_entry(tool: dict) -> tuple[str, float | None, str]:
+def _limit_items(tool: dict) -> list[dict]:
     limits = tool.get("limits")
-    best_label = ""
+    if not isinstance(limits, list):
+        return []
+    return [item for item in limits if isinstance(item, dict)]
+
+
+def _is_scoped_limit(item: dict) -> bool:
+    """A model-scoped row. Missing or any other value stays tool-wide."""
+    return item.get("scoped") is True
+
+
+def _pick_limit(items: list[dict]) -> dict | None:
+    best: dict | None = None
     best_pct: float | None = None
-    best_reset = ""
-    if isinstance(limits, list):
-        for item in limits:
-            if not isinstance(item, dict):
-                continue
-            pct = metric_number(item.get("used_pct"))
-            if pct is None:
-                continue
-            if best_pct is not None and pct <= best_pct:
-                continue
-            best_pct = pct
-            best_label = clean_text(item.get("label") if isinstance(item.get("label"), str) else "")
-            best_reset = short_reset(item.get("resets_at"))
-    if best_pct is None:
-        rollup = metric_number(tool.get("limit_used_pct"))
-        if rollup is not None:
-            return "", rollup, ""
-    return best_label, best_pct, best_reset
+    for item in items:
+        pct = metric_number(item.get("used_pct"))
+        if pct is None:
+            continue
+        if best_pct is not None and pct <= best_pct:
+            continue
+        best = item
+        best_pct = pct
+    return best
+
+
+def _entry_from_item(item: dict) -> tuple[str, float | None, str]:
+    label = clean_text(item.get("label") if isinstance(item.get("label"), str) else "")
+    return label, metric_number(item.get("used_pct")), short_reset(item.get("resets_at"))
+
+
+def _highest_limit_entry(tool: dict) -> tuple[str, float | None, str]:
+    """Headline limit. `scoped: true` rows are skipped when a tool-wide row exists.
+
+    If every row is scoped, or none of them has a percent, the previous
+    rule applies: the highest percent in the list, else `limit_used_pct`.
+    """
+    items = _limit_items(tool)
+    if items:
+        chosen = _pick_limit([item for item in items if not _is_scoped_limit(item)])
+        if chosen is None:
+            chosen = _pick_limit(items)
+        if chosen is not None:
+            return _entry_from_item(chosen)
+    rollup = metric_number(tool.get("limit_used_pct"))
+    if rollup is not None:
+        return "", rollup, ""
+    return "", None, ""
+
+
+def _scoped_limit_text(tool: dict) -> str:
+    """Compact `label percent` list for model-scoped rows that are not the headline."""
+    items = _limit_items(tool)
+    if _pick_limit([item for item in items if not _is_scoped_limit(item)]) is None:
+        return ""
+    parts: list[str] = []
+    for item in items:
+        if not _is_scoped_limit(item):
+            continue
+        label, pct, _reset = _entry_from_item(item)
+        if pct is None:
+            continue
+        parts.append(" ".join(part for part in (label, format_pct(pct)) if part))
+    return " · ".join(parts)
 
 
 def _today_text(tool: dict) -> str:
@@ -404,8 +446,9 @@ def _tool_block(tool: dict, index: int) -> dict | None:
         limit = " ".join(part for part in (limit_label, format_pct(limit_pct)) if part)
     elif limit_label:
         limit = limit_label
+    scoped = _scoped_limit_text(tool)
     today = _today_text(tool)
-    if not name and not plan and not limit and not resets and not today:
+    if not name and not plan and not limit and not resets and not today and not scoped:
         return None
     block: dict = {"id": raw_id or name or f"tool-{index}"}
     if name:
@@ -416,6 +459,8 @@ def _tool_block(tool: dict, index: int) -> dict | None:
         block["limit"] = limit
     if resets:
         block["resets"] = resets
+    if scoped:
+        block["scoped"] = scoped
     if today:
         block["today"] = today
     return block
@@ -492,6 +537,8 @@ def format_ai_text(blocks: list[dict]) -> str:
                 bits.append(f"resets {tool['resets']}")
             if bits:
                 lines.append("  " + " · ".join(bits))
+            if tool.get("scoped"):
+                lines.append(f"  {tool['scoped']}")
             if tool.get("today"):
                 lines.append(f"  {tool['today']}")
         llama = host.get("llama") if isinstance(host.get("llama"), dict) else {}

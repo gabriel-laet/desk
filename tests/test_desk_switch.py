@@ -5719,7 +5719,73 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(gamma["plan"], "free")
         self.assertEqual(gamma["limit"], "burst 40%")
         self.assertEqual(gamma["today"], "10 tok")
+        self.assertNotIn("scoped", gamma)
         self.assertNotIn("today_cost_usd", gamma)
+
+    def test_model_scoped_limits_stay_off_the_headline(self) -> None:
+        def snapshot(limits: list[dict], *, rollup: float = 75) -> dict:
+            payload = {
+                "hosts": {
+                    "linux": {
+                        "online": True,
+                        "last_seen": "2026-11-09T22:56:12Z",
+                        "cpu_temp_c": 40,
+                        "ai": {
+                            "tools": [
+                                {
+                                    "id": "alpha",
+                                    "name": "Alpha",
+                                    "plan": "pro",
+                                    "limit_used_pct": rollup,
+                                    "limits": limits,
+                                }
+                            ]
+                        },
+                    }
+                }
+            }
+            return self.hw.build_snapshot(
+                payload,
+                {"desk_hosts": ["linux"], "labels": {"linux": "LNX"}, "show": ["cpu_temp_c"]},
+                "linux",
+                now=self._now(),
+            )
+
+        weekly = {"label": "Weekly", "used_pct": 75, "resets_at": "2026-11-15T00:00:00Z"}
+        model = {"label": "model weekly", "title": "Weekly", "used_pct": 100, "scoped": True}
+        mixed = snapshot([weekly, model])
+        self.assertEqual(mixed["token"], "40° 75%")
+        tool = mixed["slot"]["ai"][0]["tools"][0]
+        self.assertEqual(tool["limit"], "Weekly 75%")
+        self.assertEqual(tool["resets"], "11-15 00:00Z")
+        self.assertEqual(tool["scoped"], "model weekly 100%")
+        text = mixed["slot"]["ai_text"]
+        self.assertIn("Weekly 75% · resets 11-15 00:00Z", text)
+        self.assertIn("model weekly 100%", text)
+        self.assertLess(text.index("Weekly 75%"), text.index("model weekly 100%"))
+
+        plain = snapshot(
+            [
+                {"label": "Weekly", "used_pct": 75, "resets_at": "2026-11-15T00:00:00Z"},
+                {"label": "model weekly", "title": "Weekly", "used_pct": 100},
+            ]
+        )
+        unmarked = plain["slot"]["ai"][0]["tools"][0]
+        self.assertEqual(unmarked["limit"], "model weekly 100%")
+        self.assertNotIn("scoped", unmarked)
+        self.assertNotIn("Weekly 75%", plain["slot"]["ai_text"])
+
+        only_scoped = snapshot(
+            [
+                {"label": "Weekly", "used_pct": 75, "scoped": True},
+                {"label": "model weekly", "used_pct": 100, "scoped": True},
+            ],
+            rollup=100,
+        )
+        fallback = only_scoped["slot"]["ai"][0]["tools"][0]
+        self.assertEqual(fallback["limit"], "model weekly 100%")
+        self.assertNotIn("scoped", fallback)
+        self.assertNotIn("Weekly 75%", only_scoped["slot"]["ai_text"])
 
     def test_null_limit_is_not_zero_and_zero_is_kept(self) -> None:
         payload = {
